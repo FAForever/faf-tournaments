@@ -2246,7 +2246,8 @@ function drawPickPhase(el) {
       ? (n === 1 ? 'The one player who went through unbeaten chooses who they play.'
         : 'The ' + n + ' players who went through unbeaten each choose who they play, in seed order.')
         + ' Everyone else is then drawn against each other at random, a different record against each other where possible.'
-      : `The top ${p.half} seeds each choose who they play, in seed order.`;
+      : `The top ${p.half} seeds each choose who they play, in seed order.`
+        + (T.tiebreak === 'beaten' && p.forWhat === 'stage2' ? ' Seeds come from the Swiss record, then the sum of the scores of the opponents each player beat.' : '');
     body += `<p class="muted small" style="margin:2px 0 12px">${esc(who)}
       ${p.perPickMs ? 'Each pick has a time limit; if it runs out, the standard bracket matchup is used.' : 'There is no time limit.'}</p>`;
     if (p.myTurn) {
@@ -2341,13 +2342,13 @@ function playoffActionsHTML(onBracket) {
     ${onBracket ? '<span class="muted small">Organizers only, until the first playoff match starts. Who picks is set on the Admin tab.</span>' : ''}
   </div>`;
 }
-async function playoffRedo(pick, minutes) {
+async function playoffRedo(pick, minutes, tiebreak) {
   const what = pick === 'off'
     ? 'The playoff bracket is taken down and seeded again from the Swiss standings.'
     : 'The picks start again from the first picker' + (pick === 'unbeaten' ? ', and whoever nobody picks is drawn again.' : '.');
   if (!confirm('Redo the playoffs?\n\n' + what + '\n\nOnly possible while no playoff match has started.')) return false;
   try {
-    const r = await api('/api/t/' + T.id + '/playoff_setup', { pick, minutes, redo: 1, admin: adminToken() });
+    const r = await api('/api/t/' + T.id + '/playoff_setup', { pick, minutes, tiebreak, redo: 1, admin: adminToken() });
     toast('Playoffs set up again' + (r.droppedPools ? ' (' + r.droppedPools + ' per-match map pool setting' + (r.droppedPools === 1 ? '' : 's') + ' cleared)' : ''));
     await refresh();
     return true;
@@ -2390,10 +2391,13 @@ function playoffSetupPanelHTML() {
   return `<div class="panel section" id="playoffPanel"><h2>Playoffs</h2>
     <p class="muted small" style="margin:6px 0 10px">${esc(state)}</p>
     ${P.locked
-      ? `<div class="infocell"><div class="mono small muted">SET UP AS</div><div>${esc(playoffPickText(P.pick))}</div></div>`
+      ? `<div class="infocell"><div class="mono small muted">SET UP AS</div><div>${esc(playoffPickText(P.pick))}</div><div class="muted small">${esc(swissTiebreakText(T.tiebreak))}</div></div>`
       : `<label>When the Swiss stage ends</label>
     <select id="po_pick">${opt('off')}${opt('half')}${opt('unbeaten')}</select>
     <div id="po_help" class="muted small" style="margin:6px 0 0"></div>
+    <label>Order within the same record</label>
+    <select id="po_tb"><option value="gd"${T.tiebreak !== 'beaten' ? ' selected' : ''}>Game difference</option><option value="beaten"${T.tiebreak === 'beaten' ? ' selected' : ''}>Sum of the scores of the opponents beaten, then random</option></select>
+    <div class="muted small" style="margin:6px 0 0">Decides who goes through, the playoff seeds and so who picks and in what order.</div>
     <div id="po_minsRow" class="row" style="gap:10px;align-items:flex-end;margin-top:8px">
       <div style="width:170px"><div class="muted small">Time limit per pick</div><input type="number" id="po_mins" min="0" max="1440" value="${T.pickMinutes || 0}"></div>
       <div class="muted small" style="flex:1;padding-bottom:8px">Minutes. 0 means no limit. A pick that runs out of time gets the standard bracket matchup.</div>
@@ -2413,6 +2417,8 @@ function wirePlayoffSetup() {
   const full = cut >= 4 && (cut & (cut - 1)) === 0;
   const c = swissCutCfg(T);
   const example = (c.win && c.loss >= 3) ? ' (' + c.win + '-1 against ' + c.win + '-2)' : '';
+  const tb = document.getElementById('po_tb');
+  const changed = () => sel.value !== P.pick || (tb && tb.value !== (T.tiebreak === 'beaten' ? 'beaten' : 'gd'));
   const sync = () => {
     const v = sel.value;
     document.getElementById('po_minsRow').style.display = v === 'off' ? 'none' : '';
@@ -2423,16 +2429,18 @@ function wirePlayoffSetup() {
         : 'Standard seeding: the best Swiss record meets the lowest qualifier, and so on.';
     if (v !== 'off' && !full) h += ' Picking needs a playoff of 4, 8, 16 or 32 players; with ' + cut + ' it is seeded instead.';
     help.textContent = h;
-    save.textContent = (P.made && v !== P.pick) ? 'Redo the playoffs with this setting' : 'Save';
+    save.textContent = (P.made && changed()) ? 'Redo the playoffs with this setting' : 'Save';
   };
   sel.onchange = sync;
+  if (tb) tb.onchange = sync;
   sync();
   save.onclick = async () => {
     const v = sel.value;
     const m = parseInt(mins.value, 10) || 0;
-    if (P.made && v !== P.pick) { await playoffRedo(v, m); return; }
+    const tbv = tb ? tb.value : undefined;
+    if (P.made && changed()) { await playoffRedo(v, m, tbv); return; }
     try {
-      await api('/api/t/' + T.id + '/playoff_setup', { pick: v, minutes: m, admin: adminToken() });
+      await api('/api/t/' + T.id + '/playoff_setup', { pick: v, minutes: m, tiebreak: tbv, admin: adminToken() });
       toast('Playoff setup saved');
       await refresh();
     } catch (e) { toast(e.message, true); }

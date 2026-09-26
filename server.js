@@ -31,6 +31,7 @@ const PICKS = require('./lib/picks');
 const { swissPairRound, swissAfterReport, swissStandings,
         swissCuts, swissCutRounds, swissRecord, swissAdvanced, swissPlanRound1, swissShufflePlan,
         stageTwoCfg, stageTwoField, stageTwoBuild, swissStageDone, swissFinishIfDone,
+        swissTiebreakMode, swissTiebreakValues,
         swissRound1Open, swissSetRound1, swissShuffleRound1 } = require('./lib/swiss');
 const { ffaCreateRound, ffaAfterReport, ffaRank } = require('./lib/ffa');
 // Team formation and map lookups.
@@ -610,6 +611,15 @@ const PICK_FIELD_MSG = n => 'Opponent picking needs a full bracket (4, 8, 16, 32
 function pickClockMs(t) {
   const mins = parseInt(t && t.pickMinutes, 10) || 0;
   return mins > 0 ? mins * 60000 : null;
+}
+// The team this viewer PLAYS on, by FAF identity. "It is your pick" is decided on this, never on
+// teamsIManage: an organizer may act for every team, and deciding "your turn" on that told every
+// organizer and site admin it was THEIR pick whenever anyone was on the clock.
+function ownTeamIds(t, req) {
+  const sess = currentSession(req);
+  if (!sess) return [];
+  const me = (t.players || []).find(p => p.fafId === sess.fafId);
+  return (me && me.teamId) ? [me.teamId] : [];
 }
 function teamsIManage(t, req, token) {
   // Every team this viewer can act for: their own, plus all of them for an organizer.
@@ -1757,6 +1767,12 @@ function publicView(t) {
     cfg: t.cfg || null, stage2: t.stage2 || null, preset: t.preset || null, presetName: t.presetName || null,
     pickOpponents: t.pickOpponents ? 1 : 0, pickMinutes: t.pickMinutes || 0, pickMode: cleanPickMode(t.pickMode),
     playoffs: playoffStatus(t),
+    // The Swiss table in the server's own order, so the page never re-derives a tiebreak it could
+    // get wrong (the 'beaten' one has a seeded coin flip in it), plus the numbers behind it.
+    tiebreak: swissTiebreakMode(t),
+    swissOrder: (t.bracketType === 'swiss' && t.competition === 'team' && (t.status === 'running' || t.status === 'finished'))
+      ? swissStandings(t).map(r => r.teamId) : null,
+    swissSB: (t.bracketType === 'swiss' && t.competition === 'team') ? swissTiebreakValues(t) : null,
     stopAtAlive: t.stopAtAlive || 0, aliveCount: aliveTeamCount(t),
     swissR1Open: (t.bracketType === 'swiss' && t.status === 'running' && swissRound1Open(t)) ? 1 : 0,
     seeding: t.seeding, ratingType: t.ratingType || 'global', ratingDate: t.ratingDate || null,
@@ -2589,6 +2605,8 @@ async function handleAPI(req, res, url) {
       pickOpponents: b.pickOpponents ? 1 : 0,
       pickMinutes: intIn(b.pickMinutes, 0, 1440, 0),
       pickMode: cleanPickMode(b.pickMode),
+      // Swiss: how equal records are ordered ('gd' game difference, or 'beaten' - see lib/swiss.js)
+      tiebreak: b.tiebreak === 'beaten' ? 'beaten' : 'gd',
       // declared up front so the bracket can say so from the start (0 = play it out)
       stopAtAlive: intIn(b.stopAtAlive, 0, 128, 0),
       cfg: null, maps: {}, mapDb: [], mapPools: [], poolAssign: {},
@@ -3560,7 +3578,9 @@ async function handleAPI(req, res, url) {
       const organizer = isAdmin(t, tok, req) || isOrganizer(t, req);
       // The pick phase is viewer-specific (it has to say "your pick"), so it is attached here
       // rather than in publicView. Absent entirely when the tournament does not pick opponents.
-      view.picks = PICKS.pickView(t, teamsIManage(t, req, tok));
+      // "Your pick" means the viewer's OWN team is on the clock. An organizer still gets the pick
+      // buttons ("pick on behalf of") - the page offers those to organizers separately.
+      view.picks = PICKS.pickView(t, ownTeamIds(t, req));
       if (view.picks) view.picks.forWhat = t.pickFor || 'main';
       const streamer = !organizer && isCaster(t, req);
       // Who organizes a tournament is visible to its organizers and site admins only.
@@ -4827,15 +4847,20 @@ async function handleAPI(req, res, url) {
       const pick = ['off', 'half', 'unbeaten'].indexOf(b.pick) >= 0 ? b.pick : null;
       if (!pick) return bad(res, 'Choose who picks: nobody, the top half of the seeds, or the unbeaten');
       const minutes = intIn(b.minutes, 0, 1440, parseInt(t.pickMinutes, 10) || 0);
+      // The tiebreak decides the playoff seeds - who picks, in what order, and where they sit - so
+      // it is part of the playoff setup. Absent means "leave it as it is".
+      const tiebreak = b.tiebreak === undefined ? swissTiebreakMode(t) : (b.tiebreak === 'beaten' ? 'beaten' : 'gd');
       const made = playoffsMade(t);
       const was = playoffPickSetting(t);
       const redo = !!b.redo && made;
-      if (made && pick !== was && !redo) {
+      if (made && (pick !== was || tiebreak !== swissTiebreakMode(t)) && !redo) {
         return bad(res, 'The playoffs are already set up. Redo them to use a different setting.');
       }
       if (redo && playoffsLocked(t)) {
         return bad(res, 'A playoff match has already started, so the playoffs can no longer be redone.');
       }
+      const tbChanged = tiebreak !== swissTiebreakMode(t);
+      t.tiebreak = tiebreak;
       applyPlayoffPick(t, pick, minutes);
       const label = { off: 'seeded from the Swiss standings, no picks',
         half: 'the top half of the playoff seeds pick their opponent',
@@ -4843,12 +4868,14 @@ async function handleAPI(req, res, url) {
       let reset = null;
       if (redo) {
         reset = resetPlayoffs(t);
-        tlog(t, req, b.admin, 'redid the playoffs (' + label + ')'
+        tlog(t, req, b.admin, 'redid the playoffs (' + label
+          + (tiebreak === 'beaten' ? '; equal records by the scores of the opponents beaten' : '') + ')'
           + (reset.droppedPools ? ' - ' + reset.droppedPools + ' per-match map pool setting(s) on the old matches were cleared' : ''));
         swissFinishIfDone(t);
       } else {
         tlog(t, req, b.admin, 'set the playoffs to: ' + label
-          + (pick !== 'off' ? (minutes ? ' (' + minutes + ' min per pick)' : ' (no time limit)') : ''));
+          + (pick !== 'off' ? (minutes ? ' (' + minutes + ' min per pick)' : ' (no time limit)') : '')
+          + (tbChanged ? '; equal records now ordered by ' + (tiebreak === 'beaten' ? 'the scores of the opponents beaten' : 'game difference') : ''));
         // Nothing made although the Swiss is over (it could not be built at the time): make it now.
         if (!made && swissStageDone(t)) swissFinishIfDone(t);
       }
@@ -5348,6 +5375,7 @@ async function handleAPI(req, res, url) {
         if (b.pickOpponents !== undefined) t.pickOpponents = b.pickOpponents ? 1 : 0;
         if (b.pickMinutes !== undefined) t.pickMinutes = intIn(b.pickMinutes, 0, 1440, t.pickMinutes || 0);
         if (b.pickMode !== undefined) t.pickMode = cleanPickMode(b.pickMode);
+        if (b.tiebreak !== undefined) t.tiebreak = b.tiebreak === 'beaten' ? 'beaten' : 'gd';
         if (b.stopAtAlive !== undefined) t.stopAtAlive = intIn(b.stopAtAlive, 0, 128, t.stopAtAlive || 0);
         const pb = b.plan || {};
         const op = (t.plan && typeof t.plan === 'object') ? t.plan : {};

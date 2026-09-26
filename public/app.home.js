@@ -375,6 +375,9 @@ async function renderHost() {
             <label style="display:flex;align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text)">
               <input type="checkbox" id="pSwFast"> Fast pairing \u2014 next matchup starts as soon as two teams are free
             </label>
+            <div style="margin-top:8px"><div class="muted small">Order within the same record</div>
+              <select id="pTiebreak"><option value="gd" selected>Game difference</option><option value="beaten">Sum of the scores of the opponents beaten, then random</option></select>
+              <div class="muted small" style="margin-top:4px">Decides the standings between equal records, and with a playoff stage who goes through, the playoff seeds and who picks first.</div></div>
 
             <label style="display:flex;align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text);margin-top:12px">
               <input type="checkbox" id="pSwCuts"> Finish on record instead of a round count
@@ -786,6 +789,7 @@ async function renderHost() {
     setv('pSwS2Cut', pl.s2CutTo || 8); setv('pSwS2Type', pl.s2Type || 'single');
     setv('pSwS2Bo', pl.s2Bo || 3); setv('pSwS2Final', pl.s2Final || 5);
     setc('pPickPhase', a.pickPhase); setv('pPickMins', a.pickMinutes || 0); setv('pPickMode', a.pickMode || 'half');
+    setv('pTiebreak', a.tiebreak || 'gd');
     if (info) {
       info.style.display = '';
       info.innerHTML = '<div class="mono small muted">' + esc(p.name.toUpperCase()) + '</div>'
@@ -857,6 +861,7 @@ async function renderHost() {
     setv('cDraftOrder', t.draftOrder || 'linear');
     setv('cSeed', t.seeding || '');
     setc('pPickPhase', t.pickOpponents); setv('pPickMins', t.pickMinutes || 0); setv('pPickMode', t.pickMode || 'half');
+    setv('pTiebreak', t.tiebreak || 'gd');
     setc('pStopOn', t.stopAtAlive); setv('pStopAt', t.stopAtAlive || 4);
     // plan / Bo
     const pl = t.plan || {};
@@ -930,6 +935,7 @@ async function renderHost() {
         pickOpponents: pickOn,
         pickMinutes: pickOn ? pv('pPickMins') : 0,
         pickMode: (document.getElementById('pPickMode') || {}).value || 'half',
+        tiebreak: bt === 'swiss' ? ((document.getElementById('pTiebreak') || {}).value || 'gd') : 'gd',
         stopAtAlive: stopOn ? pv('pStopAt') : 0,
         description: document.getElementById('cDesc').value,
         category,

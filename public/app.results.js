@@ -325,12 +325,16 @@ function drawStandings(el) {
     const note = [];
     if (cuts.on) note.push(swissCutLabel(T));
     if (s2) note.push('top ' + s2.cutTo + ' go through to the playoff bracket');
+    // The 'beaten' tiebreak is invisible unless its numbers are on the table.
+    const byBeaten = T.tiebreak === 'beaten';
+    const sbOf = id => (T.swissSB && T.swissSB[id] != null) ? T.swissSB[id] : 0;
     el.innerHTML = `<div class="panel section"><h2>Swiss <span class="h2-strong">Standings</span></h2>
       ${note.length ? `<p class="muted small" style="margin:-4px 0 10px">${esc(note.join(' \u00b7 '))}</p>` : ''}
-      <table><thead><tr><th>#</th><th>Team</th><th>W</th><th>L</th><th>Game diff</th>${head}</tr></thead><tbody>
+      ${byBeaten ? `<p class="muted small" style="margin:-4px 0 10px">${esc(swissTiebreakText('beaten'))}</p>` : ''}
+      <table><thead><tr><th>#</th><th>Team</th><th>W</th><th>L</th>${byBeaten ? '<th title="Sum of the Swiss scores (wins) of the opponents this player beat">Beaten opp.</th>' : ''}<th>Game diff</th>${head}</tr></thead><tbody>
       ${rows.map((r, i) => `<tr class="${r.state === 'eliminated' ? 'row-out' : ''} ${i === 0 ? 'rank1' : i === 1 ? 'rank2' : i === 2 ? 'rank3' : ''}">
         <td class="mono">${i + 1}</td><td>${esc(teamName(r.id))}${T.championTeamId === r.id ? ' 🏆' : ''}</td>
-        <td class="mono">${r.w}</td><td class="mono">${r.l}</td><td class="mono">${r.gd > 0 ? '+' : ''}${r.gd}</td>${stateCell(r)}</tr>`).join('')}
+        <td class="mono">${r.w}</td><td class="mono">${r.l}</td>${byBeaten ? `<td class="mono">${sbOf(r.id)}</td>` : ''}<td class="mono">${r.gd > 0 ? '+' : ''}${r.gd}</td>${stateCell(r)}</tr>`).join('')}
       </tbody></table></div>`;
     return;
   }
@@ -647,6 +651,9 @@ async function drawAdmin(el) {
           <label style="display:flex;align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text)">
             <input type="checkbox" id="af_swfast"${p.fast ? ' checked' : ''}> Fast pairing \u2014 next matchup starts as soon as two teams are free
           </label>
+          <div style="margin-top:8px"><div class="muted small">Order within the same record</div>
+            <select id="af_tiebreak"><option value="gd"${T.tiebreak !== 'beaten' ? ' selected' : ''}>Game difference</option><option value="beaten"${T.tiebreak === 'beaten' ? ' selected' : ''}>Sum of the scores of the opponents beaten, then random</option></select>
+            <div class="muted small" style="margin-top:4px">Decides the standings between equal records, and with a playoff stage who goes through, the playoff seeds and who picks first.</div></div>
 
           <label style="display:flex;align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text);margin-top:12px">
             <input type="checkbox" id="af_swcuts"${(p.winCut || p.lossCut) ? ' checked' : ''}> Finish on record instead of a round count
@@ -1584,6 +1591,7 @@ async function drawAdmin(el) {
         body.pickOpponents = pickOn ? 1 : 0;
         body.pickMinutes = pickOn ? g('af_pickMins').value : 0;
         if (g('af_pickMode')) body.pickMode = g('af_pickMode').value;
+        if (g('af_tiebreak') && g('af_bt').value === 'swiss') body.tiebreak = g('af_tiebreak').value;
         body.bracketType = g('af_bt').value;
         body.perRoundBo = (g('af_perRound') && g('af_perRound').checked) ? 1 : 0;
         if (g('af_bt').value === 'single') body.plan = { early: g('af_early').value, semi: g('af_semi').value, final: g('af_final').value };

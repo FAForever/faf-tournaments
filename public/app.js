@@ -842,8 +842,21 @@ function swissTable(t) {
       else if (quota && r.played >= quota) r.state = 'done';
     } else if (quota && r.played >= quota) r.state = 'done';
   }
-  // Same order as swissSort on the server: wins, then fewer losses, then game difference.
+  // The server sends the table in its own order (T.swissOrder) - that is the order the cut and the
+  // playoff seeds come from, and its tiebreak can include a seeded coin flip this page cannot
+  // repeat. The local sort is only a fallback for a view that does not carry the order.
+  if (Array.isArray(t.swissOrder) && t.swissOrder.length) {
+    const pos = {};
+    t.swissOrder.forEach((id, i) => { pos[id] = i; });
+    return Object.values(S).sort((a, b) => (pos[a.id] != null ? pos[a.id] : 1e9) - (pos[b.id] != null ? pos[b.id] : 1e9));
+  }
   return Object.values(S).sort((a, b) => b.w - a.w || a.l - b.l || b.gd - a.gd || teamSeed(a.id) - teamSeed(b.id));
+}
+// How equal Swiss records are ordered, in words. One sentence, used wherever it is explained.
+function swissTiebreakText(mode) {
+  return mode === 'beaten'
+    ? 'Equal records are ordered by the sum of the Swiss scores (wins) of the opponents each player beat, then at random.'
+    : 'Equal records are ordered by game difference.';
 }
 
 // Each team's W-L as it stood going INTO `round` - i.e. the score group a pairing came out of.

@@ -51,6 +51,18 @@ Zero runtime dependencies: plain Node.js (built-in `http` only), JSON file stora
   has the same number of wins, so the losses term is what puts a 3-0 above a 3-1 above a 3-2. It
   used to go straight to game difference, and with Bo3 deciders a 3-2 who won three deciders 2-0
   (+4) out-ranked a 3-0 who won one 2-1 (+3) - and took the better playoff seed with it.
+- **The tiebreak between equal records is a per-tournament choice**: game difference (the default,
+  and what every existing tournament keeps), or the **sum of the Swiss scores of the opponents a
+  player beat, then random** - the Invitational's rule ("highest sum of total score of the
+  opponents you beat - if its equal then just random order"). A player's number is the current
+  wins of everyone they beat; a bye beats nobody. The coin flip is seeded from the tournament's
+  draw seed, so it cannot be predicted and always comes out the same. With a playoff stage it
+  decides who goes through, the playoff seeds, and so who picks and in what order: with "the top
+  half pick", the two 3-0s pick first and then the two best 3-1s by this number. Set it on the
+  Format panel, or on the Playoffs panel while the Swiss runs (once the playoffs exist, changing it
+  means redoing them). With it on, the standings show a **Beaten opp.** column so the order can be
+  checked. The standings table takes its order from the server, so the page can never disagree
+  with the seeds.
 - **Correcting a Swiss result after the playoffs are set up** makes them again from the corrected
   standings, if the correction changed who went through, their order or their records (a score
   typo that changes none of that leaves them alone). Once a playoff match has started the Swiss
@@ -164,6 +176,7 @@ Zero runtime dependencies: plain Node.js (built-in `http` only), JSON file stora
 ### Player-chosen opponents
 - Optional per tournament. Instead of the bracket pairing round one, the **top half of the seeds each choose who they play**, in seed order. LotS has always done this by DM to the tournament director; this is the same thing on the site.
 - Whoever is on the clock sees a clear call to action on the Bracket tab and in the header alert, exactly like a veto turn. Everyone else can watch the pairings fill in. An organizer can pick on anyone's behalf, and can undo the last pick while the phase is still open.
+- **"It is your pick" goes to the player on the clock and nobody else.** It used to be decided on every team the viewer is allowed to act for, which for an organizer or site admin is all of them - so they were told it was their pick whenever anyone was picking. Organizers now see who it is waiting on, with the "pick on behalf of" buttons.
 - An optional **time limit per pick** stops one absent player stalling the event. When a clock runs out the site uses the matchup the standard bracket would have given them, so failing to pick lands you exactly where you would have been anyway rather than punishing you. There is no background timer: lapsed clocks are applied the next time anyone loads the page.
 - It needs a **full bracket** (4, 8, 16, 32...). With any other field size the bracket has byes, and a bye is a free win nobody chose and nobody can pick, so there is no honest way to say whose opponent it is. Starting is refused with that explanation; if it happens mid-event on a playoff bracket the bracket is seeded normally and the reason is posted to the chat rather than stalling the tournament.
 - On a two-stage tournament the pick phase runs on the **playoff bracket**, opening automatically when the Swiss stage ends. On a Swiss with no second stage it does nothing - Swiss round 1 is drawn or arranged by hand instead - and the setting says so on its label.
