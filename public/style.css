@@ -1363,20 +1363,22 @@ tr.row-out > td { opacity: .55; }
   background: rgba(255, 255, 255, .07);
 }
 .pick-clock.urgent { background: var(--danger, #e5484d); color: #fff; }
-.pick-list { margin-top: 12px; border-top: 1px solid var(--line, #2a2f37); }
-.pick-row {
+/* The pairing rows have class names of their own. As .pick-list / .pick-row they also matched the
+   compact clickable lists further up (a wrapping row of small bordered chips), so each pairing was
+   squeezed into a box of its own and every name was cut off. Names wrap rather than truncate. */
+.opp-list { margin-top: 12px; border-top: 1px solid var(--line, #2a2f37); }
+.opp-row {
   display: flex; align-items: center; gap: 10px;
   padding: 7px 4px; border-bottom: 1px solid var(--line, #2a2f37);
 }
-.pick-row.turn { background: rgba(255, 255, 255, .04); }
-.pick-seed {
+.opp-row.turn { background: rgba(255, 255, 255, .04); }
+.opp-seed {
   width: 26px; text-align: center; flex: none;
   color: var(--muted, #8b93a1); font-size: 12px;
 }
-.pick-name { flex: 1 1 40%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pick-vs { flex: none; font-size: 12px; }
-.pick-target { flex: 1 1 40%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pick-pending { color: var(--amber, #d99a2b); font-style: italic; }
+.opp-name, .opp-target { flex: 1 1 40%; min-width: 0; overflow-wrap: anywhere; }
+.opp-vs { flex: none; font-size: 12px; }
+.opp-pending { color: var(--amber, #d99a2b); font-style: italic; }
 .pick-choose { margin-top: 14px; }
 .pick-opts { display: flex; flex-wrap: wrap; gap: 8px; }
 .pick-opts .btn { margin: 0; }
@@ -1384,9 +1386,10 @@ tr.row-out > td { opacity: .55; }
 .playoff-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
 .playoff-actions .btn { margin: 0; }
 @media (max-width: 560px) {
-  .pick-row { flex-wrap: wrap; gap: 4px 8px; }
-  .pick-name, .pick-target { flex-basis: calc(100% - 40px); }
-  .pick-vs { display: none; }
+  .opp-row { flex-wrap: wrap; gap: 4px 8px; }
+  .opp-name, .opp-target { flex-basis: calc(100% - 40px); }
+  .opp-target { margin-left: 34px; }   /* under the name, not under the seed number */
+  .opp-vs { display: none; }
 }
 
 /* ---- read-only rating check (Players tab) ---- */

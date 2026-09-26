@@ -2258,20 +2258,21 @@ function drawPickPhase(el) {
     }
   }
 
-  // the pairings so far
+  // the pairings so far. Class names of their own (opp-*): as .pick-list / .pick-row they picked up
+  // the compact clickable-list styles, a wrapping row of small chips, which cut every name off.
   const rows = p.order.map(id => {
     const pick = p.picks[id];
     const isTurn = p.status === 'open' && id === p.turn;
-    return `<div class="pick-row${isTurn ? ' turn' : ''}">
-      <span class="pick-seed mono">${seedOf(id)}</span>
-      <span class="pick-name">${esc(nm(id))}${recOf(id) ? ' <span class="muted mono small">' + esc(recOf(id)) + '</span>' : ''}</span>
-      <span class="pick-vs muted">vs</span>
-      <span class="pick-target">${pick
+    return `<div class="opp-row${isTurn ? ' turn' : ''}">
+      <span class="opp-seed mono">${seedOf(id)}</span>
+      <span class="opp-name">${esc(nm(id))}${recOf(id) ? ' <span class="muted mono small">' + esc(recOf(id)) + '</span>' : ''}</span>
+      <span class="opp-vs muted">vs</span>
+      <span class="opp-target">${pick
         ? esc(nm(pick)) + ' ' + tag(pick)
-        : (isTurn ? '<span class="pick-pending">choosing\u2026</span>' : '<span class="muted">\u2014</span>')}</span>
+        : (isTurn ? '<span class="opp-pending">choosing\u2026</span>' : '<span class="muted">\u2014</span>')}</span>
     </div>`;
   }).join('');
-  body += `<div class="pick-list">${rows}</div>`;
+  body += `<div class="opp-list">${rows}</div>`;
 
   // the picker's own controls
   if (p.status === 'open' && (p.myTurn || org) && (p.available || []).length) {
