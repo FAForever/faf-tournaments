@@ -1380,6 +1380,9 @@ tr.row-out > td { opacity: .55; }
 .pick-choose { margin-top: 14px; }
 .pick-opts { display: flex; flex-wrap: wrap; gap: 8px; }
 .pick-opts .btn { margin: 0; }
+/* undo the last pick / redo the playoffs: organizers, until the first playoff match starts */
+.playoff-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.playoff-actions .btn { margin: 0; }
 @media (max-width: 560px) {
   .pick-row { flex-wrap: wrap; gap: 4px 8px; }
   .pick-name, .pick-target { flex-basis: calc(100% - 40px); }

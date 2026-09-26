@@ -18,10 +18,26 @@ Zero runtime dependencies: plain Node.js (built-in `http` only), JSON file stora
   stored on the tournament, so it is unpredictable in advance but reproducible afterwards - an
   organizer can always show that a round was drawn the way the record says. Byes are drawn at
   random too, among those who have not had one.
-- **Round 1 can be arranged by hand.** There are no records to pair on in the opening round, so
-  the site draws it; an organizer can rearrange it from the Bracket tab, or re-draw it at random.
-  Validated so every player appears exactly once (with the leftover taking the bye in an odd
-  field), and locked the moment the first result comes in.
+- **The draw depends on wins, losses and the seed, and nothing else.** Score groups are keyed on the
+  win-loss record alone, and the shuffle inside a group starts from seed order - it used to start
+  from the standings order, which is sorted by game difference, so a changed score could move the
+  draw even though nobody's record changed. Measured over 4000 draws, like-with-like pairings come
+  out at exactly the uniform rate. Game difference decides only which player floats down from an
+  odd group, never who plays whom inside one.
+- **Each Swiss match shows its score group** (`2-1`, `1-2`, or `2-1 vs 1-2` for a floated pairing),
+  and each round is listed best group first. It is the record the players brought *into* that round,
+  not their current one - once round 4 is played everyone in it is 2-2.
+- **Every planned round gets a map-pool slot**, including rounds not yet opened, so the next round's
+  pool can be set before it is played. With record cuts the planned count is derived (3/3 is five
+  rounds); it used to fall back to log2 of the field and show four.
+- **Round 1 can be arranged by hand, before the stage starts.** There are no records to pair on in
+  the opening round, so the site draws it; an organizer can set the matchups on the Bracket tab as
+  soon as the entrants are locked, or re-draw them at random. They are pinned and applied the
+  instant the stage starts, so nobody can lock them by opening a veto first - which is exactly how
+  they were lost in a live event when the editor only existed after the start. A pinned plan is
+  checked again at the start and dropped (the normal draw takes over) if the field has changed;
+  reopening signups clears it. After the start the same editor still works until the first result
+  or veto action. Every player appears exactly once, with the leftover taking the bye in an odd field.
 - **The deciding round pairs across the two streams.** The last score group is a merge: players
   who *fell* into it from a better record, and players who *climbed* into it from a worse one.
   That round puts the two against each other - "the 2-2 from the upper side plays the 2-2 from
@@ -31,6 +47,16 @@ Zero runtime dependencies: plain Node.js (built-in `http` only), JSON file stora
   one of the other 10 was mathematically forced.
 - **Deciding-match length** (optional, with record cuts): a match where a win qualifies someone or a loss knocks them out can be played at a different best-of from the rest. LotS runs Bo1 throughout and Bo3 for those.
 - **Two stages in one tournament** (optional): a Swiss stage can cut its qualified field into a single- or double-elimination playoff bracket inside the same tournament - one page, one chat, one set of standings, no second event and no invites to accept. The playoff bracket is seeded from the Swiss standings and appears above the Swiss rounds on the Bracket tab.
+- **Swiss standings rank wins, then fewer losses**, then game difference, then seed. Every qualifier
+  has the same number of wins, so the losses term is what puts a 3-0 above a 3-1 above a 3-2. It
+  used to go straight to game difference, and with Bo3 deciders a 3-2 who won three deciders 2-0
+  (+4) out-ranked a 3-0 who won one 2-1 (+3) - and took the better playoff seed with it.
+- **Correcting a Swiss result after the playoffs are set up** makes them again from the corrected
+  standings, if the correction changed who went through, their order or their records (a score
+  typo that changes none of that leaves them alone). Once a playoff match has started the Swiss
+  results are locked, the same rule as a Swiss round with later rounds played on top of it. A
+  correction the site refuses (a 3 in a Bo3, say) now changes nothing at all; it used to leave the
+  match reopened.
 - **Per-match best-of**: an organizer can retune one specific match from its Details popup, as long as it has not started. This is the escape hatch for a single series on the day; the per-round control below is still the bulk tool.
 - Best-of per round: set presets at creation, or turn on **per-round Bo** to give every winners/losers/grand-final round its own best-of. Per-round Bo is editable on the Bracket tab both before generation (on the preview) and after (on the live bracket, affecting only rounds whose matches haven't started). The format summary collapses equal consecutive rounds, e.g. "WB R1-2 Bo3 - WB R3 Bo5 - LB R1-2 Bo1 - GF Bo5".
 - First-round byes are not drawn. A seed with a bye appears directly in its round-2 match, which keeps large brackets compact. The losers bracket hides the phantom matches that byes would create, matching exactly what the engine generates.
@@ -55,7 +81,7 @@ Zero runtime dependencies: plain Node.js (built-in `http` only), JSON file stora
 - Captain draft with pick order (bottom-to-top every round, or snake) and a live pick-order display.
 - **How captains are chosen** is an option on the Teams tab: either the organizer marks them by hand (the default), or the organizer sets a number and the highest-rated N players become captains automatically. The number is editable right up until the draft starts, and the automatic list is worked out at that moment, so late signups, withdrawals and rating corrections are all reflected. Players still awaiting approval in request-mode signups are never picked. A live preview shows exactly who would be captain. A captain can undo their own most recent pick until the next captain picks; the organizer can undo the last pick at any time.
 - Solo brackets: every signup is an entrant.
-- Seeding by rating or random, with a manual seed override before the bracket starts (reorder, nudge, randomize, reset). During team formation, the Teams tab lists teams by combined rating and shows each team's projected seed (its rank by rating) until real seeds are locked.
+- Seeding by rating or random, with a manual seed override before the bracket starts (reorder, nudge, randomize, reset to rating, or **order by invite** - the order the invites went out, with anyone never invited keeping their order after them). The override works on every bracket type, Swiss included, and on a solo field it sits on the **Players tab** as well as the Admin tab. It is open between locking the entrants and starting. On a Swiss a seed only sets the round-1 draw and the last standings tiebreak, and the panel says so. During team formation, the Teams tab lists teams by combined rating and shows each team's projected seed (its rank by rating) until real seeds are locked.
 - King/Prince divisions: split full teams into skill divisions by combined rating, each playing its own bracket (single/double elim only).
 - Free agents (players not yet on a team) get their own prominent panel with a card per player, sortable by rating, name or newest, showing the pool's average rating and invite/assign actions.
 - Withdrawing or removing a player detaches them cleanly from any team (captain reassigns to the next member; emptied teams are removed during signup), so teams never keep a "ghost" slot.
@@ -77,6 +103,7 @@ Zero runtime dependencies: plain Node.js (built-in `http` only), JSON file stora
 - A veto is closed automatically when its match gets a result. A match settled mid-veto (a forfeit, or an organizer correction) leaves a veto that can never be acted on again, so it is marked **CLOSED** and moved out of the in-progress list rather than sitting there forever. Undoing the result reopens it.
 - Every veto shows a numbered **ban / pick order** log - which team banned or picked which map, in the order it happened, ending with the decider. It is shown both while the veto is running and after it completes.
 - Maps are referenced by id everywhere and resolved to names at display time, so renaming a map updates it everywhere and deleting one cascades cleanly.
+- **Secret maps.** A map can be marked secret: it stays in the pool and can be banned or picked, but players see it as **"Hidden Map N"** with a blank tile until it is going to be played - picked for a game, left as the decider, pinned to a round, or in a result. From then on it is named everywhere. This is separate from publish/hide (a hidden map is not shown at all; a secret one is shown without its identity). The name, picture, description and spec are withheld **by the server**, so they never reach the browser. Revealing a secret map when it is *banned* is an option on the veto settings, off by default. Casters see it as players do; organizers see the real name with a badge saying which Hidden Map number players know it by. Secrecy is kept when maps are imported into another tournament.
 
 ### Running a tournament
 - Running scores (e.g. 1-0 in a Bo3) display live. Everything upcoming lives on the Matches tab; the overview's old "up next" queue was removed as a duplicate of it.
@@ -86,7 +113,8 @@ Zero runtime dependencies: plain Node.js (built-in `http` only), JSON file stora
 - Organizer score reporting supports an explicit winner and replay IDs together: you can record a match as, say, 1-1 with one team marked the winner (green) and keep the replay IDs - useful when a series was tied and decided by a forfeit. A pure forfeit (no games played) marks the losing side "FF" and awards the win; either way the correct team advances and the match is tagged FORFEIT.
 - A personal **Show players** toggle swaps team names for that team's players everywhere they appear: the bracket, the Matches tab, the Vetoes tab (including the ban/pick log and A/B legend) and the match-details popup. Labels stay on one line and truncate with an ellipsis, with the full team name on hover. Labels stay on one line and truncate with an ellipsis, and the score is never pushed out of view.
 - Clicking a team anywhere in the bracket opens a popup listing its members, ratings, captain, seed, and combined rating.
-- Player editing at any time (this is also the substitution mechanism).
+- Player editing at any time.
+- **Replacing a player** keeps their slot - team, seed and every result so far - and puts someone else in it: either someone from the standby list, or **anyone on FAF, looked up by FAF name or FAF id**. An outside replacement is verified against FAF, checked against the ban list, refused if they already hold a slot, and taken from the standby list instead of duplicated if they are on it. Their rating comes from the tournament's board; a hand-typed one is accepted only when FAF has none. A team's own name ("Blue Squad") is kept when its captain is replaced; only a name derived from the captain follows. Both names go in the log.
 - Standings tab: placements for elimination formats, W/L/game-diff for Swiss, points leaderboard for FFA.
 
 ### Matches tab
@@ -138,12 +166,32 @@ Zero runtime dependencies: plain Node.js (built-in `http` only), JSON file stora
 - Whoever is on the clock sees a clear call to action on the Bracket tab and in the header alert, exactly like a veto turn. Everyone else can watch the pairings fill in. An organizer can pick on anyone's behalf, and can undo the last pick while the phase is still open.
 - An optional **time limit per pick** stops one absent player stalling the event. When a clock runs out the site uses the matchup the standard bracket would have given them, so failing to pick lands you exactly where you would have been anyway rather than punishing you. There is no background timer: lapsed clocks are applied the next time anyone loads the page.
 - It needs a **full bracket** (4, 8, 16, 32...). With any other field size the bracket has byes, and a bye is a free win nobody chose and nobody can pick, so there is no honest way to say whose opponent it is. Starting is refused with that explanation; if it happens mid-event on a playoff bracket the bracket is seeded normally and the reason is posted to the chat rather than stalling the tournament.
-- On a two-stage tournament the pick phase runs on the **playoff bracket**, opening automatically when the Swiss stage ends.
+- On a two-stage tournament the pick phase runs on the **playoff bracket**, opening automatically when the Swiss stage ends. On a Swiss with no second stage it does nothing - Swiss round 1 is drawn or arranged by hand instead - and the setting says so on its label.
+- **Who picks on a playoff bracket** is a choice: the **top half of the playoff seeds** (seeds 1-4 of
+  8 pick from 5-8, the original rule), or **only the unbeaten** - the players who came through the
+  Swiss without a loss, the 3-0s of a 3/3 stage. The unbeaten may pick anyone else who qualified.
+  Everyone left over is then **drawn against each other at random, on different records where
+  possible** (3-1 against 3-2), with as many such pairs as the leftovers allow - measured, the draw
+  never pairs two 3-1s when a 3-1 v 3-2 split exists, and each possible draw comes up equally often.
+  Each picker keeps their seed's usual slot, so the two 3-0s are on opposite sides and can only meet
+  in the final; the drawn matches fill the other slots, best seed first. The draw is seeded like the
+  Swiss draw: unpredictable beforehand, reproducible afterwards. If nobody went through unbeaten there
+  is nothing to pick and every matchup is drawn. Both options need a playoff of 4, 8, 16 or 32.
+- **It stays open while the Swiss is played.** The Format panel locks when the stage starts, so the
+  **Playoffs** panel on the Admin tab takes over: who picks (nobody, the top half, or the unbeaten)
+  and the clock can be changed right up to the end of the Swiss.
+- **And it can be undone after the Swiss is over.** Once the playoffs exist - a pick phase, or the
+  bracket - an organizer can **undo the last pick** even after it built the bracket (the last pick is
+  the one that builds it instantly, and the likeliest mis-click), or **redo the playoffs**: a fresh
+  pick phase and a fresh draw, with a different setting if wanted. Both are on the Bracket tab above
+  the playoffs and on the Admin tab, and both stay possible until the first playoff match starts - a
+  result, a score, a pending report, or a single map or faction ban. A playoff round lengthened on
+  the day keeps its length through a redo.
 
 ### Format presets
 - A preset is a named bundle of settings that fills the create form in one click. It configures features; it never adds any.
 - **Invitational**: 16 invited players, Swiss where three wins qualify and three losses eliminate, every match Bo1, then the eight who came through play a single-elimination playoff bracket (Bo3 to a Bo5 final).
-- **Legend of the Stars (LotS)**: the same, plus Bo3 for any match that would qualify a player or knock them out, and opponent picking on the playoff bracket.
+- **Legend of the Stars (LotS)**: the same, plus Bo3 for any match that would qualify a player or knock them out, and opponent picking on the playoff bracket (the top half of the playoff seeds by default, or only the 3-0s with the rest drawn).
 - Both are restricted to **global tournament directors and site admins**, and both force the tournament to the Official category. The restriction is enforced server-side when the tournament is created, not by hiding an option in a dropdown - posting the preset id directly gets a 403. Everyone can see the presets exist and what they are, so a community organizer understands why they cannot pick one.
 - The preset id is stored on the tournament and its name is shown in the format line, so what a tournament claims to be is verifiable afterwards. Everything it filled in stays editable: a preset is a starting point, not a lock.
 
@@ -301,6 +349,7 @@ A **global tournament director** is not a site admin. What the role grants:
 ### FAF renames
 - A player's display name used to be stamped on at signup and never looked at again, so anyone who renamed on FAF kept appearing under their old name - in the player list, the bracket, and the 1v1 team that was named after them. There is no rename webhook from FAF, so names now resync **opportunistically**: whenever that account opens a tournament they are in, and on the cross-tournament pending sweep, which already walks every tournament and so corrects all of them at once.
 - A solo team named after the player follows the rename; a team the captain has **spent their one rename on** is left alone, because that name is theirs and not a mirror of the account. Chat history is deliberately not rewritten - each message records who said it at the time. The rename is written to the tournament log.
+- Organizers can also **check for renames** on the Admin tab (Player names). The check is read-only: it lists everyone whose FAF name has changed since signup, with the entry that would move with them, and nothing is written until the organizer ticks who to update - sometimes the old name is the one to keep. A player FAF does not answer for is reported as unchecked, never as unchanged, and players added by hand are counted separately.
 
 ### Vetoes tab
 - Opening a **map pool** shows exactly how its veto will run before it happens: the numbered ban/pick sequence, which side acts first and why, the decider, and whether the sequence completes upfront or step by step. Players no longer meet the sequence for the first time when it is their turn.
@@ -349,7 +398,8 @@ Access is by FAF identity when FAF login is on. The roles:
 - Adding someone by raw FAF id (directors, organizers, roles) resolves the id to their real FAF login, so lists show a name rather than "FAF 123456".
 - **Site admin** - a FAF-linked identity with full control of the server, including deletion. Site admins are managed in the `/siteadmin` console (add/remove by FAF name or id, with a last-admin guard). The `ADMIN_PASSWORD` is not itself an admin login; it is used once to *link* the currently logged-in FAF account as a site admin (log in with FAF, then submit the password on `/siteadmin`). Because that link always re-adds, the password holder can never be locked out.
 - **Tournament director** - has organizer rights on all official tournaments, plus a director console (bans, logs, archived tournaments, articles). Managed by site admins.
-- **Organizer** - whoever creates a tournament. Any organizer can add co-organizers to their own tournament (by FAF name or id); only a site admin can remove one. With FAF login on, organizers are recognised by their FAF identity. (The old "organizer link" has been removed; add organizers via the Organizers panel instead.)
+- **Organizer** - whoever creates a tournament, plus anyone an organizer adds. **Any organizer can add or remove any other organizer** in the Organizers panel (by FAF name or id), or leave the team themselves - it is trust-based. The one guard: an organizer cannot remove the *last* organizer and leave the event with nobody to run it; a site admin still can. Removals are written to the tournament log and the site audit log under the name of the organizer who did it.
+- **There is no organizer link.** With FAF login on, organizers are recognised by their FAF account and only by that. The tournament's legacy admin token - which the old organizer link carried, and which the creator's browser is still handed at creation - grants nothing: no organizer rights, no map access, and no seat via `claim_organizer` (which now answers 410 and says to ask an organizer). That is also what makes a removal real. It used to keep working after the link left the UI, so an old link from Discord history made whoever opened it an organizer, and a removed organizer kept full power through it. With FAF login off the token is the only credential there is, so it still works there.
 - **Editor** and **Importer** - request-or-grant roles. A user can request the role and a site admin approves in the Requests tab, or a site admin grants it directly. Importer allows using the Challonge importer; editor allows editing content as configured.
 - **Captains** - with FAF login on, captains act by their FAF identity: they draft on their turn, invite/approve teammates, ban/pick in the veto, report their matches, and get one team rename in team games.
 - **Bans** - site admins and directors can ban FAF accounts from participating.

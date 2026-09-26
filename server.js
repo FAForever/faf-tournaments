@@ -30,7 +30,7 @@ const { PRESETS, presetById, presetsFor } = require('./lib/presets');
 const PICKS = require('./lib/picks');
 const { swissPairRound, swissAfterReport, swissStandings,
         swissCuts, swissCutRounds, swissRecord, swissAdvanced, swissPlanRound1, swissShufflePlan,
-        stageTwoCfg, stageTwoField, stageTwoBuild,
+        stageTwoCfg, stageTwoField, stageTwoBuild, swissStageDone, swissFinishIfDone,
         swissRound1Open, swissSetRound1, swissShuffleRound1 } = require('./lib/swiss');
 const { ffaCreateRound, ffaAfterReport, ffaRank } = require('./lib/ffa');
 // Team formation and map lookups.
@@ -286,12 +286,19 @@ function getT(id) { return db.tournaments[id] || null; }
 // works. The tournament's organizer-link token, however, only grants rights to a LOGGED-IN
 // account while FAF login is on — an anonymous visitor holding the link can view, not act.
 // (With FAF login off, legacy behaviour is unchanged: the token alone is enough.)
+// The tournament's admin token is the LEGACY organizer credential: what the old "organizer link"
+// carried, and what the creator's browser is handed at creation. The link was removed from the UI,
+// but the token went on granting full organizer rights - and map access, and a seat via
+// claim_organizer - to anyone holding it: anyone sent an old link, and any organizer who had since
+// been removed. With FAF login on, organizers are recognised by their FAF account and ONLY by that,
+// so the token grants nothing. With login off it is the only credential that exists, so it keeps
+// working there. Every place that honours the token asks this one helper.
+function adminTokenGrants(t, token) {
+  return !FAF_OAUTH_ON && !!token && token === t.adminToken;
+}
 function isAdmin(t, token, req) {
   if (isSiteAdmin(req)) return true;        // linked site-admin session
-  if (!token) return false;
-  if (token !== t.adminToken) return false;
-  if (FAF_OAUTH_ON && !currentSession(req)) return false;
-  return true;
+  return adminTokenGrants(t, token);
 }
 // Approved articles editor: a FAF account the site admin confirmed for FAQ/Rules editing only.
 function editorSession(req) {
@@ -372,8 +379,8 @@ function canHost(req, token) {
   return !!db.hostAllowed[sess.fafId];
 }
 
-// A tournament's authorized organizers: the creator's FAF id plus anyone who claimed the
-// organizer link while logged in. Site admin always counts.
+// A tournament's authorized organizers: the creator's FAF id plus anyone an organizer added in the
+// Organizers panel (organizer links are gone - see adminTokenGrants). Site admin always counts.
 // A tournament is "official" only when explicitly tagged so (site admin sets this).
 function isOfficial(t) { return t && t.category === 'official'; }
 // Series name colours. A fixed palette rather than free-form hex, so a series can never end up
@@ -509,8 +516,14 @@ function cleanSwissExtras(src, prev) {
 
 // Turn the stored extras into the t.stage2 record the swiss engine consumes. Returns null
 // when stage 2 is off, which is what clears it on a re-generate.
+// Who picks their playoff opponent when a Swiss stage feeds a bracket: 'half' (the top half of
+// the playoff seeds, the original rule) or 'unbeaten' (only those who went through without a
+// loss; everyone else is drawn). Anything else is 'half', which is what every tournament created
+// before the choice existed has always done.
+function cleanPickMode(v) { return v === 'unbeaten' ? 'unbeaten' : 'half'; }
+
 function buildStageTwo(ex, cfgSrc) {
-  // ex.pickPhase is threaded in by the caller from t.pickOpponents
+  // ex.pickPhase and ex.pickMode are threaded in by the caller from t.pickOpponents / t.pickMode
   if (!ex.stage2) return null;
   const c = cfgSrc || {};
   const cut = ex.s2CutTo;
@@ -521,13 +534,14 @@ function buildStageTwo(ex, cfgSrc) {
       type: 'double', cutTo: cut,
       wb: cleanBoList(Array.isArray(c.s2wb) && c.s2wb.length ? c.s2wb : spread(ex.s2Bo), R),
       lb: cleanBoList(Array.isArray(c.s2lb) && c.s2lb.length ? c.s2lb : spread(ex.s2Bo), Math.max(2 * R - 2, 1)),
-      gf: ex.s2Gf, lbHandicap: ex.s2Hcap ? 1 : 0, pickPhase: ex.pickPhase ? 1 : 0, built: 0, field: []
+      gf: ex.s2Gf, lbHandicap: ex.s2Hcap ? 1 : 0, pickPhase: ex.pickPhase ? 1 : 0,
+      pickMode: cleanPickMode(ex.pickMode), built: 0, field: []
     };
   }
   return {
     type: 'single', cutTo: cut,
     rounds: cleanBoList(Array.isArray(c.s2rounds) && c.s2rounds.length ? c.s2rounds : spread(ex.s2Final), R),
-    pickPhase: ex.pickPhase ? 1 : 0, built: 0, field: []
+    pickPhase: ex.pickPhase ? 1 : 0, pickMode: cleanPickMode(ex.pickMode), built: 0, field: []
   };
 }
 
@@ -608,14 +622,40 @@ function teamsIManage(t, req, token) {
   return out;
 }
 // Called by lib/swiss when a stage-2 bracket is due and its field picks its own matchups.
+// Returns true when the pick phase owns the build - including when one is ALREADY running for
+// the playoffs. That second case used to return false, and lib/swiss then built a seeded bracket
+// behind the pick phase's back: correcting any Swiss result while the playoff picks were open
+// did exactly that, and the picks that followed were silently thrown away.
 function openStagePicks(t, field) {
-  if (PICKS.pickPhaseOf(t)) return false;          // already running or finished
+  if (PICKS.pickPhaseOf(t)) return t.pickFor === 'stage2';
   if (!PICKS.fullBracket((field || []).length)) {
     // Mid-event is the worst possible moment to refuse, so the playoff bracket is built the
     // normal way and the reason is said out loud rather than silently swallowed.
     tpush(t, 'System', 'Opponent picking was skipped: it needs a full bracket (4, 8, 16, 32...) and '
       + (field || []).length + ' came through. The playoff bracket is seeded from the standings instead.');
     return false;
+  }
+  const nm = id => { const tm = teamById(t, id); return tm ? tm.name : id; };
+  if (t.stage2 && t.stage2.pickMode === 'unbeaten') {
+    const rec = swissRecord(t);
+    const records = {};
+    for (const id of field) records[id] = rec[id] ? (rec[id].wins + '-' + rec[id].losses) : '';
+    const pickers = field.filter(id => rec[id] && rec[id].losses === 0);
+    if (!PICKS.startPickPhase(t, field, { perPickMs: pickClockMs(t), mode: 'unbeaten',
+      pickers, records, drawKey: playoffDrawKey(t) })) return false;
+    t.pickFor = 'stage2';
+    const ph = PICKS.pickPhaseOf(t);
+    if (!ph.order.length) {
+      tpush(t, 'System', 'The Swiss stage is over. Nobody went through unbeaten, so there are no picks: every playoff matchup is drawn.');
+      buildAfterPicks(t);
+      return true;
+    }
+    tpush(t, 'System', 'The Swiss stage is over. ' + (ph.order.length === 1
+      ? nm(ph.order[0]) + ' went through unbeaten and now chooses a playoff opponent.'
+      : 'The ' + ph.order.length + ' players who went through unbeaten (' + ph.order.map(nm).join(', ')
+        + ') now choose their playoff opponent, in seed order.')
+      + ' The rest are then drawn, different records against each other where possible.');
+    return true;
   }
   if (!PICKS.startPickPhase(t, field, { perPickMs: pickClockMs(t) })) return false;
   t.pickFor = 'stage2';
@@ -641,6 +681,8 @@ function buildAfterPicks(t) {
   const ph = PICKS.pickPhaseOf(t);
   if (!ph || ph.status !== 'done' || ph.applied) return false;
   const slots = PICKS.pickedSlots(t);
+  // The draw of whoever nobody picked is kept on the record, so it can be shown and checked.
+  if (ph.mode === 'unbeaten') ph.drawn = PICKS.drawRemainder(t);
   ph.applied = now();
   if (t.pickFor === 'stage2') {
     stageTwoBuild(t, slots);
@@ -652,8 +694,156 @@ function buildAfterPicks(t) {
     if (t.status !== 'finished') t.status = 'running';
   }
   const nm = id => { const tm = teamById(t, id); return tm ? tm.name : id; };
-  tpush(t, 'System', 'All opponents chosen: ' + Object.keys(ph.picks)
-    .map(k => nm(k) + ' vs ' + nm(ph.picks[k])).join(' \u00b7 ') + '.');
+  const vs = pr => nm(pr[0]) + ' vs ' + nm(pr[1]);
+  const chosen = ph.order.filter(k => ph.picks[k]).map(k => [k, ph.picks[k]]);
+  if (ph.mode === 'unbeaten') {
+    const drawn = (ph.drawn || []).map(vs).join(' \u00b7 ');
+    tpush(t, 'System', chosen.length
+      ? 'All opponents chosen: ' + chosen.map(vs).join(' \u00b7 ') + '.' + (drawn ? ' Drawn: ' + drawn + '.' : '')
+      : 'Playoff matchups drawn: ' + drawn + '.');
+  } else {
+    tpush(t, 'System', 'All opponents chosen: ' + chosen.map(vs).join(' \u00b7 ') + '.');
+  }
+  return true;
+}
+
+// ---------- the playoff setup of a Swiss stage ----------
+// Everything below exists so the playoffs of a Swiss stage stay changeable until they are
+// actually being played: who picks can be decided while the Swiss runs, and once the playoffs
+// exist they can be set up again - a fresh pick phase, a fresh draw - until the first playoff
+// match starts. "Just worried we can't undo it when the games are over."
+
+// 'off' | 'half' | 'unbeaten' - what happens when the Swiss stage ends.
+function playoffPickSetting(t) {
+  const s2 = t && t.stage2;
+  if (!s2 || !s2.pickPhase) return 'off';
+  return cleanPickMode(s2.pickMode);
+}
+// The matches of the playoff bracket. On a Swiss with a second stage every elimination match
+// belongs to it: the classic top-2 final ('gf') is switched off whenever stage 2 is on.
+function playoffMatches(t) {
+  return (t.matches || []).filter(m => m.bracket === 'wb' || m.bracket === 'lb' || m.bracket === 'gf');
+}
+// Has anything happened in this match that a redo would destroy? A result, a live score, a
+// pending report, or a single map or faction choice.
+function matchTouched(m) {
+  if (m.status === 'done' || m.status === 'live') return true;
+  if (Array.isArray(m.games) && m.games.length) return true;
+  if (m.pendingReport) return true;
+  if (m.veto && ((m.veto.stepIndex || 0) > 0 || (m.veto.banned || []).length || (m.veto.picks || []).length)) return true;
+  if (m.fveto && m.fveto.games) {
+    for (const g of Object.values(m.fveto.games)) {
+      for (const side of [g && g.t1, g && g.t2]) {
+        if (side && ((side.bans || []).length || (side.picks || []).length)) return true;
+      }
+    }
+  }
+  return false;
+}
+// The playoffs exist in some form: a pick phase for them, or the bracket itself.
+function playoffsMade(t) {
+  const s2 = stageTwoCfg(t);
+  if (!s2) return false;
+  return !!(s2.built || (PICKS.pickPhaseOf(t) && t.pickFor === 'stage2'));
+}
+function playoffsLocked(t) {
+  return playoffMatches(t).some(matchTouched);
+}
+// Seed of the draw of the players nobody picked. A redo bumps the counter, so it draws afresh.
+function playoffDrawKey(t) {
+  return String((t.cfg && t.cfg.drawSeed) || t.id) + '#playoffs#' + ((t.stage2 && t.stage2.redraws) || 0);
+}
+// What the playoffs are made FROM: who went through, in seed order, on what record. When a
+// corrected Swiss result leaves this unchanged, nothing the playoffs depend on has moved.
+function playoffSig(t) {
+  const rec = swissRecord(t);
+  return JSON.stringify(stageTwoField(t).map(id => id + ':' + (rec[id] ? rec[id].wins + '-' + rec[id].losses : '?')));
+}
+// Take the playoffs back to "not made yet". keepPicks leaves the pick phase in place (used by
+// undoing the last pick after the bracket was already built from it); otherwise the pick phase
+// goes too and the next draw is a fresh one. Refuses nothing - callers check playoffsLocked first.
+function resetPlayoffs(t, keepPicks) {
+  const s2 = stageTwoCfg(t);
+  if (!s2) return { removed: 0 };
+  const gone = playoffMatches(t);
+  // A TD who lengthened a playoff round on the day keeps that length through a redo.
+  const firstBo = (br, r) => { const m = gone.find(x => x.bracket === br && x.round === r); return m ? m.bo : null; };
+  if (gone.length) {
+    if (s2.type === 'double') {
+      if (Array.isArray(s2.wb)) s2.wb = s2.wb.map((bo, i) => firstBo('wb', i + 1) || bo);
+      if (Array.isArray(s2.lb)) s2.lb = s2.lb.map((bo, i) => firstBo('lb', i + 1) || bo);
+      const gf = gone.find(x => x.bracket === 'gf');
+      if (gf) s2.gf = gf.bo;
+    } else if (Array.isArray(s2.rounds)) {
+      s2.rounds = s2.rounds.map((bo, i) => firstBo('wb', i + 1) || bo);
+    }
+  }
+  const ids = {};
+  for (const m of gone) ids[m.id] = 1;
+  t.matches = (t.matches || []).filter(m => !ids[m.id]);
+  let dropped = 0;
+  for (const id of Object.keys(ids)) {
+    // those match rooms and per-match settings can never be reached again
+    if (t.chat) delete t.chat['match:' + id];
+    if (t.chatPings) delete t.chatPings['match:' + id];
+    if (t.poolAssign && t.poolAssign['match:' + id]) { delete t.poolAssign['match:' + id]; dropped++; }
+  }
+  for (const tm of (t.teams || [])) delete tm.stage2Seed;
+  s2.built = 0;
+  s2.field = [];
+  if (!keepPicks) {
+    if (t.pickFor === 'stage2') { t.pickPhase = null; t.pickFor = null; }
+    s2.redraws = (s2.redraws || 0) + 1;
+  }
+  return { removed: gone.length, droppedPools: dropped };
+}
+// Store who picks, on the tournament AND on the stage-2 record the Swiss engine reads, so the two
+// can never disagree. A pick phase already running takes the new clock straight away.
+function applyPlayoffPick(t, pick, minutes) {
+  t.pickOpponents = pick === 'off' ? 0 : 1;
+  if (pick !== 'off') t.pickMode = pick;
+  t.pickMinutes = minutes;
+  if (t.stage2) {
+    t.stage2.pickPhase = t.pickOpponents;
+    t.stage2.pickMode = cleanPickMode(t.pickMode);
+  }
+  const ph = PICKS.pickPhaseOf(t);
+  if (ph && t.pickFor === 'stage2' && ph.status === 'open') {
+    const ms = pickClockMs(t);
+    if (ms !== (ph.perPickMs || null)) {
+      ph.perPickMs = ms;
+      // a clock that was not running starts now; a changed one keeps the turn's start time
+      ph.turnStartedAt = ms ? (ph.turnStartedAt || now()) : null;
+    }
+  }
+}
+// For the client: where the playoffs of a Swiss stage stand, and what can still be done to them.
+function playoffStatus(t) {
+  if (!t || t.bracketType !== 'swiss' || !stageTwoCfg(t)) return null;
+  const made = playoffsMade(t);
+  return {
+    pick: playoffPickSetting(t),
+    made: made ? 1 : 0,
+    built: t.stage2.built ? 1 : 0,
+    locked: (made && playoffsLocked(t)) ? 1 : 0,
+    swissDone: (t.status === 'running' || t.status === 'finished') && swissStageDone(t) ? 1 : 0,
+    redraws: t.stage2.redraws || 0
+  };
+}
+// After an organizer corrects a Swiss result: if the playoffs were already made and the result
+// changed who went through, their seeds or their records, the playoffs are made again from the
+// corrected table. The report handler refuses the correction outright once a playoff match has
+// started, so by the time this runs a redo can never destroy a played match.
+function settlePlayoffsAfterCorrection(t, sigBefore) {
+  if (!sigBefore) return false;
+  const done = swissStageDone(t);
+  if (done && playoffSig(t) === sigBefore) return false;
+  resetPlayoffs(t);
+  if (done) swissFinishIfDone(t);
+  // The correction itself is already in the log under the organizer's name; this says what followed.
+  tpush(t, 'System', done
+    ? 'A Swiss result was corrected and it changed who went through or on what record, so the playoffs have been set up again from the corrected standings.'
+    : 'A Swiss result was reopened, so the playoffs have been taken down. They are set up again as soon as the Swiss stage is finished.');
   return true;
 }
 
@@ -1135,16 +1325,13 @@ function namedOrganizer(t, req) {
   const sess = currentSession(req);
   return !!(sess && sess.fafId && Array.isArray(t.organizerFafIds) && t.organizerFafIds.indexOf(sess.fafId) >= 0);
 }
-function hasOrganizerToken(t, tok) {
-  if (!tok || tok !== t.adminToken) return false;
-  return true;
-}
 // May this viewer CHANGE the maps and pools?
 function canManageMaps(t, req, body) {
   const tok = body && body.admin;
   if (isSiteAdmin(req)) return true;
   if (namedOrganizer(t, req)) return true;
-  if (hasOrganizerToken(t, tok) && (!FAF_OAUTH_ON || currentSession(req))) return true;
+  // the legacy token only counts with FAF login off - see adminTokenGrants
+  if (adminTokenGrants(t, tok)) return true;
   return false;
 }
 // May this viewer SEE the map prep (unpublished maps, unpublished pools)?
@@ -1568,7 +1755,8 @@ function publicView(t) {
     bracketType: t.bracketType, ffaCfg: t.ffaCfg || null,
     plan: t.plan || null, maxTeams: t.maxTeams || 0, perRoundBo: t.perRoundBo ? 1 : 0,
     cfg: t.cfg || null, stage2: t.stage2 || null, preset: t.preset || null, presetName: t.presetName || null,
-    pickOpponents: t.pickOpponents ? 1 : 0, pickMinutes: t.pickMinutes || 0,
+    pickOpponents: t.pickOpponents ? 1 : 0, pickMinutes: t.pickMinutes || 0, pickMode: cleanPickMode(t.pickMode),
+    playoffs: playoffStatus(t),
     stopAtAlive: t.stopAtAlive || 0, aliveCount: aliveTeamCount(t),
     swissR1Open: (t.bracketType === 'swiss' && t.status === 'running' && swissRound1Open(t)) ? 1 : 0,
     seeding: t.seeding, ratingType: t.ratingType || 'global', ratingDate: t.ratingDate || null,
@@ -1995,18 +2183,37 @@ async function fafLookupPlayer(login, token) {
 
 // Reverse lookup: FAF id -> login. Used when someone is added by raw id so we can store a real
 // name instead of showing "FAF 123456" forever.
-async function fafLookupById(fafId, token) {
+// opts.strict: report "FAF could not be asked" as { error } instead of folding it into null, so a
+// caller that is about to tell an organizer "no such account" does not say it during an outage.
+// Existing callers pass nothing and keep the old contract (the rename check counts null as
+// UNCHECKED, which is exactly right for it).
+async function fafLookupById(fafId, token, opts) {
+  const strict = !!(opts && opts.strict);
   const id = String(fafId || '').replace(/\D/g, '');
   if (!id) return null;
   const headers = { 'Accept': 'application/vnd.api+json' };
   if (token) headers['Authorization'] = 'Bearer ' + token;
   try {
     const r = await httpsRequest({ host: 'api.faforever.com', path: '/data/player/' + id, method: 'GET', headers });
-    if (r.status !== 200) return null;
+    if (r.status !== 200) return (strict && r.status !== 404) ? { error: 'FAF lookup failed (' + r.status + ')' } : null;
     const row = JSON.parse(r.text).data;
     const login = row && row.attributes && row.attributes.login;
     return login ? { fafId: id, name: login } : null;
-  } catch (e) { return null; }
+  } catch (e) { return strict ? { error: 'FAF could not be reached \u2014 try again in a moment' } : null; }
+}
+
+// One rule for "a FAF name or a FAF id", so every box that says it takes either actually does:
+// a bare number is an id, anything else is an exact login. Returns { fafId, name } when FAF knows
+// the account, { error } when FAF could not be asked, and null when it answered "no such player".
+async function fafResolve(input, token) {
+  const q = String(input == null ? '' : input).trim();
+  if (!q) return null;
+  if (/^\d+$/.test(q)) return fafLookupById(q, token, { strict: true });
+  return fafLookupPlayer(q, token);
+}
+function fafNotFound(q) {
+  return /^\d+$/.test(String(q)) ? 'No FAF account with id ' + q + ' \u2014 check the number'
+    : 'No FAF player named \u201c' + q + '\u201d \u2014 names are exact';
 }
 
 // A FAF display name is stamped onto a player at signup and was then never looked at again, so
@@ -2381,6 +2588,7 @@ async function handleAPI(req, res, url) {
       // opponent pick phase: off unless asked for (0 minutes = no clock, picks wait forever)
       pickOpponents: b.pickOpponents ? 1 : 0,
       pickMinutes: intIn(b.pickMinutes, 0, 1440, 0),
+      pickMode: cleanPickMode(b.pickMode),
       // declared up front so the bracket can say so from the start (0 = play it out)
       stopAtAlive: intIn(b.stopAtAlive, 0, 128, 0),
       cfg: null, maps: {}, mapDb: [], mapPools: [], poolAssign: {},
@@ -3430,7 +3638,11 @@ async function handleAPI(req, res, url) {
         status: (t.players || []).some(pl => pl.fafId === i.fafId) ? 'accepted' : (i.declined ? 'declined' : 'pending')
       })) : undefined;
       view.viewer = {
-        admin: isAdmin(t, tok, req) ? 1 : 0,
+        // Mirrors the SERVER's rule (report, pick and edit_date all accept isAdmin || isOrganizer).
+        // It used to be token-only, so an organizer added by FAF id never saw Correct, the
+        // pick-on-behalf control or the date editor - and renewing the token when an organizer is
+        // removed would have taken them from everyone else as well.
+        admin: organizer ? 1 : 0,
         organizer: organizer ? 1 : 0,
         teamId: capTeam ? capTeam.id : null,
         loggedIn: sess ? 1 : 0,
@@ -3510,10 +3722,10 @@ async function handleAPI(req, res, url) {
 
     if (method === 'GET' && sub === 'secrets') {
       if (!isAdmin(t, url.searchParams.get('admin'), req) && !isOrganizer(t, req)) return json(res, 403, { error: 'Organizer rights required' });
-      return json(res, 200, {
-        adminToken: t.adminToken,
-        lateToken: t.lateToken
-      });
+      // The admin token is not served with FAF login on: it grants nothing there, and nothing on
+      // the page uses it any more.
+      return json(res, 200, FAF_OAUTH_ON ? { lateToken: t.lateToken }
+        : { adminToken: t.adminToken, lateToken: t.lateToken });
     }
 
     // ---- chat: list rooms, read a room, post, moderate ----
@@ -4571,13 +4783,24 @@ async function handleAPI(req, res, url) {
       return json(res, 200, { ok: true });
     }
 
-    // Undo the most recent pick (organizer only, and only while the phase is still open).
+    // Undo the most recent pick (organizer only). While the phase is open that is all it does.
+    // For the playoffs of a Swiss stage it also works AFTER the last pick has built the bracket -
+    // the last pick is the one most likely to be a mis-click, and it is the one that builds the
+    // bracket instantly - as long as no playoff match has started. The bracket comes down and
+    // that pick is open again.
     if (sub === 'undo_pick_opponent') {
       if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
       const ph = PICKS.pickPhaseOf(t);
       if (!ph) return bad(res, 'This tournament is not picking opponents');
-      if (ph.applied) return bad(res, 'The bracket is already built from these picks');
       const last = ph.log[ph.log.length - 1];
+      if (ph.applied) {
+        if (t.pickFor !== 'stage2') return bad(res, 'The bracket is already built from these picks');
+        if (!last) return bad(res, 'No picks to undo');
+        if (playoffsLocked(t)) return bad(res, 'A playoff match has already started, so the picks can no longer be undone');
+        resetPlayoffs(t, true);
+        ph.applied = null;
+        delete ph.drawn;
+      }
       if (!last) return bad(res, 'No picks to undo');
       delete ph.picks[last.by];
       ph.log.pop();
@@ -4587,6 +4810,51 @@ async function handleAPI(req, res, url) {
       tlog(t, req, b.admin, 'undid the pick of ' + nm(last.target) + ' by ' + nm(last.by));
       saveDB();
       return json(res, 200, { ok: true });
+    }
+
+    // The playoff setup of a Swiss stage: who picks their opponent (nobody, the top half of the
+    // seeds, or only the unbeaten) and how long each pick may take. Open for the whole event, not
+    // only before the start - the decision is about the PLAYOFFS, and it is usually made while the
+    // Swiss is being played. Once the playoffs exist it can be redone (a fresh pick phase, a fresh
+    // draw) right up to the moment the first playoff match starts.
+    if (sub === 'playoff_setup') {
+      if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
+      if (t.bracketType !== 'swiss') return bad(res, 'This tournament has no playoff stage');
+      // Before the start the stage-2 record does not exist yet; the Format panel is the place.
+      if (['signup', 'draft', 'drafted'].indexOf(t.status) >= 0) return bad(res, 'Until the Swiss stage starts, set this on the Format panel');
+      if (!stageTwoCfg(t)) return bad(res, 'This tournament has no playoff stage');
+      if (t.status !== 'running') return bad(res, 'This tournament has already finished');
+      const pick = ['off', 'half', 'unbeaten'].indexOf(b.pick) >= 0 ? b.pick : null;
+      if (!pick) return bad(res, 'Choose who picks: nobody, the top half of the seeds, or the unbeaten');
+      const minutes = intIn(b.minutes, 0, 1440, parseInt(t.pickMinutes, 10) || 0);
+      const made = playoffsMade(t);
+      const was = playoffPickSetting(t);
+      const redo = !!b.redo && made;
+      if (made && pick !== was && !redo) {
+        return bad(res, 'The playoffs are already set up. Redo them to use a different setting.');
+      }
+      if (redo && playoffsLocked(t)) {
+        return bad(res, 'A playoff match has already started, so the playoffs can no longer be redone.');
+      }
+      applyPlayoffPick(t, pick, minutes);
+      const label = { off: 'seeded from the Swiss standings, no picks',
+        half: 'the top half of the playoff seeds pick their opponent',
+        unbeaten: 'the unbeaten pick their opponent, the rest are drawn' }[pick];
+      let reset = null;
+      if (redo) {
+        reset = resetPlayoffs(t);
+        tlog(t, req, b.admin, 'redid the playoffs (' + label + ')'
+          + (reset.droppedPools ? ' - ' + reset.droppedPools + ' per-match map pool setting(s) on the old matches were cleared' : ''));
+        swissFinishIfDone(t);
+      } else {
+        tlog(t, req, b.admin, 'set the playoffs to: ' + label
+          + (pick !== 'off' ? (minutes ? ' (' + minutes + ' min per pick)' : ' (no time limit)') : ''));
+        // Nothing made although the Swiss is over (it could not be built at the time): make it now.
+        if (!made && swissStageDone(t)) swissFinishIfDone(t);
+      }
+      saveDB();
+      return json(res, 200, { ok: true, redone: redo ? 1 : 0, playoffs: playoffStatus(t),
+        droppedPools: reset ? reset.droppedPools : 0 });
     }
 
     // ===== divisions (King/Prince split) =====
@@ -4652,8 +4920,8 @@ async function handleAPI(req, res, url) {
     // Site admin attaches organizer rights to a FAF account directly (useful for
     // tournaments that predate identity tracking, where the list is empty).
     if (sub === 'add_organizer') {
-      // Any organizer (or site admin) may add a co-organizer to their own tournament. Removal
-      // stays site-admin-only (handled by remove_organizer).
+      // Any organizer (or site admin) may add a co-organizer to their own tournament, and any
+      // organizer may remove one again (remove_organizer).
       if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
       const fid = String(b.fafId || '').trim();
       if (!fid) return bad(res, 'FAF id required');
@@ -4671,21 +4939,39 @@ async function handleAPI(req, res, url) {
       return json(res, 200, { ok: true });
     }
 
-    // Site admin strips organizer rights from a FAF account on this tournament.
+    // Strip organizer rights from a FAF account on this tournament. Any organizer may remove any
+    // other organizer, or leave themselves: the organizer team is trust-based, and the people who
+    // can ADD a co-organizer are exactly the people who can remove one. It used to be site-admin
+    // only, which turned every change to the team into a support request.
     if (sub === 'remove_organizer') {
-      if (!isSiteAdmin(req)) return json(res, 403, { error: 'Site admin only' });
+      if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
       const fid = String(b.fafId || '').trim();
       if (!Array.isArray(t.organizerFafIds) || t.organizerFafIds.indexOf(fid) < 0) return bad(res, 'Not an organizer of this tournament');
+      const bySiteAdmin = isSiteAdmin(req);
+      // Never orphan an event by accident. A site admin may still do it on purpose - they can
+      // always manage it afterwards - but an organizer cannot leave it with nobody to run it.
+      if (!bySiteAdmin && t.organizerFafIds.length <= 1) {
+        return bad(res, 'This is the last organizer - add someone else first, or ask a site admin');
+      }
+      const sess = currentSession(req);
+      const self = !!(sess && String(sess.fafId) === fid);
+      const actor = actorOf(req, b.admin);
       t.organizerFafIds = t.organizerFafIds.filter(x => x !== fid);
       const name = (t.organizerNames && t.organizerNames[fid]) || fid;
       if (t.organizerNames) delete t.organizerNames[fid];
+      if (t.organizerHidden) delete t.organizerHidden[fid];
+      // This is enough for the removal to be real: with FAF login on, organizer rights come ONLY
+      // from this list (the legacy admin token grants nothing - see adminTokenGrants), so the
+      // person removed has nothing left to act with.
+      tlog(t, req, b.admin, self ? 'left the organizer team' : 'removed ' + name + ' as an organizer');
       saveDB();
       audit(req, 'organizer_removed', {
         tournamentId: t.id, tournamentName: t.name,
-        actor: { kind: 'siteadmin', fafId: null, name: 'Site admin' },
-        detail: name + ' (' + fid + ')' + (t.organizerFafIds.length ? '' : ' \u2014 tournament now has no organizers')
+        actor: bySiteAdmin ? { kind: 'siteadmin', fafId: null, name: 'Site admin' } : actor,
+        detail: name + ' (' + fid + ')' + (self ? ' \u2014 left' : '')
+          + (t.organizerFafIds.length ? '' : ' \u2014 tournament now has no organizers')
       });
-      return json(res, 200, { ok: true, remaining: t.organizerFafIds.length });
+      return json(res, 200, { ok: true, remaining: t.organizerFafIds.length, self: self ? 1 : 0 });
     }
 
     // ---- organizer swaps a waiting team in for one that is currently entering ----
@@ -4709,9 +4995,8 @@ async function handleAPI(req, res, url) {
     }
 
     // ---- casters: read-everything access, no organizer powers ----
-    // Any organizer may add or remove a caster on their own tournament. Unlike organizers,
-    // removal is not site-admin-only: a caster grants no power, so letting the organizer who
-    // added one take it away again avoids a pointless admin round trip.
+    // Any organizer may add or remove a caster on their own tournament, exactly as with
+    // co-organizers.
     if (sub === 'add_caster') {
       if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
       const fid = String(b.fafId || '').trim();
@@ -4750,6 +5035,11 @@ async function handleAPI(req, res, url) {
 
     // Claim organizer rights by opening the organizer link while logged in with FAF.
     if (sub === 'claim_organizer') {
+      // Organizer links are gone: an organizer adds co-organizers by FAF name in the Organizers
+      // panel. An old link still circulating must not quietly hand out a seat.
+      if (FAF_OAUTH_ON) {
+        return json(res, 410, { error: 'Organizer links are no longer used. Ask one of this tournament\u2019s organizers to add you in the Organizers panel on the Admin tab.' });
+      }
       const sess = currentSession(req);
       if (!sess) return json(res, 401, { error: 'Log in with FAF first' });
       // the link carries the admin token; that's what authorizes the claim
@@ -4773,48 +5063,112 @@ async function handleAPI(req, res, url) {
       if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
       const outP = playerById(t, b.playerId);
       if (!outP) return bad(res, 'Player to replace not found');
-      const inP = playerById(t, b.replacementId);
-      if (!inP) return bad(res, 'Replacement player not found');
-      if (inP.id === outP.id) return bad(res, 'Pick a different player');
-      // the replacement must not already be in the tournament (in a team) — they come from the pool
-      if (inP.teamId) return bad(res, 'That player is already in the tournament');
 
-      // Move the replacement's identity into the outgoing player's slot (keeps outP.id, so all
-      // team.captainId / team.playerIds / match references stay valid and results are preserved).
+      // Who is coming in. Two sources, one shape, so the swap below is written exactly once:
+      //   - the standby list (b.replacementId), as before
+      //   - anyone on FAF (b.lookup, a name or an id). Needed because the person who can actually
+      //     make the next match is often not someone who happened to sign up as a reserve.
+      let src;
+      if (b.replacementId) {
+        const inP = playerById(t, b.replacementId);
+        if (!inP) return bad(res, 'Replacement player not found');
+        if (inP.id === outP.id) return bad(res, 'Pick a different player');
+        // the replacement must not already be in the tournament (in a team) - they come from the pool
+        if (inP.teamId) return bad(res, 'That player is already in the tournament');
+        src = { name: inP.name, fafId: inP.fafId || null, rating: inP.rating,
+          ratingActual: (inP.ratingActual != null ? inP.ratingActual : inP.rating),
+          manual: inP.manual || false, note: inP.note || null, late: inP.late || 0, poolId: inP.id, how: 'from the standby list' };
+      } else if (b.lookup != null && String(b.lookup).trim()) {
+        const q = cleanName(String(b.lookup), 40);
+        const token = await fafValidToken(currentSession(req));
+        if (!token) return json(res, 409, { error: 'Bringing in a player needs your FAF login. Log out and back in, then retry.', needsRelogin: 1 });
+        // Verified against FAF, never a free-typed name: the same rule org_add_player follows.
+        const found = await fafResolve(q, token);
+        if (found && found.error) return bad(res, found.error);
+        if (!found) return bad(res, fafNotFound(q));
+        if (outP.fafId && String(outP.fafId) === String(found.fafId)) return bad(res, found.name + ' is the player being replaced');
+        const existing = (t.players || []).find(x => x.fafId && String(x.fafId) === String(found.fafId));
+        if (existing && existing.teamId) return bad(res, found.name + ' is already playing in this tournament');
+        // A mid-event swap is still an entry. Every other organizer path checks the ban list, and
+        // this one must too, or "replace" becomes the way round a ban the site deliberately placed.
+        {
+          const hit = findEntryBan(t, found.fafId);
+          if (hit) return bad(res, banRefusalOrganizer(hit, t, found.name));
+        }
+        if (existing) {
+          // already on the standby list: use that record, rather than a second copy of the same person
+          src = { name: existing.name, fafId: existing.fafId, rating: existing.rating,
+            ratingActual: (existing.ratingActual != null ? existing.ratingActual : existing.rating),
+            manual: existing.manual || false, note: existing.note || null, late: existing.late || 0, poolId: existing.id, how: 'from the standby list' };
+        } else {
+          // Rating per this tournament's settings, like any entrant. A hand-typed one is accepted
+          // ONLY when FAF has none to give - refusing outright would block an organizer mid-event
+          // over a player who simply has no games on that board.
+          let raw = null;
+          if (t.ratingType && t.ratingType !== 'none') raw = await ratingPerSettings(t, found.fafId, token);
+          if (raw == null) {
+            const typed = parseInt(b.rating, 10);
+            if (!(typed >= 0 && typed <= 4000)) {
+              return json(res, 400, { error: (t.ratingType && t.ratingType !== 'none')
+                ? 'FAF has no ' + t.ratingType + ' rating for ' + found.name + ' \u2014 enter one by hand (0\u20134000)'
+                : 'Enter a rating (0\u20134000) for ' + found.name, needsRating: 1 });
+            }
+            raw = typed;
+          }
+          src = { name: found.name, fafId: found.fafId, rating: raw, ratingActual: raw,
+            manual: false, note: null, late: 0, poolId: null, how: 'brought in from outside' };
+        }
+      } else {
+        return bad(res, 'Pick someone from the standby list, or look a player up on FAF');
+      }
+
+      // Move the incoming identity into the outgoing player's SLOT. The slot keeps outP.id, so every
+      // team.captainId / team.playerIds / match reference stays valid and all results are preserved.
+      const oldName = outP.name;
       const keptId = outP.id;
       const keptTeamId = outP.teamId;
-      const keptTeamName = outP.teamName;
-      outP.name = inP.name;
-      outP.rating = inP.rating;
-      outP.ratingActual = (inP.ratingActual != null ? inP.ratingActual : inP.rating);
-      applyRatingCap(t, outP);
-      outP.fafId = inP.fafId || null;
-      outP.manual = inP.manual || false;
+      outP.name = src.name;
+      outP.rating = src.rating;
+      outP.ratingActual = src.ratingActual;
+      applyRatingCap(t, outP);            // replacements bypass min/max but are still capped
+      outP.fafId = src.fafId;
+      outP.manual = src.manual;
+      // per-person annotations described the previous occupant, not the slot
+      outP.note = src.note;
+      outP.late = src.late;
       outP.replacedFrom = (outP.replacedFrom || 0) + 1;
-      // remove the replacement's own pool record
-      t.players = t.players.filter(p => p.id !== inP.id);
-      // keep derived team names in sync (solo teams / "Team X")
+      if (src.poolId) t.players = t.players.filter(p => p.id !== src.poolId);
       for (const team of t.teams) {
-        if (team.captainId === keptId) {
-          team.name = (t.teamSize === 1) ? outP.name : ('Team ' + outP.name);
+        if (team.captainId !== keptId) continue;
+        // the previous occupant keeps nothing - not even a legacy captain link
+        team.captainToken = uid(10);
+        // A solo entry IS its player, so it always follows. A team's name only follows when it
+        // was derived from the captain; a name the team chose stays theirs. The old code wrote
+        // "Team <new captain>" over any team name at all, including a premade "Blue Squad".
+        if (t.teamSize === 1) team.name = outP.name;
+        else if (!team.captainRenamed) {
+          if (team.name === oldName) team.name = outP.name;
+          else if (team.name === 'Team ' + oldName) team.name = 'Team ' + outP.name;
         }
       }
-      tlog(t, req, b.admin, 'replaced a player with ' + outP.name + (keptTeamId ? ' in team "' + tTeamName(t, keptTeamId) + '"' : ''));
+      tlog(t, req, b.admin, 'replaced ' + oldName + ' with ' + outP.name + ' (' + src.how + ')'
+        + (keptTeamId && t.teamSize > 1 ? ' in team "' + tTeamName(t, keptTeamId) + '"' : ''));
       saveDB();
-      return json(res, 200, { ok: true });
+      return json(res, 200, { ok: true, name: outP.name, from: oldName });
     }
 
     if (sub === 'faf_lookup') {
       // Organizer looks up a FAF player by exact name; returns id + rating per this tournament's
       // settings (plus current global for context). Uses the organizer's own FAF token.
       if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
-      const login = cleanName(b.name, 40);
-      if (!login) return bad(res, 'Enter a FAF name');
+      // Takes a FAF name OR a FAF id, like the director, ban and co-organizer boxes already did.
+      const login = cleanName(String(b.name == null ? '' : b.name), 40);
+      if (!login) return bad(res, 'Enter a FAF name or FAF id');
       const token = await fafValidToken(currentSession(req));
       if (!token) return json(res, 409, { error: 'FAF lookups need your FAF login. Log out and back in, then retry.', needsRelogin: 1 });
-      const found = await fafLookupPlayer(login, token);
+      const found = await fafResolve(login, token);
       if (found && found.error) return bad(res, found.error);
-      if (!found) return bad(res, 'No FAF player named \u201c' + login + '\u201d \u2014 names are exact');
+      if (!found) return bad(res, fafNotFound(login));
       const rating = await ratingPerSettings(t, found.fafId, token);
       let globalRating = null;
       try { globalRating = (t.ratingType === 'global') ? rating : (await fafRatingProbe(found.fafId, 'global', null, token)).rating; } catch (e) {}
@@ -4993,6 +5347,7 @@ async function handleAPI(req, res, url) {
         if (b.perRoundBo !== undefined) t.perRoundBo = (b.perRoundBo && t.bracketType !== 'swiss') ? 1 : 0;
         if (b.pickOpponents !== undefined) t.pickOpponents = b.pickOpponents ? 1 : 0;
         if (b.pickMinutes !== undefined) t.pickMinutes = intIn(b.pickMinutes, 0, 1440, t.pickMinutes || 0);
+        if (b.pickMode !== undefined) t.pickMode = cleanPickMode(b.pickMode);
         if (b.stopAtAlive !== undefined) t.stopAtAlive = intIn(b.stopAtAlive, 0, 128, t.stopAtAlive || 0);
         const pb = b.plan || {};
         const op = (t.plan && typeof t.plan === 'object') ? t.plan : {};
@@ -5876,7 +6231,7 @@ async function handleAPI(req, res, url) {
           // the draw is random but can still be reproduced exactly when someone asks how a round
           // came out the way it did.
           t.cfg.drawSeed = t.cfg.drawSeed || (t.id + '-' + uid(8));
-          t.stage2 = buildStageTwo(Object.assign({}, ex, { pickPhase: t.pickOpponents ? 1 : 0 }), c);
+          t.stage2 = buildStageTwo(Object.assign({}, ex, { pickPhase: t.pickOpponents ? 1 : 0, pickMode: t.pickMode }), c);
           if (t.stage2) {
             if (t.stage2.cutTo >= n) return bad(res, 'The playoff cut (' + t.stage2.cutTo + ') must be smaller than the field (' + n + ')');
             t.cfg.final = 0;   // the playoff bracket replaces the single swiss final
@@ -6429,6 +6784,34 @@ async function handleAPI(req, res, url) {
         return json(res, 403, { error: 'Only the two captains or the organizer can report this match' });
       }
 
+      // Everything that can refuse a CORRECTION is checked before it reopens the match. It used to
+      // be checked after: a correction with a typo in it (a 3 in a Bo3) was refused, but the match
+      // had already been reopened and stayed that way - and a reopened Swiss match underneath
+      // playoffs that were made from its old result leaves those playoffs quietly wrong.
+      if (m.status === 'done' && admin) {
+        const inMatch = id => id === m.team1 || id === m.team2;
+        const top = Math.ceil(m.bo / 2);
+        const blank = (b.score1 === undefined || b.score1 === '') && (b.score2 === undefined || b.score2 === '');
+        let refusal = null;
+        if (b.forfeit && !b.winner && blank) {
+          const ff = String(b.forfeit);
+          const other = ff === m.team1 ? m.team2 : m.team1;
+          if (!inMatch(ff)) refusal = 'Forfeiting team is not in this match';
+          else if (!other || other === 'BYE') refusal = 'The opponent is not set yet';
+        } else {
+          const a = parseInt(b.score1, 10), c = parseInt(b.score2, 10);
+          if (!(a >= 0 && c >= 0 && a <= top && c <= top)) refusal = 'Scores must be between 0 and ' + top;
+          else if (m.hcap && a < 1) refusal = 'This grand final starts 1-0 (upper bracket advantage)';
+          else if (a === top && c === top) refusal = 'Both teams cannot reach ' + top;
+          else if (b.winner && !inMatch(b.winner)) refusal = 'Winner must be one of the two teams';
+          else if (!b.winner && b.forfeit && !inMatch(String(b.forfeit))) refusal = 'Forfeiting team is not in this match';
+        }
+        if (refusal) return bad(res, refusal);
+      }
+
+      // A corrected Swiss result can change who reached the playoffs. Remember what the playoffs
+      // were made from, so they can be made again if it moved (settlePlayoffsAfterCorrection).
+      let playoffsFrom = null;
       if (m.status === 'done') {
         if (!admin) return bad(res, 'Already reported — only the organizer can correct it');
         if (m.bracket === 'sw') {
@@ -6437,6 +6820,12 @@ async function handleAPI(req, res, url) {
           const gf = t.matches.find(x => x.bracket === 'gf');
           if (later || (gf && (gf.status === 'live' || gf.status === 'done'))) {
             return bad(res, 'Later matches already played — cannot correct');
+          }
+          if (playoffsMade(t)) {
+            // Once the playoffs are being played the Swiss stage is history, the same rule as for
+            // a Swiss round with later rounds played on top of it.
+            if (playoffsLocked(t)) return bad(res, 'The playoffs have already started, so Swiss results can no longer be corrected');
+            playoffsFrom = playoffSig(t);
           }
           m.status = 'ready'; m.winner = null; m.loser = null;
         } else {
@@ -6463,6 +6852,7 @@ async function handleAPI(req, res, url) {
         const fs1 = ffId === m.team1 ? -1 : maxW, fs2 = ffId === m.team1 ? maxW : -1;
         tlog(t, req, b.token, tTeamName(t, ffId) + ' forfeited vs ' + tTeamName(t, winId) + ' \u2014 win awarded to ' + tTeamName(t, winId) + (m.status === 'done' ? ' (correction)' : ''));
         finalizeMatch(t, m, fs1, fs2, winId);
+        settlePlayoffsAfterCorrection(t, playoffsFrom);
         saveDB();
         return json(res, 200, { ok: true });
       }
@@ -6509,6 +6899,7 @@ async function handleAPI(req, res, url) {
         m.score1 = s1; m.score2 = s2;
         m.status = 'live';
       }
+      settlePlayoffsAfterCorrection(t, playoffsFrom);
       saveDB();
       return json(res, 200, { ok: true });
     }

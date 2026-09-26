@@ -131,7 +131,7 @@ function drawPlayers(el) {
   if (admin && T.status === 'signup') {
     const pendingReqs = T.players.filter(pl => pl.pending);
     html += `<div class="panel section"><h2>Organizer <span class="h2-strong">tools</span></h2>
-      <label>FAF player lookup <span class="muted small">(exact FAF name \u2014 verified against FAF, rating pulled per this tournament's settings)</span></label>
+      <label>FAF player lookup <span class="muted small">(exact FAF name or FAF id \u2014 verified against FAF, rating pulled per this tournament's settings)</span></label>
       <div class="row" style="display:flex;gap:8px;flex-wrap:wrap">
         <input type="text" id="ogName" maxlength="40" autocomplete="off" style="max-width:240px">
         <button class="btn small" id="ogLookup">Look up</button>
@@ -262,7 +262,7 @@ function drawPlayers(el) {
   const ogLookup = document.getElementById('ogLookup');
   if (ogLookup) ogLookup.onclick = async () => {
     const name = document.getElementById('ogName').value.trim();
-    if (!name) return toast('Enter a FAF name', true);
+    if (!name) return toast('Enter a FAF name or FAF id', true);
     const box = document.getElementById('ogResult');
     box.innerHTML = '<span class="muted small">Looking up\u2026</span>';
     try {
@@ -395,33 +395,82 @@ function drawPlayers(el) {
 }
 
 function replacePlayer(outP) {
-  // eligible replacements: signed-up players not currently in a team (the pool / late signups)
+  // Two ways in: someone already on the standby list, or anyone on FAF by name or id. The second
+  // exists because the person who can actually play the next match is often not someone who
+  // happened to sign up as a reserve - and with an empty standby list this used to be a dead end.
   const pool = T.players.filter(p => !p.teamId && p.id !== outP.id);
-  if (pool.length === 0) {
-    modal(`<h3>Replace ${esc(outP.name)}</h3>
-      <p class="muted small">There are no available players to swap in. Add a player (or share the late-signup link from the Admin tab), then replace.</p>
-      <div class="actions"><button class="btn ghost" id="rpClose">Close</button></div>`, root => {
-      root.querySelector('#rpClose').onclick = closeModal;
-    });
-    return;
-  }
   const opts = pool.slice().sort((a, b) => (b.rating || 0) - (a.rating || 0))
-    .map(p => `<option value="${p.id}">${esc(p.name)}${p.rating != null ? ' (' + p.rating + ')' : ''}${p.late ? ' — late signup' : ''}</option>`).join('');
+    .map(p => `<option value="${p.id}">${esc(p.name)}${p.rating != null ? ' (' + p.rating + ')' : ''}${p.late ? ' \u2014 late signup' : ''}</option>`).join('');
+  const manualBoard = !T.ratingType || T.ratingType === 'none';
   modal(`<h3>Replace ${esc(outP.name)}</h3>
-    <p class="muted small">The replacement takes over ${esc(outP.name)}'s exact spot — team, seed, and match results are all preserved. ${esc(outP.name)}'s current record stays with the slot.</p>
-    <label>Swap in</label>
-    <select id="rpSel" style="width:100%">${opts}</select>
-    <div class="actions"><button class="btn ghost" id="rpCancel">Cancel</button><button class="btn primary" id="rpGo">Replace</button></div>`, root => {
+    <p class="muted small">The replacement takes over ${esc(outP.name)}'s exact spot \u2014 team, seed and every result so far stay with the slot.</p>
+    ${pool.length ? `<label>From the standby list</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="rpSel" style="flex:1">${opts}</select>
+        <button class="btn primary" id="rpGo">Replace</button>
+      </div>
+      <div class="muted small" style="margin:14px 0 2px">\u2026or bring in someone who is not signed up:</div>`
+      : '<p class="muted small" style="margin-top:10px">Nobody is on the standby list, so look the replacement up on FAF.</p>'}
+    <label>FAF name or FAF id</label>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input type="text" id="rpLook" maxlength="40" autocomplete="off" placeholder="exact FAF name, or the account id" style="flex:1">
+      <button class="btn" id="rpFind">Look up</button>
+    </div>
+    <div id="rpFound" style="margin-top:10px"></div>
+    <div class="actions"><button class="btn ghost" id="rpCancel">Cancel</button></div>`, root => {
     root.querySelector('#rpCancel').onclick = closeModal;
-    root.querySelector('#rpGo').onclick = async () => {
-      const replacementId = root.querySelector('#rpSel').value;
-      try {
-        await api('/api/t/' + T.id + '/replace_player', { playerId: outP.id, replacementId, admin: adminToken() });
-        closeModal();
-        toast('Player replaced');
-        await refresh();
-      } catch (e) { toast(e.message, true); }
+    const done = async (res) => {
+      closeModal();
+      toast('Replaced ' + ((res && res.from) || outP.name) + ' with ' + ((res && res.name) || 'the new player'));
+      await refresh();
     };
+
+    const go = root.querySelector('#rpGo');
+    if (go) go.onclick = async () => {
+      try { done(await api('/api/t/' + T.id + '/replace_player', { playerId: outP.id, replacementId: root.querySelector('#rpSel').value, admin: adminToken() })); }
+      catch (e) { toast(e.message, true); }
+    };
+
+    const box = root.querySelector('#rpFound');
+    const look = root.querySelector('#rpLook');
+    const find = async () => {
+      const q = look.value.trim();
+      if (!q) return toast('Enter a FAF name or FAF id', true);
+      box.innerHTML = '<span class="muted small">Asking FAF\u2026</span>';
+      let r;
+      try { r = await api('/api/t/' + T.id + '/faf_lookup', { name: q, admin: adminToken() }); }
+      catch (e) { box.innerHTML = ''; return toast(e.message, true); }
+      // Say it up front rather than let the swap bounce: somebody already in a slot cannot take
+      // another one, and the player being replaced cannot replace themselves.
+      const already = T.players.find(p => p.fafId && String(p.fafId) === String(r.fafId));
+      const blocked = (already && already.id === outP.id) ? 'That is the player being replaced.'
+        : (already && already.teamId) ? r.name + ' is already playing in this tournament.' : '';
+      const needRating = r.rating == null && !(already && !already.teamId);
+      box.innerHTML = `<div class="sa-req"><div class="sa-req-main">
+          <div class="sa-req-name">${esc(r.name)} <span class="muted mono small">id ${esc(r.fafId)}</span>${already && !already.teamId ? ' <span class="idbadge verified">on the standby list</span>' : ''}</div>
+          <div class="muted small">${r.rating != null ? 'Rating (' + esc(T.ratingType || 'global') + '): ' + r.rating
+            : (manualBoard ? 'This tournament takes ratings by hand.' : 'FAF has no ' + esc(T.ratingType) + ' rating for this player \u2014 enter one.')}</div>
+          ${blocked ? '<div class="warn small" style="margin-top:4px">' + esc(blocked) + '</div>' : ''}
+        </div>
+        <div class="sa-req-act">
+          ${needRating && !blocked ? '<input type="number" id="rpRating" min="0" max="4000" placeholder="rating" style="width:90px">' : ''}
+          ${blocked ? '' : '<button class="btn primary small" id="rpUse">Replace with ' + esc(r.name) + '</button>'}
+        </div></div>`;
+      const use = box.querySelector('#rpUse');
+      if (use) use.onclick = async () => {
+        const body = { playerId: outP.id, lookup: r.fafId, admin: adminToken() };
+        const rEl = box.querySelector('#rpRating');
+        if (rEl) {
+          if (rEl.value === '') return toast('Enter a rating for ' + r.name, true);
+          body.rating = rEl.value;
+        }
+        try { done(await api('/api/t/' + T.id + '/replace_player', body)); }
+        catch (e) { toast(e.message, true); }
+      };
+    };
+    root.querySelector('#rpFind').onclick = find;
+    look.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); find(); } };
+    setTimeout(() => { try { (pool.length ? root.querySelector('#rpSel') : look).focus(); } catch (e) {} }, 0);
   });
 }
 

@@ -425,7 +425,14 @@ async function renderHost() {
           </label>
           <div class="muted small" id="pickPhaseWhere" style="margin:4px 0 0 22px"></div>
           <div id="pickPhaseBox" style="display:none;padding:8px 0 0 22px">
-            <p class="muted small" style="margin:0 0 8px">The top half of the seeds each pick who they play, in seed order, instead of the bracket deciding. Needs a full bracket (4, 8, 16, 32...).</p>
+            <p class="muted small" id="pickPhaseWhat" style="margin:0 0 8px">The top half of the seeds each pick who they play, in seed order, instead of the bracket deciding. Needs a full bracket (4, 8, 16, 32...).</p>
+            <div id="pickModeRow" style="display:none;margin:0 0 8px">
+              <div class="muted small">Who picks</div>
+              <select id="pPickMode">
+                <option value="half">The top half of the playoff seeds</option>
+                <option value="unbeaten">Only the unbeaten (3-0); everyone else is drawn</option>
+              </select>
+            </div>
             <div class="row" style="gap:10px;align-items:flex-end">
               <div style="width:170px"><div class="muted small">Time limit per pick</div><input type="number" id="pPickMins" min="0" max="1440" value="0"></div>
               <div class="muted small" style="flex:1;padding-bottom:8px">Minutes. 0 means no limit. When a pick runs out of time the standard bracket matchup is used, so one absent player cannot stall the event.</div>
@@ -574,11 +581,26 @@ async function renderHost() {
     const sel = document.getElementById('cBracket');
     const bt = (sel && sel.value) || (typeof T !== 'undefined' && T && T.bracketType) || 'single';
     const st2 = document.getElementById('pSwStage2');
+    const playoffs = bt === 'swiss' && !!(st2 && st2.checked);
     el.textContent = (bt !== 'swiss')
       ? 'Runs on round one of the bracket.'
-      : ((st2 && st2.checked)
-        ? 'On a Swiss this runs on the PLAYOFF bracket. Swiss round 1 is drawn by seed, and can be rearranged by hand once the rounds start.'
+      : (playoffs
+        ? 'On a Swiss this runs on the PLAYOFF bracket, and it can still be changed while the Swiss is played (Admin tab). Swiss round 1 is drawn by seed, and can be rearranged by hand.'
         : 'Does nothing on a Swiss with no second stage. Swiss round 1 is drawn by seed, and can be rearranged by hand once the rounds start.');
+    // Choosing WHO picks only means something when a Swiss stage decides the records first.
+    const modeRow = document.getElementById('pickModeRow');
+    const modeSel = document.getElementById('pPickMode');
+    if (modeRow) modeRow.style.display = playoffs ? '' : 'none';
+    const what = document.getElementById('pickPhaseWhat');
+    if (what) {
+      const win = parseInt((document.getElementById('pSwWinCut') || {}).value, 10) || 0;
+      const cutsOn = !!(document.getElementById('pSwCuts') || {}).checked;
+      const unb = (cutsOn && win) ? win + '-0' : 'no losses';
+      if (modeSel && modeSel.options[1]) modeSel.options[1].textContent = 'Only the unbeaten (' + unb + '); everyone else is drawn';
+      what.textContent = (playoffs && modeSel && modeSel.value === 'unbeaten')
+        ? 'Everyone who went through the Swiss without a loss chooses their playoff opponent, in seed order. The rest are drawn against each other, a different record against each other where possible. Needs a playoff of 4, 8, 16 or 32.'
+        : 'The top half of the seeds each pick who they play, in seed order, instead of the bracket deciding. Needs a full bracket (4, 8, 16, 32...).';
+    }
   };
 
   const syncSwissExtras = () => {
@@ -626,7 +648,7 @@ async function renderHost() {
       if (box) box.style.display = e.checked ? '' : 'none';
     });
   });
-  ['pSwCuts', 'pSwStage2', 'pSwWinCut', 'pSwLossCut'].forEach(id => {
+  ['pSwCuts', 'pSwStage2', 'pSwWinCut', 'pSwLossCut', 'pPickMode'].forEach(id => {
     const e = document.getElementById(id);
     if (e) { e.addEventListener('change', syncSwissExtras); e.addEventListener('input', syncSwissExtras); }
   });
@@ -763,7 +785,7 @@ async function renderHost() {
     setc('pSwStage2', pl.stage2);
     setv('pSwS2Cut', pl.s2CutTo || 8); setv('pSwS2Type', pl.s2Type || 'single');
     setv('pSwS2Bo', pl.s2Bo || 3); setv('pSwS2Final', pl.s2Final || 5);
-    setc('pPickPhase', a.pickPhase); setv('pPickMins', a.pickMinutes || 0);
+    setc('pPickPhase', a.pickPhase); setv('pPickMins', a.pickMinutes || 0); setv('pPickMode', a.pickMode || 'half');
     if (info) {
       info.style.display = '';
       info.innerHTML = '<div class="mono small muted">' + esc(p.name.toUpperCase()) + '</div>'
@@ -834,7 +856,7 @@ async function renderHost() {
     else { if (size) size.value = t.teamSize; if (formation) formation.value = t.formation || 'draft'; if (cBracket) cBracket.value = t.bracketType || 'single'; }
     setv('cDraftOrder', t.draftOrder || 'linear');
     setv('cSeed', t.seeding || '');
-    setc('pPickPhase', t.pickOpponents); setv('pPickMins', t.pickMinutes || 0);
+    setc('pPickPhase', t.pickOpponents); setv('pPickMins', t.pickMinutes || 0); setv('pPickMode', t.pickMode || 'half');
     setc('pStopOn', t.stopAtAlive); setv('pStopAt', t.stopAtAlive || 4);
     // plan / Bo
     const pl = t.plan || {};
@@ -907,6 +929,7 @@ async function renderHost() {
         presetId: presetId || '',
         pickOpponents: pickOn,
         pickMinutes: pickOn ? pv('pPickMins') : 0,
+        pickMode: (document.getElementById('pPickMode') || {}).value || 'half',
         stopAtAlive: stopOn ? pv('pStopAt') : 0,
         description: document.getElementById('cDesc').value,
         category,
@@ -997,33 +1020,20 @@ async function loadTournament() {
   T = await api('/api/t/' + tourneyId() + (tok ? '?token=' + encodeURIComponent(tok) : ''));
 }
 
-// When someone opens an organizer link (?admin=), confirm they want to become an organizer.
+// Organizer links no longer exist - co-organizers are added by FAF name in the Organizers panel.
+// Old ones are still out there in Discord history, and used to make whoever opened one an organizer
+// automatically. Now the server refuses them, so say why here rather than fail silently.
 async function maybePromptOrganizerClaim() {
   const claim = pendingOrganizerClaim;
   if (!claim || claim.id !== tourneyId()) return;
   pendingOrganizerClaim = null;
-  // already an organizer? nothing to do.
-  if (viewerIsOrganizer()) return;
-  // must be logged in to claim
-  if (fafAuth.enabled && !isFafVerified()) {
-    modal(`<h3>Organizer link</h3>
-      <p class="muted small">Log in with FAF to become an organizer of <strong>${esc(T.name)}</strong>.</p>
-      <div class="actions"><button class="btn ghost" id="ocCancel">Cancel</button><button class="btn faf" id="ocLogin">Log in with FAF</button></div>`, root => {
-      root.querySelector('#ocCancel').onclick = closeModal;
-      root.querySelector('#ocLogin').onclick = () => {
-        // preserve the admin token through the login round-trip
-        location.href = '/auth/faf/login?returnTo=' + encodeURIComponent('/t/' + claim.id + '?admin=' + claim.token);
-      };
-    });
-    return;
-  }
-  // Opening the organizer link makes you an organizer automatically — no prompt. Only a
-  // site admin can remove an organizer afterwards.
-  try {
-    await api('/api/t/' + claim.id + '/claim_organizer', { adminToken: claim.token });
-    toast('You are now an organizer of ' + T.name);
-    await refresh();
-  } catch (e) { toast(e.message, true); }
+  if (viewerIsOrganizer()) return;          // already one - the link changes nothing
+  modal(`<h3>Organizer links are no longer used</h3>
+    <p class="muted small">This link used to make whoever opened it an organizer of <strong>${esc(T.name)}</strong>. It does nothing now.</p>
+    <p class="muted small">If you should be organizing this tournament, ask one of its organizers to add you in the <strong>Organizers</strong> panel on the Admin tab, by your FAF name.</p>
+    <div class="actions"><button class="btn primary" id="ocOk">OK</button></div>`, root => {
+    root.querySelector('#ocOk').onclick = closeModal;
+  });
 }
 
 // When someone opens a late-signup link (?late=), confirm they want to sign up late.

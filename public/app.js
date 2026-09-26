@@ -842,7 +842,8 @@ function swissTable(t) {
       else if (quota && r.played >= quota) r.state = 'done';
     } else if (quota && r.played >= quota) r.state = 'done';
   }
-  return Object.values(S).sort((a, b) => b.w - a.w || b.gd - a.gd || teamSeed(a.id) - teamSeed(b.id));
+  // Same order as swissSort on the server: wins, then fewer losses, then game difference.
+  return Object.values(S).sort((a, b) => b.w - a.w || a.l - b.l || b.gd - a.gd || teamSeed(a.id) - teamSeed(b.id));
 }
 
 // Each team's W-L as it stood going INTO `round` - i.e. the score group a pairing came out of.

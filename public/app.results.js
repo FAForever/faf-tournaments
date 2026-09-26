@@ -552,15 +552,22 @@ async function drawAdmin(el) {
       </div>
       ${T.seriesName ? '<p class="muted small" style="margin-top:8px">Currently in <strong>' + esc(T.seriesName) + '</strong>.</p>' : ''}
     </div>`;
+    const meFid = (fafAuth.user && fafAuth.user.fafId) ? String(fafAuth.user.fafId) : '';
+    const canDropLast = sa;   // only a site admin may leave a tournament with no organizers
     html += `<div class="panel section"><h2>Organizers <span class="h2-strong">(${orgs.length})</span></h2>
-      <p class="muted small">Accounts with organizer rights on this tournament${sa ? ' — as site admin you can remove them' : ''}.</p>
-      <p class="muted small">Add an organizer below by FAF name or id. Any organizer can add co-organizers; only a site admin can remove one. Players see the visible organizers on the Chat tab; hide one to keep them off that public list (default: shown).</p>
+      <p class="muted small">Accounts with organizer rights on this tournament. <strong>Any organizer can add or remove any other organizer</strong>, or leave the team themselves - it is trust-based. Organizers are recognised by their FAF account; there is no organizer link.</p>
+      <p class="muted small">Add an organizer below by FAF name or id. Players see the visible organizers on the Chat tab; hide one to keep them off that public list (default: shown).</p>
       ${orgs.length ? '' : '<div class="empty" style="margin:10px 0">No FAF account holds organizer rights here yet. Add one below by FAF name or id.</div>'}
-      <div class="pick-rows" style="margin-top:10px">${orgs.map(o => `<div class="pick-row on" style="cursor:default">
-        <span class="pr-name">${esc(o.name)} <span class="muted small">FAF id ${esc(o.fafId)}</span> ${o.hidden ? '<span class="idbadge late" title="Not shown to players">hidden</span>' : ''}</span>
+      <div class="pick-rows" style="margin-top:10px">${orgs.map(o => {
+        const mine = meFid && String(o.fafId) === meFid;
+        const removable = orgs.length > 1 || canDropLast;
+        return `<div class="pick-row on" style="cursor:default">
+        <span class="pr-name">${esc(o.name)}${mine ? ' <span class="idbadge verified">you</span>' : ''} <span class="muted small">FAF id ${esc(o.fafId)}</span> ${o.hidden ? '<span class="idbadge late" title="Not shown to players">hidden</span>' : ''}</span>
         <button class="btn ghost small" data-orgvis="${esc(o.fafId)}" data-hidden="${o.hidden ? 1 : 0}">${o.hidden ? 'Show to players' : 'Hide from players'}</button>
-        ${sa ? '<button class="btn danger small" data-orgdel="' + esc(o.fafId) + '">Remove</button>' : ''}
-      </div>`).join('')}</div>
+        ${removable ? '<button class="btn danger small" data-orgdel="' + esc(o.fafId) + '" data-orgname="' + esc(o.name) + '" data-orgself="' + (mine ? 1 : 0) + '">' + (mine ? 'Leave' : 'Remove') + '</button>'
+          : '<span class="muted small" title="Add another organizer first">last organizer</span>'}
+      </div>`;
+      }).join('')}</div>
       <div style="margin-top:10px">
         ${fafAuth.user && (sa || (fafAuth.user.director && T.category === 'official')) && !orgs.some(o => o.fafId === fafAuth.user.fafId) ? '<button class="btn ghost small" id="orgClaimSelf" style="margin-bottom:10px">+ Add myself (' + esc(fafAuth.user.fafName || '') + ')</button>' : ''}
         <div id="orgAdd"></div>
@@ -691,7 +698,14 @@ async function drawAdmin(el) {
             ? 'On a Swiss this runs on the <strong>playoff bracket</strong>. Swiss round 1 is drawn by seed, and can be rearranged by hand once the rounds start.'
             : 'Does nothing on a Swiss with no second stage. Swiss round 1 is drawn by seed, and can be rearranged by hand once the rounds start.')}</div>
         <div id="af_pickBox" style="display:${T.pickOpponents ? 'block' : 'none'};padding:8px 0 0 22px">
-          <p class="muted small" style="margin:0 0 8px">The top half of the seeds each pick who they play, in seed order. Needs a full bracket (4, 8, 16, 32...).</p>
+          <p class="muted small" id="af_pickWhat" style="margin:0 0 8px">The top half of the seeds each pick who they play, in seed order. Needs a full bracket (4, 8, 16, 32...).</p>
+          <div id="af_pickModeRow" style="display:none;margin:0 0 8px">
+            <div class="muted small">Who picks</div>
+            <select id="af_pickMode">
+              <option value="half"${T.pickMode !== 'unbeaten' ? ' selected' : ''}>The top half of the playoff seeds</option>
+              <option value="unbeaten"${T.pickMode === 'unbeaten' ? ' selected' : ''}>Only the unbeaten; everyone else is drawn</option>
+            </select>
+          </div>
           <div class="row" style="gap:10px;align-items:flex-end">
             <div style="width:170px"><div class="muted small">Time limit per pick</div><input type="number" id="af_pickMins" min="0" max="1440" value="${T.pickMinutes || 0}"></div>
             <div class="muted small" style="flex:1;padding-bottom:8px">Minutes. 0 means no limit. A pick that runs out of time gets the standard bracket matchup.</div>
@@ -947,6 +961,10 @@ async function drawAdmin(el) {
       </div></div>`;
   }
 
+  // Who picks their playoff opponent, and redoing the playoffs, while a Swiss stage runs. The
+  // Format panel is gone by now, and this is exactly when that decision gets made.
+  if (T.status === 'running' && T.playoffs) html += playoffSetupPanelHTML();
+
   // Stop a running tournament where it stands. This is the qualifier control: a LotS qualifier
   // runs until the top 4 is settled, not until a champion exists.
   if (T.status === 'running' && T.competition !== 'ffa' && T.survivors) {
@@ -998,6 +1016,7 @@ async function drawAdmin(el) {
     </div></div>`;
 
   el.innerHTML = html;
+  wirePlayoffSetup();
 
   // Multi-day picker, two-way bound to the native date input beside it (see mountDayPicker).
   let _tdDayPick = null;
@@ -1055,7 +1074,7 @@ async function drawAdmin(el) {
   const claimSelf = document.getElementById('orgClaimSelf');
   if (claimSelf) claimSelf.onclick = async () => {
     try {
-      await api('/api/t/' + T.id + '/claim_organizer', { adminToken: secrets.adminToken });
+      await api('/api/t/' + T.id + '/add_organizer', { fafId: fafAuth.user.fafId, name: fafAuth.user.fafName || '', admin: adminToken() });
       toast('You are now listed as an organizer');
       await refresh();
     } catch (e) { toast(e.message, true); }
@@ -1186,11 +1205,18 @@ async function drawAdmin(el) {
     } catch (e) { toast(e.message, true); }
   });
   el.querySelectorAll('[data-orgdel]').forEach(b => b.onclick = async () => {
+    const self = b.dataset.orgself === '1';
+    const who = b.dataset.orgname || 'this account';
     const last = (T.organizers || []).length <= 1;
-    if (!confirm('Remove organizer rights from this account?' + (last ? '\n\nThis is the LAST organizer — afterwards only site admins can manage this tournament.' : ''))) return;
+    const msg = self
+      ? 'Leave the organizer team?\n\nYou lose organizer access to this tournament straight away. Another organizer can add you back.'
+      : 'Remove ' + who + ' as an organizer?\n\nThey lose organizer access straight away.';
+    if (!confirm(msg + (last ? '\n\nThis is the LAST organizer - afterwards only site admins can manage this tournament.' : ''))) return;
     try {
-      await api('/api/t/' + T.id + '/remove_organizer', { fafId: b.dataset.orgdel, admin: siteAdmin() });
-      toast('Organizer removed');
+      const r = await api('/api/t/' + T.id + '/remove_organizer', { fafId: b.dataset.orgdel, admin: adminToken() });
+      toast(self ? 'You left the organizer team' : who + ' is no longer an organizer');
+      // Having left, the Admin tab is not ours any more - go somewhere that still exists.
+      if (r && r.self) { currentTab = 'overview'; syncTabURL(); }
       await refresh();
     } catch (e) { toast(e.message, true); }
   });
@@ -1514,6 +1540,21 @@ async function drawAdmin(el) {
       // a survivor cut-off is an elimination-bracket idea; swiss and FFA have no such count
       if (g('af_stopAt')) g('af_stopAt').style.display = (isFfa || bt === 'swiss') ? 'none' : '';
       if (g('af_pickBox')) g('af_pickBox').style.display = (g('af_pick') && g('af_pick').checked) ? 'block' : 'none';
+      // WHO picks is a playoff question: it needs a Swiss stage to have produced records first.
+      {
+        const playoffs = g('af_bt') && g('af_bt').value === 'swiss' && g('af_sw2') && g('af_sw2').checked;
+        if (g('af_pickModeRow')) g('af_pickModeRow').style.display = playoffs ? '' : 'none';
+        const cutsOn = g('af_swcuts') && g('af_swcuts').checked;
+        const win = cutsOn ? (parseInt((g('af_swwin') || {}).value, 10) || 0) : 0;
+        if (g('af_pickMode') && g('af_pickMode').options[1]) {
+          g('af_pickMode').options[1].textContent = 'Only the unbeaten (' + (win ? win + '-0' : 'no losses') + '); everyone else is drawn';
+        }
+        if (g('af_pickWhat')) {
+          g('af_pickWhat').textContent = (playoffs && g('af_pickMode') && g('af_pickMode').value === 'unbeaten')
+            ? 'Everyone who went through the Swiss without a loss chooses their playoff opponent, in seed order. The rest are drawn against each other, a different record against each other where possible. Needs a playoff of 4, 8, 16 or 32. Can still be changed while the Swiss is played, on this tab.'
+            : 'The top half of the seeds each pick who they play, in seed order. Needs a full bracket (4, 8, 16, 32...).';
+        }
+      }
       // picking is a bracket concept; FFA has no round-one pairing to choose
       if (g('af_pickPhase')) g('af_pickPhase').style.display = isFfa ? 'none' : '';
       g('af_fpoints').style.display = g('af_fmode').value === 'points' ? '' : 'none';
@@ -1522,7 +1563,7 @@ async function drawAdmin(el) {
       g('af_ffinalsize').style.display = g('af_ffinalmode').value === '1' ? '' : 'none';
       syncPm();
     };
-    for (const id of ['af_comp', 'af_size', 'af_form', 'af_bt', 'af_fsize', 'af_fmode', 'af_fcutmode', 'af_ffinalmode', 'af_perRound', 'af_swcuts', 'af_sw2', 'af_pick', 'af_stopOn']) { const e = g(id); if (e) e.onchange = sync; }
+    for (const id of ['af_comp', 'af_size', 'af_form', 'af_bt', 'af_fsize', 'af_fmode', 'af_fcutmode', 'af_ffinalmode', 'af_perRound', 'af_swcuts', 'af_sw2', 'af_pick', 'af_stopOn', 'af_pickMode', 'af_swwin']) { const e = g(id); if (e) e.onchange = sync; }
     sync();
 
     g('af_save').onclick = async () => {
@@ -1542,6 +1583,7 @@ async function drawAdmin(el) {
         const pickOn = g('af_pick') && g('af_pick').checked;
         body.pickOpponents = pickOn ? 1 : 0;
         body.pickMinutes = pickOn ? g('af_pickMins').value : 0;
+        if (g('af_pickMode')) body.pickMode = g('af_pickMode').value;
         body.bracketType = g('af_bt').value;
         body.perRoundBo = (g('af_perRound') && g('af_perRound').checked) ? 1 : 0;
         if (g('af_bt').value === 'single') body.plan = { early: g('af_early').value, semi: g('af_semi').value, final: g('af_final').value };

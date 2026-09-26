@@ -1635,8 +1635,10 @@ function drawBracket(el) {
       hdr.className = 'division-header';
       hdr.innerHTML = '<h2 style="margin:0 0 10px">Playoffs <span class="h2-strong">'
         + esc(String(T.stage2.cutTo)) + '-team ' + (T.stage2.type === 'double' ? 'double' : 'single') + ' elimination</span></h2>'
-        + '<p class="muted small" style="margin:0 0 12px">Seeded from the Swiss standings below.</p>';
+        + '<p class="muted small" style="margin:0 0 12px">' + playoffOriginHTML() + '</p>'
+        + playoffActionsHTML(true);
       el.appendChild(hdr);
+      wirePlayoffActions(hdr);
       if (T.stage2.type === 'double') {
         const gf = T.matches.find(m => m.bracket === 'gf');
         bracketColumns(el, 'wb', 'Winners bracket', gf, 0);
@@ -2230,18 +2232,29 @@ function drawPickPhase(el) {
   const head = p.status === 'done'
     ? '<h2>Opponents <span class="h2-strong">chosen</span></h2>'
     : `<h2>Choosing <span class="h2-strong">opponents</span></h2>`;
+  // 'unbeaten' mode: only the players with no Swiss loss pick, from anyone, and the rest are drawn.
+  // Their records are what the rule is about, so they are shown next to every name.
+  const unbeaten = p.mode === 'unbeaten';
+  const recOf = id => (unbeaten && p.records && p.records[id]) ? p.records[id] : '';
+  const tag = id => '<span class="muted mono small">(' + seedOf(id) + (recOf(id) ? ' · ' + esc(recOf(id)) : '') + ')</span>';
 
   let body = '';
   if (p.status === 'open') {
     const turnName = p.turn ? nm(p.turn) : '';
-    body += `<p class="muted small" style="margin:2px 0 12px">The top ${p.half} seeds each choose who they play, in seed order.
+    const n = (p.order || []).length;
+    const who = unbeaten
+      ? (n === 1 ? 'The one player who went through unbeaten chooses who they play.'
+        : 'The ' + n + ' players who went through unbeaten each choose who they play, in seed order.')
+        + ' Everyone else is then drawn against each other at random, a different record against each other where possible.'
+      : `The top ${p.half} seeds each choose who they play, in seed order.`;
+    body += `<p class="muted small" style="margin:2px 0 12px">${esc(who)}
       ${p.perPickMs ? 'Each pick has a time limit; if it runs out, the standard bracket matchup is used.' : 'There is no time limit.'}</p>`;
     if (p.myTurn) {
       body += `<div class="pick-callout"><div class="pick-callout-h">Your pick ${clock()}</div>
         <div class="muted small">Choose your opponent below.</div></div>`;
     } else {
       body += `<div class="infocell"><div class="mono small muted">WAITING ON</div>
-        <div>${esc(turnName)} <span class="muted small">(seed ${seedOf(p.turn)})</span> ${clock()}</div></div>`;
+        <div>${esc(turnName)} <span class="muted small">(seed ${seedOf(p.turn)}${recOf(p.turn) ? ', ' + esc(recOf(p.turn)) : ''})</span> ${clock()}</div></div>`;
     }
   }
 
@@ -2251,10 +2264,10 @@ function drawPickPhase(el) {
     const isTurn = p.status === 'open' && id === p.turn;
     return `<div class="pick-row${isTurn ? ' turn' : ''}">
       <span class="pick-seed mono">${seedOf(id)}</span>
-      <span class="pick-name">${esc(nm(id))}</span>
+      <span class="pick-name">${esc(nm(id))}${recOf(id) ? ' <span class="muted mono small">' + esc(recOf(id)) + '</span>' : ''}</span>
       <span class="pick-vs muted">vs</span>
       <span class="pick-target">${pick
-        ? esc(nm(pick)) + ' <span class="muted mono small">(' + seedOf(pick) + ')</span>'
+        ? esc(nm(pick)) + ' ' + tag(pick)
         : (isTurn ? '<span class="pick-pending">choosing\u2026</span>' : '<span class="muted">\u2014</span>')}</span>
     </div>`;
   }).join('');
@@ -2266,18 +2279,20 @@ function drawPickPhase(el) {
     body += `<div class="pick-choose">
       <div class="mono small muted" style="margin-bottom:6px">${p.myTurn ? 'PICK YOUR OPPONENT' : 'PICK ON BEHALF OF ' + esc(who.toUpperCase())}</div>
       <div class="pick-opts">${p.available.map(id =>
-        `<button class="btn ghost small" data-pickop="${esc(id)}">${esc(nm(id))} <span class="muted mono">${seedOf(id)}</span></button>`).join('')}</div>
+        `<button class="btn ghost small" data-pickop="${esc(id)}">${esc(nm(id))} <span class="muted mono">${seedOf(id)}${recOf(id) ? ' \u00b7 ' + esc(recOf(id)) : ''}</span></button>`).join('')}</div>
     </div>`;
   }
   if (org && p.status === 'open' && (p.log || []).length) {
     body += '<div style="margin-top:10px"><button class="btn ghost small" id="pickUndo">Undo the last pick</button></div>';
   }
+  if (p.forWhat === 'stage2') body += playoffActionsHTML(true);
   if ((p.log || []).some(l => l.auto)) {
     body += '<p class="muted small" style="margin:10px 0 0">Picks marked automatic were made by the clock running out, using the standard bracket matchup.</p>';
   }
 
   sec.innerHTML = head + body;
   el.appendChild(sec);
+  wirePlayoffActions(sec);
 
   sec.querySelectorAll('[data-pickop]').forEach(btn => btn.onclick = async () => {
     btn.disabled = true;
@@ -2291,6 +2306,137 @@ function drawPickPhase(el) {
     try { await api('/api/t/' + T.id + '/undo_pick_opponent', { admin: adminToken() }); toast('Pick undone'); await refresh(); }
     catch (e) { toast(e.message, true); }
   };
+}
+
+// ---- the playoff setup of a Swiss stage (organizers) ----
+// Who picks their playoff opponent, and the two ways back once the playoffs exist: undo the last
+// pick, or redo the lot. Both stay possible until the first playoff match starts. Shown in two
+// places: the Playoffs panel on the Admin tab, and above the playoff bracket, which is where an
+// organizer is looking the moment the Swiss stage ends and the bracket appears.
+function playoffUnbeatenLabel(t) {
+  const c = swissCutCfg(t || T);
+  return c.win ? c.win + '-0' : 'no losses';
+}
+function playoffPickText(pick, t) {
+  if (pick === 'unbeaten') return 'Only the unbeaten (' + playoffUnbeatenLabel(t) + ') pick their opponent, everyone else is drawn';
+  if (pick === 'half') return 'The top half of the playoff seeds pick their opponent';
+  return 'Nobody picks: the bracket is seeded from the Swiss standings';
+}
+// "A's pick of B" for the pick an undo would take back, or '' when there is none.
+function playoffLastPick() {
+  const p = T.picks;
+  if (!p || p.forWhat !== 'stage2' || !(p.log || []).length) return '';
+  const last = p.log[p.log.length - 1];
+  return teamName(last.by) + '’s pick of ' + teamName(last.target);
+}
+function playoffActionsHTML(onBracket) {
+  const P = T.playoffs;
+  if (!P || !P.made || P.locked || !viewerIsOrganizer()) return '';
+  // While the picks are still open the pick panel has its own undo button.
+  const undo = P.built && playoffLastPick();
+  return `<div class="playoff-actions">
+    ${undo ? '<button class="btn ghost small" data-poundo="1">Undo the last pick</button>' : ''}
+    <button class="btn ghost small" data-poredo="1">Redo the playoffs</button>
+    ${onBracket ? '<span class="muted small">Organizers only, until the first playoff match starts. Who picks is set on the Admin tab.</span>' : ''}
+  </div>`;
+}
+async function playoffRedo(pick, minutes) {
+  const what = pick === 'off'
+    ? 'The playoff bracket is taken down and seeded again from the Swiss standings.'
+    : 'The picks start again from the first picker' + (pick === 'unbeaten' ? ', and whoever nobody picks is drawn again.' : '.');
+  if (!confirm('Redo the playoffs?\n\n' + what + '\n\nOnly possible while no playoff match has started.')) return false;
+  try {
+    const r = await api('/api/t/' + T.id + '/playoff_setup', { pick, minutes, redo: 1, admin: adminToken() });
+    toast('Playoffs set up again' + (r.droppedPools ? ' (' + r.droppedPools + ' per-match map pool setting' + (r.droppedPools === 1 ? '' : 's') + ' cleared)' : ''));
+    await refresh();
+    return true;
+  } catch (e) { toast(e.message, true); return false; }
+}
+function wirePlayoffActions(root) {
+  const P = T.playoffs;
+  if (!root || !P) return;
+  root.querySelectorAll('[data-poundo]').forEach(b => b.onclick = async () => {
+    if (!confirm('Undo ' + playoffLastPick() + '?\n\nThe playoff bracket is taken down again and that pick is open.')) return;
+    try { await api('/api/t/' + T.id + '/undo_pick_opponent', { admin: adminToken() }); toast('Pick undone'); await refresh(); }
+    catch (e) { toast(e.message, true); }
+  });
+  root.querySelectorAll('[data-poredo]').forEach(b => b.onclick = () => playoffRedo(P.pick, T.pickMinutes || 0));
+}
+// How the playoff matchups came about, for the line above the bracket. Everyone can read this.
+function playoffOriginHTML() {
+  const p = T.picks;
+  if (!p || p.forWhat !== 'stage2' || p.status !== 'done') return esc('Seeded from the Swiss standings below.');
+  const vs = pr => esc(teamName(pr[0])) + ' vs ' + esc(teamName(pr[1]));
+  const chosen = (p.order || []).filter(id => p.picks[id]).map(id => [id, p.picks[id]]);
+  if (p.mode === 'unbeaten') {
+    const drawn = p.drawn || [];
+    return (chosen.length ? 'Chosen by the unbeaten: ' + chosen.map(vs).join(' · ') + '. ' : 'Nobody went through unbeaten, so nothing was picked. ')
+      + (drawn.length ? 'Drawn: ' + drawn.map(vs).join(' · ') + '.' : '');
+  }
+  return 'The top seeds chose their opponents: ' + chosen.map(vs).join(' · ') + '.';
+}
+
+// The Playoffs panel on the Admin tab, for a Swiss stage that feeds a playoff bracket.
+function playoffSetupPanelHTML() {
+  const P = T.playoffs;
+  if (!P || T.status !== 'running') return '';
+  let state;
+  if (P.locked) state = 'A playoff match has started, so the playoff setup is final.';
+  else if (!P.made) state = 'The Swiss stage is still being played. When it ends, the playoffs are set up the way chosen here, and this can be changed at any time until then.';
+  else if (!P.built) state = 'The players are choosing their playoff opponents right now (see the Bracket tab). The clock can still be changed, and the playoffs can be redone with a different setting.';
+  else state = 'The playoff bracket is set up. Until the first playoff match starts - a result, a score, or a single map or faction ban - the last pick can be undone or the playoffs redone.';
+  const opt = v => `<option value="${v}"${P.pick === v ? ' selected' : ''}>${esc(playoffPickText(v))}</option>`;
+  return `<div class="panel section" id="playoffPanel"><h2>Playoffs</h2>
+    <p class="muted small" style="margin:6px 0 10px">${esc(state)}</p>
+    ${P.locked
+      ? `<div class="infocell"><div class="mono small muted">SET UP AS</div><div>${esc(playoffPickText(P.pick))}</div></div>`
+      : `<label>When the Swiss stage ends</label>
+    <select id="po_pick">${opt('off')}${opt('half')}${opt('unbeaten')}</select>
+    <div id="po_help" class="muted small" style="margin:6px 0 0"></div>
+    <div id="po_minsRow" class="row" style="gap:10px;align-items:flex-end;margin-top:8px">
+      <div style="width:170px"><div class="muted small">Time limit per pick</div><input type="number" id="po_mins" min="0" max="1440" value="${T.pickMinutes || 0}"></div>
+      <div class="muted small" style="flex:1;padding-bottom:8px">Minutes. 0 means no limit. A pick that runs out of time gets the standard bracket matchup.</div>
+    </div>
+    <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn amber" id="po_save">Save</button></div>
+    ${playoffActionsHTML(false)}`}
+  </div>`;
+}
+function wirePlayoffSetup() {
+  const P = T.playoffs;
+  const sel = document.getElementById('po_pick');
+  if (!P || !sel) return;
+  const mins = document.getElementById('po_mins');
+  const save = document.getElementById('po_save');
+  const help = document.getElementById('po_help');
+  const cut = (T.stage2 && T.stage2.cutTo) || 0;
+  const full = cut >= 4 && (cut & (cut - 1)) === 0;
+  const c = swissCutCfg(T);
+  const example = (c.win && c.loss >= 3) ? ' (' + c.win + '-1 against ' + c.win + '-2)' : '';
+  const sync = () => {
+    const v = sel.value;
+    document.getElementById('po_minsRow').style.display = v === 'off' ? 'none' : '';
+    let h = v === 'unbeaten'
+      ? 'Everyone who went through the Swiss without a loss chooses their opponent from the rest of the qualifiers, in seed order. The players left over are then drawn against each other at random, a different record against each other where possible' + example + '.'
+      : v === 'half'
+        ? 'Seeds 1-' + (cut / 2) + ' of the playoff choose their opponent from seeds ' + (cut / 2 + 1) + '-' + cut + ', in seed order.'
+        : 'Standard seeding: the best Swiss record meets the lowest qualifier, and so on.';
+    if (v !== 'off' && !full) h += ' Picking needs a playoff of 4, 8, 16 or 32 players; with ' + cut + ' it is seeded instead.';
+    help.textContent = h;
+    save.textContent = (P.made && v !== P.pick) ? 'Redo the playoffs with this setting' : 'Save';
+  };
+  sel.onchange = sync;
+  sync();
+  save.onclick = async () => {
+    const v = sel.value;
+    const m = parseInt(mins.value, 10) || 0;
+    if (P.made && v !== P.pick) { await playoffRedo(v, m); return; }
+    try {
+      await api('/api/t/' + T.id + '/playoff_setup', { pick: v, minutes: m, admin: adminToken() });
+      toast('Playoff setup saved');
+      await refresh();
+    } catch (e) { toast(e.message, true); }
+  };
+  wirePlayoffActions(document.getElementById('playoffPanel'));
 }
 
 // Round 1 has no records to pair on, so the site draws it by seed - the same every time. Some
