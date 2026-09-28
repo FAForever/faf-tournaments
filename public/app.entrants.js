@@ -1520,17 +1520,23 @@ function openStartConfig() {
         : (r === R ? (p.final || 5) : r === R - 1 ? (p.semi || 3) : (p.early || 3));
       rows.push(`<div class="row" style="align-items:center;margin:6px 0"><div style="flex:1">${lbl}</div><div style="width:110px">${boSelect('bo_r' + r, dflt)}</div></div>`);
     }
+    // A 3rd place match needs two real semi-finals, so four players, and no divisions.
+    const thirdOK = n >= 4 && !((T.divisions || 0) > 1);
     return modal(`
       <h3>Bracket setup — single elimination</h3>
       <p class="muted small">${n} teams, ${R} round${R > 1 ? 's' : ''}. Set the best-of per round.</p>
       ${rows.join('')}
+      ${thirdOK ? `<label style="display:flex;align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text);margin-top:10px">
+        <input type="checkbox" id="cfgThird"${T.plan && T.plan.thirdPlace ? ' checked' : ''}> 3rd place match: the two beaten semi-finalists play for 3rd (same length as the semi-finals)
+      </label>` : ''}
       <div class="actions"><button class="btn ghost" id="cfgCancel">Cancel</button><button class="btn primary" id="cfgGo">Generate bracket</button></div>`,
       root => {
         root.querySelector('#cfgCancel').onclick = closeModal;
         root.querySelector('#cfgGo').onclick = () => {
           const rounds = [];
           for (let r = 1; r <= R; r++) rounds.push(parseInt(root.querySelector('#bo_r' + r).value, 10));
-          start({ rounds });
+          const third = root.querySelector('#cfgThird');
+          start({ rounds, thirdPlace: third && third.checked ? 1 : 0 });
         };
       });
   }
@@ -1602,7 +1608,7 @@ function openStartConfig() {
     </div>` : ''}
     ${s2On ? `<div class="infocell" style="margin:0 0 12px">
       <div class="mono small muted">SECOND STAGE</div>
-      <div>Top ${s2Cut} go through to a ${sp.s2Type === 'double' ? 'double' : 'single'}-elimination playoff bracket</div>
+      <div>Top ${s2Cut} go through to a ${sp.s2Type === 'double' ? 'double' : 'single'}-elimination playoff bracket${sp.s2Type !== 'double' && sp.s2Third ? ' with a 3rd place match' : ''}</div>
       <div class="muted small" style="margin-top:4px">Built automatically in this same tournament when the Swiss stage ends.</div>
     </div>` : ''}
     <div id="swRoundsWrap" style="display:${cutsOn ? 'none' : ''}">
@@ -1638,6 +1644,7 @@ function openStartConfig() {
         if (s2On) {
           cfg.stage2 = 1; cfg.s2CutTo = s2Cut; cfg.s2Type = sp.s2Type || 'single';
           cfg.s2Bo = parseInt(sp.s2Bo, 10) || 3; cfg.s2Final = parseInt(sp.s2Final, 10) || 5; cfg.s2Gf = parseInt(sp.s2Gf, 10) || 5;
+          cfg.s2Third = sp.s2Third ? 1 : 0;
         }
         start(cfg);
       };

@@ -249,7 +249,10 @@ function playerName(id) {
 }
 
 function mapsFor(bracket, round) {
-  return (T.maps && T.maps[bracket + ':' + round]) || [];
+  const own = (T.maps && T.maps[bracket + ':' + round]) || [];
+  // A 3rd place match with no maps of its own is played on the semi-finals' maps.
+  if (bracket === '3p' && !own.length) return (T.maps && T.maps['wb:' + (round - 1)]) || [];
+  return own;
 }
 // resolve a map id to its DB object (or null)
 function mapObj(id) {
@@ -345,6 +348,7 @@ document.addEventListener('click', e => {
 
 function roundLabel(m) {
   if (m.bracket === 'gf') return T.bracketType === 'swiss' ? 'FINAL' : 'GRAND FINAL';
+  if (m.bracket === '3p') return '3RD PLACE MATCH';
   if (m.bracket === 'sw') return 'ROUND ' + m.round;
   if (m.bracket === 'ffa') {
     const maxR = Math.max.apply(null, T.matches.map(x => x.round));
@@ -378,6 +382,7 @@ function colLabel(bracket, r, totalRounds) {
     if (totalRounds && r === totalRounds) return 'LB FINAL';
     return 'LB ROUND ' + r;
   }
+  if (bracket === '3p') return '3RD PLACE';
   return 'ROUND ' + r;
 }
 
@@ -814,6 +819,46 @@ function swissStageTwoPlanned(t) {
 }
 function stageTwoLive(t) { const s = stageTwoCfgOf(t); return !!(s && s.built); }
 
+// ---- the 3rd place match (single elimination, or single-elimination playoffs) ----
+function thirdPlaceMatchOf(t) {
+  return ((t || T).matches || []).find(m => m.bracket === '3p' && !(m.division || 0)) || null;
+}
+// Has anything happened in it that removing it would destroy? Mirrors lib/match thirdPlaceStarted.
+function thirdPlaceTouched(m) {
+  if (!m) return false;
+  if (m.status === 'done' || m.status === 'live' || (Array.isArray(m.games) && m.games.length) || m.pendingReport) return true;
+  if (m.veto && ((m.veto.stepIndex || 0) > 0 || (m.veto.banned || []).length || (m.veto.picks || []).length)) return true;
+  // faction choices stay secret until both sides are done; a side that is done is a start
+  if (m.fveto && m.fveto.games && Object.values(m.fveto.games).some(g => g && (g.t1Done || g.t2Done))) return true;
+  return false;
+}
+// Can this tournament have one at all, right now? Single elimination without divisions, or a
+// Swiss whose playoffs are single elimination - in both cases with at least four players in it.
+function thirdPlaceEligible(t) {
+  t = t || T;
+  if (!t || t.competition === 'ffa' || t.imported) return false;
+  if (t.bracketType === 'single') return !((t.divisions || 0) > 1) && (t.teams || []).length >= 4;
+  if (t.bracketType !== 'swiss') return false;
+  const s2 = stageTwoCfgOf(t);
+  if (!s2 || s2.type === 'double') return false;
+  return (s2.built ? (s2.field || []).length : s2.cutTo) >= 4;
+}
+// Is it switched on (built, or waiting for the bracket to be built)?
+function thirdPlaceOn(t) {
+  t = t || T;
+  if (thirdPlaceMatchOf(t)) return true;
+  if (t.bracketType === 'swiss') { const s2 = stageTwoCfgOf(t); return !!(s2 ? s2.thirdPlace : (t.plan && t.plan.s2Third)); }
+  return !!((t.cfg && t.cfg.thirdPlace) || (!t.cfg && t.plan && t.plan.thirdPlace));
+}
+// The tab the bracket lives on. A Swiss is a list of rounds - until its playoffs exist, and then
+// the playoff bracket is what is on top of that tab, so it is called what it is.
+function bracketTabName(t) {
+  t = t || T;
+  if (t.competition === 'ffa') return 'Rounds';
+  if (t.bracketType !== 'swiss') return 'Bracket';
+  return (t.playoffs && t.playoffs.made) || stageTwoLive(t) ? 'Bracket' : 'Rounds';
+}
+
 // One client-side Swiss table, used by the standings tab and by any badge that needs a
 // team's state. Mirrors lib/swiss.js swissRecord.
 function swissTable(t) {
@@ -934,9 +979,10 @@ function planSummary(t) {
     }
     return parts.join(' · ');
   };
+  const third = thirdPlaceOn(t) ? ' \u00b7 3rd place match' : '';
   if (t.perRoundBo) {
     if (t.bracketType === 'single' && Array.isArray(p.roundsList) && p.roundsList.length) {
-      return compactRounds(p.roundsList, 'R');
+      return compactRounds(p.roundsList, 'R') + third;
     }
     if (t.bracketType === 'double' && (Array.isArray(p.wbList) || Array.isArray(p.lbList))) {
       const wb = compactRounds(p.wbList || [], 'WB R');
@@ -944,7 +990,7 @@ function planSummary(t) {
       return [wb, lb].filter(Boolean).join(' · ') + ' · GF Bo' + (p.gf || 5) + (p.lbHandicap ? ' (upper finalist starts 1-0 up)' : '');
     }
   }
-  if (t.bracketType === 'single') return 'Bo' + p.early + ' rounds · Bo' + p.semi + ' semifinal · Bo' + p.final + ' final';
+  if (t.bracketType === 'single') return 'Bo' + p.early + ' rounds · Bo' + p.semi + ' semifinal · Bo' + p.final + ' final' + third;
   if (t.bracketType === 'double') return 'Winners bracket Bo' + p.wb + ' (final Bo' + p.wbFinal + ') · losers bracket Bo' + p.lb + ' (final Bo' + p.lbFinal + ') · grand final Bo' + p.gf + (p.lbHandicap ? ' (upper finalist starts 1-0 up)' : '');
   const cutTxt = swissCutLabel(t);
   const parts = ['Bo' + p.bo + ' matches'];
@@ -953,7 +999,8 @@ function planSummary(t) {
     if (p.decidingBo) parts.push('Bo' + p.decidingBo + ' when a win qualifies or a loss eliminates');
   }
   if (p.stage2) {
-    parts.push('top ' + (p.s2CutTo || 8) + ' go to a ' + (p.s2Type === 'double' ? 'double' : 'single') + '-elimination playoff bracket');
+    parts.push('top ' + (p.s2CutTo || 8) + ' go to a ' + (p.s2Type === 'double' ? 'double' : 'single') + '-elimination playoff bracket'
+      + (p.s2Type !== 'double' && thirdPlaceOn(t) ? ' with a 3rd place match' : ''));
   } else if (p.final) {
     parts.push('Bo' + p.finalBo + ' final between the top 2');
   } else if (!cutTxt) {

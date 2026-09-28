@@ -23,7 +23,7 @@ const {
   initVeto, vetoCurrentStep, vetoAdvance, initMatchVetoes,
   FACTIONS, factionVetoOn, initFactionVeto, newFactionGame, factionSideKey, factionNextStep, factionResolve, factionViewFor,
   newMatch, routeVal, setSlot, evaluate, finalizeMatch, undoMatch, backfillMatchLinks,
-  buildSingle, buildDouble,
+  buildSingle, buildDouble, thirdPlaceMatch, addThirdPlace, removeThirdPlace, thirdPlaceStarted,
 } = require('./lib/match');
 // Swiss and FFA formats (import the shared match primitives internally).
 const { PRESETS, presetById, presetsFor } = require('./lib/presets');
@@ -508,7 +508,9 @@ function cleanSwissExtras(src, prev) {
     s2Bo: pick('s2Bo', 3, v => boOr(v, 3)),
     s2Final: pick('s2Final', 5, v => boOr(v, 5)),
     s2Gf: pick('s2Gf', 5, v => boOr(v, 5)),
-    s2Hcap: pick('s2Hcap', 0, v => (v ? 1 : 0))
+    s2Hcap: pick('s2Hcap', 0, v => (v ? 1 : 0)),
+    // single-elimination playoffs only: the two beaten semi-finalists play for 3rd
+    s2Third: pick('s2Third', 0, v => (v ? 1 : 0))
   };
   // A cut of 1 loss is just single elimination and a cut of 1 win is a one-round event; both
   // are legal but pointless, so they are left alone rather than "corrected" behind the organizer.
@@ -546,11 +548,14 @@ function buildStageTwo(ex, cfgSrc) {
       pickMode: cleanPickMode(ex.pickMode), built: 0, field: []
     };
   }
-  return {
+  const single = {
     type: 'single', cutTo: cut,
     rounds: cleanBoList(Array.isArray(c.s2rounds) && c.s2rounds.length ? c.s2rounds : spread(ex.s2Final), R),
     pickPhase: ex.pickPhase ? 1 : 0, pickMode: cleanPickMode(ex.pickMode), built: 0, field: []
   };
+  // Only written when asked for, so a stage without it stays exactly as it always was.
+  if (ex.s2Third && cut >= 4) single.thirdPlace = 1;
+  return single;
 }
 
 // ---------- stopping a qualifier early ----------
@@ -752,9 +757,10 @@ function playoffPickSetting(t) {
   return cleanPickMode(s2.pickMode);
 }
 // The matches of the playoff bracket. On a Swiss with a second stage every elimination match
-// belongs to it: the classic top-2 final ('gf') is switched off whenever stage 2 is on.
+// belongs to it: the classic top-2 final ('gf') is switched off whenever stage 2 is on. The 3rd
+// place match ('3p') is part of the playoffs too, so a redo takes it down and builds it again.
 function playoffMatches(t) {
-  return (t.matches || []).filter(m => m.bracket === 'wb' || m.bracket === 'lb' || m.bracket === 'gf');
+  return (t.matches || []).filter(m => m.bracket === 'wb' || m.bracket === 'lb' || m.bracket === 'gf' || m.bracket === '3p');
 }
 // Has anything happened in this match that a redo would destroy? A result, a live score, a
 // pending report, or a single map or faction choice.
@@ -808,6 +814,8 @@ function resetPlayoffs(t, keepPicks) {
       if (gf) s2.gf = gf.bo;
     } else if (Array.isArray(s2.rounds)) {
       s2.rounds = s2.rounds.map((bo, i) => firstBo('wb', i + 1) || bo);
+      const third = gone.find(x => x.bracket === '3p');
+      if (third) s2.thirdBo = third.bo;
     }
   }
   const ids = {};
@@ -920,6 +928,14 @@ function eliminationRanking(t) {
     if (m.status !== 'done' || !m.loser || m.loser === 'BYE') continue;
     const k = stage(m);
     if (out[m.loser] == null || k > out[m.loser]) out[m.loser] = k;   // their FINAL loss
+  }
+  // A played 3rd place match splits the two beaten semi-finalists: its winner is 3rd, its loser
+  // 4th - both still behind the beaten finalist, both ahead of everyone out before the semis.
+  const third = thirdPlaceMatch(t, 0);
+  if (third && (third.status === 'done' || third.status === 'bye')) {
+    const semi = stage({ bracket: 'wb', round: third.round - 1 });
+    if (third.winner && third.winner !== 'BYE') out[third.winner] = semi + 6;
+    if (third.loser && third.loser !== 'BYE') out[third.loser] = semi + 5;
   }
   const seedOf = id => { const tm = (t.teams || []).find(x => x.id === id); return (tm && tm.seed) || 9999; };
   const losers = Object.keys(out).filter(id => id !== t.championTeamId)
@@ -1616,6 +1632,7 @@ function matchLabel(t, m) {
   }
   if (m.bracket === 'sw') return 'Round ' + m.round + ' Match ' + (m.index + 1);
   if (m.bracket === 'ffa') return 'Round ' + m.round + ' Lobby ' + (m.index + 1);
+  if (m.bracket === '3p') return twoStage ? 'Playoffs 3rd place match' : '3rd place match';
   if (twoStage) {
     const deepest = Math.max.apply(null, t.matches.filter(x => x.bracket === m.bracket).map(x => x.round).concat([0]));
     const pre = m.bracket === 'lb' ? 'LB ' : (t.stage2.type === 'double' ? 'WB ' : '');
@@ -2587,6 +2604,7 @@ async function handleAPI(req, res, url) {
       draftOrder = b.draftOrder === 'snake' ? 'snake' : 'linear';
       if (bracketType === 'single') {
         plan = { early: bo(pb.early, 3), semi: bo(pb.semi, 3), final: bo(pb.final, 5) };
+        if (pb.thirdPlace) plan.thirdPlace = 1;
       } else if (bracketType === 'double') {
         plan = { wb: bo(pb.wb, 3), wbFinal: bo(pb.wbFinal, 3), lb: bo(pb.lb, 3), lbFinal: bo(pb.lbFinal, 3), gf: bo(pb.gf, 5), lbHandicap: pb.lbHandicap ? 1 : 0 };
       } else {
@@ -4910,6 +4928,94 @@ async function handleAPI(req, res, url) {
         droppedPools: reset ? reset.droppedPools : 0 });
     }
 
+    // A 3rd place match for a single-elimination bracket, or the single-elimination playoffs of a
+    // Swiss stage: the two beaten semi-finalists play for 3rd. hybrid: "how will we know who is
+    // 3rd place?" It can be chosen before the start, and switched on or off while the event runs
+    // for as long as nobody has started playing it - including after the semi-finals, whose
+    // losers are then brought back to play it.
+    if (sub === 'third_place') {
+      if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
+      const on = !!b.on;
+      if (t.competition === 'ffa') return bad(res, 'An FFA tournament has no semi-finals');
+      if (t.bracketType === 'double') return bad(res, 'In double elimination the losers bracket already decides 3rd place');
+      if (t.bracketType !== 'single' && t.bracketType !== 'swiss') return bad(res, 'This tournament has no semi-finals');
+      if (t.status === 'finished') return bad(res, 'This tournament has already finished');
+      const swiss = t.bracketType === 'swiss';
+      if (!swiss && t.divisions > 1) return bad(res, 'A 3rd place match is not available with divisions');
+      const preStart = ['signup', 'draft', 'drafted'].indexOf(t.status) >= 0;
+      const s2 = swiss ? stageTwoCfg(t) : null;
+      t.plan = (t.plan && typeof t.plan === 'object') ? t.plan : {};
+      if (swiss) {
+        if (preStart) {
+          if (!t.plan.stage2) return bad(res, 'This Swiss stage has no playoffs - turn them on on the Format panel first');
+          if (t.plan.s2Type === 'double') return bad(res, 'Double-elimination playoffs already decide 3rd place in the losers bracket');
+          if (on && (parseInt(t.plan.s2CutTo, 10) || 8) < 4) return bad(res, 'A 3rd place match needs playoffs of at least 4 players');
+        } else {
+          if (!s2) return bad(res, 'This Swiss stage has no playoffs');
+          if (s2.type === 'double') return bad(res, 'Double-elimination playoffs already decide 3rd place in the losers bracket');
+          if (on && (s2.built ? (s2.field || []).length : s2.cutTo) < 4) return bad(res, 'A 3rd place match needs playoffs of at least 4 players');
+        }
+      } else if (on && (!preStart || t.cfg) && (t.teams || []).length < 4) {
+        // before the start the field is not known yet; start_bracket skips it below 4 players
+        return bad(res, 'A 3rd place match needs at least 4 players');
+      }
+      const where = swiss ? 'the playoffs' : 'the bracket';
+      const built = swiss ? !!(s2 && s2.built) : (t.matches || []).some(m => m.bracket === 'wb');
+      const flag = v => {
+        // The choice is kept wherever the bracket will be built from, so a redo or a late build
+        // keeps it: the plan (the Format panel), and the stage / start config once they exist.
+        if (swiss) {
+          if (v) t.plan.s2Third = 1; else delete t.plan.s2Third;
+          if (s2) { if (v) s2.thirdPlace = 1; else { delete s2.thirdPlace; delete s2.thirdBo; } }
+        } else {
+          if (v) t.plan.thirdPlace = 1; else delete t.plan.thirdPlace;
+          if (t.cfg) { if (v) t.cfg.thirdPlace = 1; else { delete t.cfg.thirdPlace; delete t.cfg.thirdBo; } }
+        }
+      };
+      const boReq = BO_OK.indexOf(parseInt(b.bo, 10)) >= 0 ? parseInt(b.bo, 10) : 0;
+      if (!built) {
+        const was = swiss ? !!(s2 ? s2.thirdPlace : t.plan.s2Third) : !!(t.cfg ? t.cfg.thirdPlace : t.plan.thirdPlace);
+        flag(on);
+        if (on && boReq) { if (swiss && s2) s2.thirdBo = boReq; else if (!swiss && t.cfg) t.cfg.thirdBo = boReq; }
+        if (was !== on) tlog(t, req, b.admin, on ? 'set ' + where + ' to include a 3rd place match' : 'set ' + where + ' to be played without a 3rd place match');
+        saveDB();
+        return json(res, 200, { ok: true, thirdPlace: on ? 1 : 0, matchId: null });
+      }
+      const have = thirdPlaceMatch(t, 0);
+      if (on) {
+        if (have) {
+          if (boReq && boReq !== have.bo && !thirdPlaceStarted(have)) {
+            have.bo = boReq;
+            initFactionVeto(t, have);
+            tlog(t, req, b.admin, 'set the 3rd place match to Bo' + boReq);
+          }
+          flag(true);
+          saveDB();
+          return json(res, 200, { ok: true, thirdPlace: 1, matchId: have.id });
+        }
+        const m3 = addThirdPlace(t, 0, boReq);
+        if (!m3) return bad(res, 'This bracket has no semi-finals to take a 3rd place match from');
+        flag(true);
+        const nm = id => { const tm = teamById(t, id); return tm ? tm.name : id; };
+        const known = [m3.team1, m3.team2].filter(x => x && x !== 'BYE').map(nm);
+        tlog(t, req, b.admin, 'added a 3rd place match (Bo' + m3.bo + ')'
+          + (known.length ? ' - ' + known.join(' and ') + ' lost their semi-final and now play for 3rd' : ''));
+        saveDB();
+        return json(res, 200, { ok: true, thirdPlace: 1, matchId: m3.id });
+      }
+      if (!have) { flag(false); saveDB(); return json(res, 200, { ok: true, thirdPlace: 0, matchId: null }); }
+      const err = removeThirdPlace(t, 0);
+      if (err) return bad(res, err);
+      // that match room and any per-match pool setting can never be reached again
+      if (t.chat) delete t.chat['match:' + have.id];
+      if (t.chatPings) delete t.chatPings['match:' + have.id];
+      if (t.poolAssign) delete t.poolAssign['match:' + have.id];
+      flag(false);
+      tlog(t, req, b.admin, 'removed the 3rd place match');
+      saveDB();
+      return json(res, 200, { ok: true, thirdPlace: 0, matchId: null });
+    }
+
     // ===== divisions (King/Prince split) =====
     // Auto-split the CURRENT full teams into N divisions by combined rating (division 1 = strongest).
     if (sub === 'split_divisions') {
@@ -5408,6 +5514,7 @@ async function handleAPI(req, res, url) {
         const op = (t.plan && typeof t.plan === 'object') ? t.plan : {};
         if (t.bracketType === 'single') {
           t.plan = { early: bo(pb.early, op.early || 3), semi: bo(pb.semi, op.semi || 3), final: bo(pb.final, op.final || 5) };
+          if (pb.thirdPlace !== undefined ? pb.thirdPlace : op.thirdPlace) t.plan.thirdPlace = 1;
         } else if (t.bracketType === 'double') {
           t.plan = { wb: bo(pb.wb, op.wb || 3), wbFinal: bo(pb.wbFinal, op.wbFinal || 3), lb: bo(pb.lb, op.lb || 3), lbFinal: bo(pb.lbFinal, op.lbFinal || 3), gf: bo(pb.gf, op.gf || 5), lbHandicap: pb.lbHandicap !== undefined ? (pb.lbHandicap ? 1 : 0) : (op.lbHandicap ? 1 : 0) };
         } else {
@@ -5919,8 +6026,11 @@ async function handleAPI(req, res, url) {
           if (m.bracket === 'ffa' || m.status === 'done') continue;
           if (!m.team1 || !m.team2 || m.team1 === 'BYE' || m.team2 === 'BYE') continue;
           const mk = 'match:' + m.id, rk = m.bracket + ':' + m.round;
-          if (key !== mk && key !== rk) continue;               // not affected by this key
+          // a 3rd place match with no pool of its own plays the semi-finals' one (poolForMatch)
+          const fk = m.bracket === '3p' ? 'wb:' + (m.round - 1) : null;
+          if (key !== mk && key !== rk && key !== fk) continue;  // not affected by this key
           if (key === rk && t.poolAssign['match:' + m.id]) continue;  // a per-match override wins
+          if (key === fk && (t.poolAssign[mk] || t.poolAssign[rk])) continue;
           if (m.veto && m.veto.stepIndex > 0) continue;         // veto already in progress
           m.veto = null;
           initMatchVetoes(t, m);
@@ -6032,7 +6142,7 @@ async function handleAPI(req, res, url) {
       if (!canManageMaps(t, req, b)) return json(res, 403, { error: 'Map access is limited to this tournament\u2019s own organizers' });
       const bracket = String(b.bracket || '');
       const round = parseInt(b.round, 10);
-      if (['wb', 'lb', 'gf', 'sw', 'ffa'].indexOf(bracket) < 0 || !(round >= 1 && round <= 30)) return bad(res, 'Bad round');
+      if (['wb', 'lb', 'gf', 'sw', 'ffa', '3p'].indexOf(bracket) < 0 || !(round >= 1 && round <= 30)) return bad(res, 'Bad round');
       // maps are now map-DB IDs; keep only ids that exist in the database
       let ids = Array.isArray(b.maps) ? b.maps.filter(id => mapById(t, id)) : [];
       ids = ids.slice(0, 9);
@@ -6194,6 +6304,9 @@ async function handleAPI(req, res, url) {
           const divs = (t.divisions && t.divisions > 1) ? t.divisions : 0;
           const R = log2i(nextPow2(n));
           t.cfg = { rounds: cleanBoList(c.rounds, R) };
+          // The start dialog says whether to play for 3rd; without it the stored plan decides.
+          const third = c.thirdPlace !== undefined ? !!c.thirdPlace : !!(t.plan && t.plan.thirdPlace);
+          if (third && !divs && n >= 4) t.cfg.thirdPlace = 1;
           if (t.pickOpponents && !divs) {
             // The field chooses round one before anything is built. Teams stay locked and the
             // tournament stays 'drafted' until the last pick lands (see buildAfterPicks).

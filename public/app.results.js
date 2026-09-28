@@ -328,7 +328,13 @@ function drawStandings(el) {
     // The 'beaten' tiebreak is invisible unless its numbers are on the table.
     const byBeaten = T.tiebreak === 'beaten';
     const sbOf = id => (T.swissSB && T.swissSB[id] != null) ? T.swissSB[id] : 0;
-    el.innerHTML = `<div class="panel section"><h2>Swiss <span class="h2-strong">Standings</span></h2>
+    // Two stages: the playoffs decide the places, so they come first - champion, final, 3rd
+    // place match and on down. The Swiss table below is how everyone got there.
+    const field = (stageTwoLive() && Array.isArray(T.stage2.field)) ? T.stage2.field : [];
+    const inField = T.teams.filter(x => field.indexOf(x.id) >= 0);
+    const playoffHTML = inField.length
+      ? `<div class="panel section"><h2>Playoff <span class="h2-strong">Standings</span></h2>${eliminationPlacingsTable(inField)}</div>` : '';
+    el.innerHTML = playoffHTML + `<div class="panel section"><h2>Swiss <span class="h2-strong">Standings</span></h2>
       ${note.length ? `<p class="muted small" style="margin:-4px 0 10px">${esc(note.join(' \u00b7 '))}</p>` : ''}
       ${byBeaten ? `<p class="muted small" style="margin:-4px 0 10px">${esc(swissTiebreakText('beaten'))}</p>` : ''}
       <table><thead><tr><th>#</th><th>Team</th><th>W</th><th>L</th>${byBeaten ? '<th title="Sum of the Swiss scores (wins) of the opponents this player beat">Beaten opp.</th>' : ''}<th>Game diff</th>${head}</tr></thead><tbody>
@@ -373,29 +379,39 @@ function drawStandings(el) {
   }
 
   // elimination formats: rank by how far each team got
+  el.innerHTML = `<div class="panel section"><h2>Standings</h2>${eliminationPlacingsTable(T.teams)}</div>`;
+}
+
+// Place, name and result of everyone in an elimination bracket, best first: by how far each got.
+// A 3rd place match splits the two beaten semi-finalists (3rd and 4th); while it is still to be
+// played they sit behind the beaten finalist, as "plays for 3rd place".
+function eliminationPlacingsTable(teams) {
+  const m3 = thirdPlaceMatchOf(T);
+  const for3rd = id => !!(m3 && m3.status !== 'done' && m3.status !== 'bye' && (m3.team1 === id || m3.team2 === id));
   const stage = team => {
     if (T.championTeamId === team.id) return 1e9;
-    if (!team.out) return 1e8; // still alive
+    if (team.out && team.out.bracket === '3p') return (team.out.round - 1) + (team.out.place === 3 ? 0.6 : 0.5);
+    if (!team.out) return for3rd(team.id) ? (m3.round - 1) + 0.55 : 1e8; // still alive
     if (team.out.bracket === 'gf') return 1e6;
     if (team.out.bracket === 'lb') return 1000 + team.out.round;
     return team.out.round; // wb (single elim) or ffa round
   };
-  const rows = T.teams.slice().sort((a, b) => stage(b) - stage(a) || a.seed - b.seed);
+  const rows = teams.slice().sort((a, b) => stage(b) - stage(a) || a.seed - b.seed);
   let rank = 0, prevStage = null, shown = 0;
   const html = rows.map(team => {
     shown++;
     const st = stage(team);
     if (st !== prevStage) { rank = shown; prevStage = st; }
     const label = T.championTeamId === team.id ? '1' : (!team.out ? '—' : String(rank));
-    const note = T.championTeamId === team.id ? '🏆 Champion' : (!team.out ? 'Still in' :
-      team.out.bracket === 'gf' ? 'Lost the final' :
+    const note = T.championTeamId === team.id ? '🏆 Champion' : (!team.out ? (for3rd(team.id) ? 'Plays for 3rd place' : 'Still in') :
+      team.out.bracket === '3p' ? (team.out.place === 3 ? 'Won the 3rd place match' : 'Lost the 3rd place match') :
+      team.out.bracket === 'gf' || roundKeyLabel(team.out.bracket, team.out.round) === 'Final' ? 'Lost the final' :
       'Out in ' + roundKeyLabel(team.out.bracket, team.out.round).toLowerCase());
     return `<tr class="${label === '1' ? 'rank1' : label === '2' ? 'rank2' : (label === '3' ? 'rank3' : '')}">
       <td class="mono">${label}</td><td>${esc(team.name)}</td><td class="small muted">${esc(note)}</td></tr>`;
   }).join('');
-  el.innerHTML = `<div class="panel section"><h2>Standings</h2>
-    <table><thead><tr><th>Place</th><th>${T.teamSize === 1 ? 'Player' : 'Team'}</th><th>Result</th></tr></thead>
-    <tbody>${html}</tbody></table></div>`;
+  return `<table><thead><tr><th>Place</th><th>${T.teamSize === 1 ? 'Player' : 'Team'}</th><th>Result</th></tr></thead>
+    <tbody>${html}</tbody></table>`;
 }
 
 // ----- admin -----
@@ -639,6 +655,9 @@ async function drawAdmin(el) {
             <input type="checkbox" id="af_hcap"${p.lbHandicap || p.lbHandicap === undefined ? ' checked' : ''}> Upper bracket finalist starts the grand final 1-0 up
           </label>
         </div>
+        <label id="af_thirdWrap" style="display:${T.bracketType === 'single' ? 'flex' : 'none'};align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text);margin-top:12px">
+          <input type="checkbox" id="af_third"${p.thirdPlace ? ' checked' : ''}> 3rd place match: the two beaten semi-finalists play for 3rd
+        </label>
         <div id="af_pSwiss" style="display:none">
           <label>Match lengths</label>
           <div class="row" style="gap:10px">
@@ -679,6 +698,9 @@ async function drawAdmin(el) {
               <div style="flex:1"><div class="muted small">Playoff matches</div>${boSel('af_sw2bo', p.s2Bo || 3)}</div>
               <div style="flex:1"><div class="muted small">Playoff final</div>${boSel('af_sw2final', p.s2Final || 5)}</div>
             </div>
+            <label id="af_sw2thirdWrap" style="display:${p.s2Type !== 'double' ? 'flex' : 'none'};align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text);margin-top:8px">
+              <input type="checkbox" id="af_sw2third"${p.s2Third ? ' checked' : ''}> 3rd place match: the two beaten semi-finalists play for 3rd
+            </label>
             <p class="muted small" style="margin:8px 0 0">The single top-2 final above is replaced by the bracket while this is on.</p>
           </div>
         </div>
@@ -1541,6 +1563,8 @@ async function drawAdmin(el) {
       g('af_pSingle').style.display = (bt === 'single' && !perRound) ? '' : 'none';
       g('af_pDouble').style.display = (bt === 'double' && !perRound) ? '' : 'none';
       g('af_pSwiss').style.display = bt === 'swiss' ? '' : 'none';
+      if (g('af_thirdWrap')) g('af_thirdWrap').style.display = bt === 'single' ? 'flex' : 'none';
+      if (g('af_sw2thirdWrap')) g('af_sw2thirdWrap').style.display = (g('af_sw2type') && g('af_sw2type').value === 'double') ? 'none' : 'flex';
       if (g('af_swCutBox')) g('af_swCutBox').style.display = (g('af_swcuts') && g('af_swcuts').checked) ? 'block' : 'none';
       if (g('af_sw2Box')) g('af_sw2Box').style.display = (g('af_sw2') && g('af_sw2').checked) ? 'block' : 'none';
       if (g('af_swfinal')) g('af_swfinal').disabled = !!(g('af_sw2') && g('af_sw2').checked);
@@ -1585,7 +1609,7 @@ async function drawAdmin(el) {
       g('af_ffinalsize').style.display = g('af_ffinalmode').value === '1' ? '' : 'none';
       syncPm();
     };
-    for (const id of ['af_comp', 'af_size', 'af_form', 'af_bt', 'af_fsize', 'af_fmode', 'af_fcutmode', 'af_ffinalmode', 'af_perRound', 'af_swcuts', 'af_sw2', 'af_pick', 'af_stopOn', 'af_pickMode', 'af_swwin', 'af_swloss']) { const e = g(id); if (e) e.onchange = sync; }
+    for (const id of ['af_comp', 'af_size', 'af_form', 'af_bt', 'af_fsize', 'af_fmode', 'af_fcutmode', 'af_ffinalmode', 'af_perRound', 'af_swcuts', 'af_sw2', 'af_pick', 'af_stopOn', 'af_pickMode', 'af_swwin', 'af_swloss', 'af_sw2type']) { const e = g(id); if (e) e.onchange = sync; }
     sync();
 
     g('af_save').onclick = async () => {
@@ -1609,7 +1633,7 @@ async function drawAdmin(el) {
         if (g('af_tiebreak') && g('af_bt').value === 'swiss') body.tiebreak = g('af_tiebreak').value;
         body.bracketType = g('af_bt').value;
         body.perRoundBo = (g('af_perRound') && g('af_perRound').checked) ? 1 : 0;
-        if (g('af_bt').value === 'single') body.plan = { early: g('af_early').value, semi: g('af_semi').value, final: g('af_final').value };
+        if (g('af_bt').value === 'single') body.plan = { early: g('af_early').value, semi: g('af_semi').value, final: g('af_final').value, thirdPlace: (g('af_third') && g('af_third').checked) ? 1 : 0 };
         else if (g('af_bt').value === 'double') body.plan = { wb: g('af_wb').value, wbFinal: g('af_wbf').value, lb: g('af_lb').value, lbFinal: g('af_lbf').value, gf: g('af_gf').value, lbHandicap: g('af_hcap').checked };
         else {
           body.plan = { bo: g('af_swbo').value, final: g('af_swfinal').checked, finalBo: g('af_swfbo').value, fast: g('af_swfast').checked };
@@ -1625,6 +1649,7 @@ async function drawAdmin(el) {
             body.plan.s2Bo = g('af_sw2bo').value;
             body.plan.s2Final = g('af_sw2final').value;
             body.plan.s2Gf = g('af_sw2final').value;
+            body.plan.s2Third = (g('af_sw2type').value !== 'double' && g('af_sw2third') && g('af_sw2third').checked) ? 1 : 0;
           }
         }
       } else {

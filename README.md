@@ -46,7 +46,7 @@ Zero runtime dependencies: plain Node.js (built-in `http` only), JSON file stora
   randomised 16-player runs: 1190 of 1200 deciding-round matches crossed the streams, and every
   one of the other 10 was mathematically forced.
 - **Deciding-match length** (optional, with record cuts): a match where a win qualifies someone or a loss knocks them out can be played at a different best-of from the rest. LotS runs Bo1 throughout and Bo3 for those.
-- **Two stages in one tournament** (optional): a Swiss stage can cut its qualified field into a single- or double-elimination playoff bracket inside the same tournament - one page, one chat, one set of standings, no second event and no invites to accept. The playoff bracket is seeded from the Swiss standings and appears above the Swiss rounds on the Bracket tab.
+- **Two stages in one tournament** (optional): a Swiss stage can cut its qualified field into a single- or double-elimination playoff bracket inside the same tournament - one page, one chat, one set of standings, no second event and no invites to accept. The playoff bracket is seeded from the Swiss standings and appears above the Swiss rounds on the Bracket tab. That tab is called **Rounds** while the Swiss is played and **Bracket** once the playoffs exist (the pick phase or the bracket), and the stage bar follows it.
 - **Swiss standings rank wins, then fewer losses**, then game difference, then seed. Every qualifier
   has the same number of wins, so the losses term is what puts a 3-0 above a 3-1 above a 3-2. It
   used to go straight to game difference, and with Bo3 deciders a 3-2 who won three deciders 2-0
@@ -69,6 +69,18 @@ Zero runtime dependencies: plain Node.js (built-in `http` only), JSON file stora
   results are locked, the same rule as a Swiss round with later rounds played on top of it. A
   correction the site refuses (a 3 in a Bo3, say) now changes nothing at all; it used to leave the
   match reopened.
+- **3rd place match** (optional, single elimination and single-elimination playoffs): the two beaten
+  semi-finalists play for 3rd, so the standings have a clear 3rd and 4th instead of two shared 3rds.
+  It is shown under the final, in the final's column, and is as long as the semi-finals unless its
+  own length is set there. With no map pool of its own it plays the semi-finals' pool. Choose it on
+  the hosting window, the Format panel or the start dialog - or switch it on or off while the event
+  runs: from the Bracket tab (above the bracket, or above the playoffs) or the Playoffs panel on the
+  Admin tab. That works after the playoffs are locked and even after the semi-finals are played
+  (their losers are brought back for it); it only stops being switchable once it has started
+  itself. A final won before it is played crowns the champion, but the tournament finishes when
+  the 3rd place match does. A two-stage event's Standings tab shows the playoff placings above the
+  Swiss table. Not offered for double elimination (the losers bracket decides 3rd there), with
+  divisions, or with fewer than four players.
 - **Per-match best-of**: an organizer can retune one specific match from its Details popup, as long as it has not started. This is the escape hatch for a single series on the day; the per-round control below is still the bulk tool.
 - Best-of per round: set presets at creation, or turn on **per-round Bo** to give every winners/losers/grand-final round its own best-of. Per-round Bo is editable on the Bracket tab both before generation (on the preview) and after (on the live bracket, affecting only rounds whose matches haven't started). The format summary collapses equal consecutive rounds, e.g. "WB R1-2 Bo3 - WB R3 Bo5 - LB R1-2 Bo1 - GF Bo5".
 - First-round byes are not drawn. A seed with a bye appears directly in its round-2 match, which keeps large brackets compact. The losers bracket hides the phantom matches that byes would create, matching exactly what the engine generates.

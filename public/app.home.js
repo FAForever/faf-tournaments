@@ -345,6 +345,9 @@ async function renderHost() {
               <div style="flex:1"><div class="muted small">Semifinal</div><select id="pSemi"><option value="1">Bo1</option><option value="3" selected>Bo3</option><option value="5">Bo5</option><option value="7">Bo7</option></select></div>
               <div style="flex:1"><div class="muted small">Final</div><select id="pFinal"><option value="1">Bo1</option><option value="3">Bo3</option><option value="5" selected>Bo5</option><option value="7">Bo7</option></select></div>
             </div>
+            <label style="display:flex;align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text);margin-top:10px">
+              <input type="checkbox" id="pThird"> 3rd place match: the two beaten semi-finalists play for 3rd
+            </label>
           </div>
           <div id="planDouble" style="display:none">
             <label>Match lengths</label>
@@ -404,6 +407,9 @@ async function renderHost() {
                 <div style="flex:1"><div class="muted small">Playoff matches</div><select id="pSwS2Bo"><option value="1">Bo1</option><option value="3" selected>Bo3</option><option value="5">Bo5</option><option value="7">Bo7</option></select></div>
                 <div style="flex:1"><div class="muted small">Playoff final</div><select id="pSwS2Final"><option value="1">Bo1</option><option value="3">Bo3</option><option value="5" selected>Bo5</option><option value="7">Bo7</option></select></div>
               </div>
+              <label id="pSwS2ThirdWrap" style="display:flex;align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text);margin-top:8px">
+                <input type="checkbox" id="pSwS2Third"> 3rd place match: the two beaten semi-finalists play for 3rd
+              </label>
               <p class="muted small" style="margin:8px 0 0">The single top-2 final above is replaced by the bracket while this is on.</p>
             </div>
           </div>
@@ -629,6 +635,10 @@ async function renderHost() {
     const on = !!(cuts && cuts.checked);
     box.style.display = on ? '' : 'none';
     s2box.style.display = (st2 && st2.checked) ? '' : 'none';
+    // double-elimination playoffs already decide 3rd place in the losers bracket
+    const s2third = document.getElementById('pSwS2ThirdWrap');
+    const s2type = document.getElementById('pSwS2Type');
+    if (s2third) s2third.style.display = (s2type && s2type.value === 'double') ? 'none' : 'flex';
     // a plain top-2 final and a playoff bracket are two answers to the same question
     const finalRow = document.getElementById('pSwFinal');
     if (finalRow) finalRow.disabled = !!(st2 && st2.checked);
@@ -665,7 +675,7 @@ async function renderHost() {
       if (box) box.style.display = e.checked ? '' : 'none';
     });
   });
-  ['pSwCuts', 'pSwStage2', 'pSwWinCut', 'pSwLossCut', 'pPickMode', 'pPickPhase'].forEach(id => {
+  ['pSwCuts', 'pSwStage2', 'pSwWinCut', 'pSwLossCut', 'pPickMode', 'pPickPhase', 'pSwS2Type'].forEach(id => {
     const e = document.getElementById(id);
     if (e) { e.addEventListener('change', syncSwissExtras); e.addEventListener('input', syncSwissExtras); }
   });
@@ -801,7 +811,7 @@ async function renderHost() {
     setv('pSwWinCut', pl.winCut || 3); setv('pSwLossCut', pl.lossCut || 3); setv('pSwDecBo', pl.decidingBo || 0);
     setc('pSwStage2', pl.stage2);
     setv('pSwS2Cut', pl.s2CutTo || 8); setv('pSwS2Type', pl.s2Type || 'single');
-    setv('pSwS2Bo', pl.s2Bo || 3); setv('pSwS2Final', pl.s2Final || 5);
+    setv('pSwS2Bo', pl.s2Bo || 3); setv('pSwS2Final', pl.s2Final || 5); setc('pSwS2Third', pl.s2Third);
     setc('pPickPhase', a.pickPhase); setv('pPickMins', a.pickMinutes || 0); setv('pPickMode', a.pickMode || 'half');
     setv('pTiebreak', a.tiebreak || 'gd');
     if (info) {
@@ -879,14 +889,14 @@ async function renderHost() {
     setc('pStopOn', t.stopAtAlive); setv('pStopAt', t.stopAtAlive || 4);
     // plan / Bo
     const pl = t.plan || {};
-    if (t.bracketType === 'single') { setv('pEarly', pl.early); setv('pSemi', pl.semi); setv('pFinal', pl.final); }
+    if (t.bracketType === 'single') { setv('pEarly', pl.early); setv('pSemi', pl.semi); setv('pFinal', pl.final); setc('pThird', pl.thirdPlace); }
     else if (t.bracketType === 'double') { setv('pWb', pl.wb); setv('pWbFinal', pl.wbFinal); setv('pLb', pl.lb); setv('pLbFinal', pl.lbFinal); setv('pGf', pl.gf); setc('pHcap', pl.lbHandicap); }
     else if (t.bracketType === 'swiss') {
       setv('pSwBo', pl.bo); setc('pSwFinal', pl.final); setv('pSwFinalBo', pl.finalBo); setc('pSwFast', pl.fast);
       setc('pSwCuts', pl.winCut || pl.lossCut); setv('pSwWinCut', pl.winCut || 3); setv('pSwLossCut', pl.lossCut || 3);
       setv('pSwDecBo', pl.decidingBo || 0);
       setc('pSwStage2', pl.stage2); setv('pSwS2Cut', pl.s2CutTo || 8); setv('pSwS2Type', pl.s2Type || 'single');
-      setv('pSwS2Bo', pl.s2Bo || 3); setv('pSwS2Final', pl.s2Final || 5);
+      setv('pSwS2Bo', pl.s2Bo || 3); setv('pSwS2Final', pl.s2Final || 5); setc('pSwS2Third', pl.s2Third);
       syncSwissExtras();
     }
     if (t.competition === 'ffa' && t.ffa) {
@@ -929,7 +939,7 @@ async function renderHost() {
     const isFfa = comp.value === 'ffa';
     const bt = cBracket.value;
     let plan = {};
-    if (bt === 'single') plan = { early: pv('pEarly'), semi: pv('pSemi'), final: pv('pFinal') };
+    if (bt === 'single') plan = { early: pv('pEarly'), semi: pv('pSemi'), final: pv('pFinal'), thirdPlace: (document.getElementById('pThird') || {}).checked ? 1 : 0 };
     else if (bt === 'double') plan = { wb: pv('pWb'), wbFinal: pv('pWbFinal'), lb: pv('pLb'), lbFinal: pv('pLbFinal'), gf: pv('pGf'), lbHandicap: document.getElementById('pHcap').checked };
     else {
       const ck = id => { const e = document.getElementById(id); return !!(e && e.checked); };
@@ -938,6 +948,7 @@ async function renderHost() {
       if (ck('pSwStage2')) {
         plan.stage2 = 1; plan.s2CutTo = pv('pSwS2Cut'); plan.s2Type = document.getElementById('pSwS2Type').value;
         plan.s2Bo = pv('pSwS2Bo'); plan.s2Final = pv('pSwS2Final'); plan.s2Gf = pv('pSwS2Final');
+        plan.s2Third = (plan.s2Type !== 'double' && ck('pSwS2Third')) ? 1 : 0;
       }
     }
     try {
@@ -1276,7 +1287,8 @@ function drawTournament() {
   const admin = viewerIsOrganizer();
   const phaseIdx = { signup: 0, draft: 1, drafted: 1, running: 2, finished: 3 }[T.status];
   const midStep = T.competition === 'ffa' ? 'Teams' : (T.formation === 'draft' ? 'Draft' : 'Teams');
-  const lastStep = T.bracketType === 'swiss' ? 'Rounds' : 'Bracket';
+  // A Swiss is its rounds until its playoffs exist; then the step, like the tab, is the bracket.
+  const lastStep = T.bracketType === 'swiss' ? bracketTabName(T) : 'Bracket';
   const steps = ['Signups', midStep, lastStep, 'Results'];
 
   const tabs = ['overview', 'news', 'chat', 'players', 'teams', 'bracket'];
@@ -1309,7 +1321,7 @@ function drawTournament() {
     if (tb === 'chat') return 'Chat';
     if (tb === 'log') return 'Log';
     if (tb === 'teams' && T.status === 'draft') return 'Draft';
-    if (tb === 'bracket') return T.competition === 'ffa' || T.bracketType === 'swiss' ? 'Rounds' : 'Bracket';
+    if (tb === 'bracket') return bracketTabName(T);
     if (tb === 'vetoes') {
       const pending = T.matches.filter(m => m.veto && !m.veto.done).length;
       return pending > 0 ? 'Vetoes (' + pending + ')' : 'Vetoes';

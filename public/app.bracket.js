@@ -68,8 +68,11 @@ function mapsLine(bracket, round, el) {
     const assigned = (T.poolAssign || {})[key];
     const pools = T.mapPools || [];
     const pool = assigned ? pools.find(p => p.id === assigned) : null;
-    const fallback = (!pool && pools.length) ? pools[0] : null;
-    const shown = pool || fallback;
+    // A 3rd place match with no pool of its own plays the semi-finals' pool (lib/match poolForMatch).
+    const semiId = (!pool && bracket === '3p') ? (T.poolAssign || {})['wb:' + (round - 1)] : null;
+    const semiPool = semiId ? pools.find(p => p.id === semiId) : null;
+    const fallback = (!pool && !semiPool && pools.length) ? pools[0] : null;
+    const shown = pool || semiPool || fallback;
     if (!admin && !shown) return;
     const div = document.createElement('div');
     div.className = 'mapblock';
@@ -83,7 +86,9 @@ function mapsLine(bracket, round, el) {
     }
     div.innerHTML = '<div class="mapblock-head"><span>MAP POOL</span>' + (admin ? '<a href="#">change</a>' : '') + '</div>' +
       (shown
-        ? '<div class="maprow"><span>' + esc(shown.name) + (pool ? '' : ' <span class="muted" title="No pool is assigned to this round, so the first pool is being used. Click change to pin one.">(default)</span>') + '</span></div>' + sub
+        ? '<div class="maprow"><span>' + esc(shown.name) + (pool ? '' : semiPool
+            ? ' <span class="muted" title="No pool is assigned to the 3rd place match, so it is played on the semi-finals\u2019 pool. Click change to pin one.">(as the semi-finals)</span>'
+            : ' <span class="muted" title="No pool is assigned to this round, so the first pool is being used. Click change to pin one.">(default)</span>') + '</span></div>' + sub
         : '<div class="maprow muted">no pools yet \u2014 add them on the Maps tab</div>');
     const a = div.querySelector('a');
     if (a) a.onclick = e => { e.preventDefault(); pickPoolForRound(bracket, round); };
@@ -181,7 +186,7 @@ function editMaps(bracket, round) {
   const count = Math.max(maxBo, existing.length, 1);
   const db = (T.mapDb || []);
   if (db.length === 0) {
-    modal(`<h3>Maps — ${esc(bracket === 'gf' ? 'Grand final' : bracket.toUpperCase() + ' round ' + round)}</h3>
+    modal(`<h3>Maps — ${esc(bracket === 'gf' ? 'Grand final' : bracket === '3p' ? '3rd place match' : bracket.toUpperCase() + ' round ' + round)}</h3>
       <p class="muted small">No maps in the database yet. Add maps on the <strong>Maps</strong> tab first, then assign them here.</p>
       <div class="actions"><button class="btn ghost" id="mCancel">Close</button></div>`, root => {
       root.querySelector('#mCancel').onclick = closeModal;
@@ -194,7 +199,7 @@ function editMaps(bracket, round) {
     selects.push(`<label style="display:block;margin-bottom:7px">Game ${i + 1} <select class="mapSel" style="width:100%">${opt(existing[i] || '')}</select></label>`);
   }
   modal(`
-    <h3>Maps — ${esc(bracket === 'gf' ? 'Grand final' : bracket.toUpperCase() + ' round ' + round)}</h3>
+    <h3>Maps — ${esc(bracket === 'gf' ? 'Grand final' : bracket === '3p' ? '3rd place match' : bracket.toUpperCase() + ' round ' + round)}</h3>
     <p class="muted small">Pick a map from the database for each game of the series (Bo${maxBo}). ${T.veto && T.veto.enabled ? 'Note: if map vetoes are enabled, captains pick the maps per match — this round pool is a fallback.' : 'Everyone in this round plays these maps.'}</p>
     ${selects.join('')}
     <div class="actions">
@@ -224,6 +229,7 @@ function matchChatAllowed(m) {
 
 function mLabel(m) {
   if (m.bracket === 'gf') return T.bracketType === 'swiss' ? 'FINAL' : 'GRAND FINAL';
+  if (m.bracket === '3p') return '3RD PLACE';
   if (m.bracket === 'sw') return 'R' + m.round + ' M' + (m.index + 1);
   if (m.bracket === 'ffa') return 'R' + m.round + ' LOBBY ' + (m.index + 1);
   const p = m.bracket === 'lb' ? 'LB ' : (T.bracketType === 'double' ? 'WB ' : '');
@@ -828,6 +834,7 @@ function projectedRoundKeys() {
   } else {
     const R = log2i(nextPow2(n));
     for (let i = 1; i <= R; i++) keys.push('wb:' + i);
+    if (T.bracketType === 'single' && thirdPlaceOn(T) && n >= 4 && !((T.divisions || 0) > 1)) keys.push('3p:' + R);
     if (T.bracketType === 'double') {
       const lbR = Math.max(2 * R - 2, 0);
       for (let i = 1; i <= lbR; i++) keys.push('lb:' + i);
@@ -841,6 +848,7 @@ function projectedRoundKeys() {
 function roundKeyLabel(bracket, round) {
   round = parseInt(round, 10);
   if (bracket === 'gf') return 'Grand final';
+  if (bracket === '3p') return '3rd place match';
   if (bracket === 'sw') return 'Swiss round ' + round;
   if (bracket === 'ffa') return 'FFA round ' + round;
   // deepest round in this bracket — from real matches, or projected during signups
@@ -1499,6 +1507,84 @@ function drawConnectors(wrap) {
   connectorRedraws.push(draw);
 }
 
+// ---- the 3rd place match ----
+// It hangs under the final, in the final's own column, the way brackets usually show it. A spacer
+// of the same height above the final keeps the final centred between the semi-finals, so the
+// connectors still meet it where they should. The spacer is sized after layout (and on resize),
+// through the same redraw list the connectors use - and before them, since it moves the final.
+function hangUnderFinal(mc, blk) {
+  const stack = document.createElement('div');
+  stack.className = 'bfinal-stack';
+  const spacer = document.createElement('div');
+  spacer.className = 'bthird-spacer';
+  stack.appendChild(spacer);
+  while (mc.firstChild) stack.appendChild(mc.firstChild);
+  stack.appendChild(blk);
+  mc.appendChild(stack);
+  const size = () => { spacer.style.height = blk.offsetHeight + 'px'; };
+  size();
+  connectorRedraws.push(size);
+}
+function thirdPlaceBlock(m3) {
+  const blk = document.createElement('div');
+  blk.className = 'bthird';
+  const head = document.createElement('div');
+  head.className = 'bcol-title';
+  head.textContent = '3RD PLACE';
+  blk.appendChild(head);
+  if (viewerIsOrganizer()) {
+    const started = m3.status === 'live' || m3.status === 'done' || (Array.isArray(m3.games) && m3.games.length);
+    const boWrap = document.createElement('div');
+    if (!started) {
+      boWrap.className = 'bcol-bo';
+      boWrap.innerHTML = 'Bo <select class="bcol-bo-sel">' + [1, 3, 5, 7].map(v => '<option value="' + v + '"' + (v === m3.bo ? ' selected' : '') + '>Bo' + v + '</option>').join('') + '</select>';
+      const sel = boWrap.querySelector('select');
+      sel.onchange = async () => {
+        try {
+          await api('/api/t/' + T.id + '/set_round_bo', { bracket: '3p', round: m3.round, bo: parseInt(sel.value, 10), division: null, admin: adminToken() });
+          toast('3rd place match set to Bo' + sel.value);
+          await refresh();
+        } catch (e) { toast(e.message, true); sel.value = m3.bo; }
+      };
+    } else {
+      boWrap.className = 'bcol-bo muted';
+      boWrap.textContent = 'Bo' + m3.bo;
+    }
+    blk.appendChild(boWrap);
+  }
+  mapsLine('3p', m3.round, blk);
+  blk.appendChild(matchBox(m3));
+  return blk;
+}
+// The organizer's switch for it, above the bracket. Only while it can still be switched: the
+// tournament is running and the match itself has not started.
+function thirdPlaceToolsHTML() {
+  if (!viewerIsOrganizer() || T.status !== 'running' || T.earlyFinish || !thirdPlaceEligible(T)) return '';
+  const m3 = thirdPlaceMatchOf(T);
+  if (m3) {
+    if (thirdPlaceTouched(m3)) return '';
+    return `<div class="third-tools"><button class="btn ghost small" data-third="0">Remove the 3rd place match</button>
+      <span class="muted small">The two beaten semi-finalists play for 3rd. It can be removed until it starts.</span></div>`;
+  }
+  const semis = (T.matches || []).filter(m => m.bracket === 'wb' && !(m.division || 0));
+  const R = semis.reduce((a, m) => Math.max(a, m.round || 0), 0);
+  const played = semis.filter(m => m.round === R - 1 && m.status === 'done').length;
+  return `<div class="third-tools"><button class="btn ghost small" data-third="1">+ Add a 3rd place match</button>
+    <span class="muted small">The two beaten semi-finalists play for 3rd place, so the standings have a clear 3rd and 4th.${played ? ' A semi-final already played sends its loser into it.' : ''}</span></div>`;
+}
+function wireThirdPlaceTools(root) {
+  if (!root) return;
+  root.querySelectorAll('[data-third]').forEach(b => b.onclick = async () => {
+    const on = b.dataset.third === '1';
+    b.disabled = true;
+    try {
+      await api('/api/t/' + T.id + '/third_place', { on: on ? 1 : 0, admin: adminToken() });
+      toast(on ? '3rd place match added' : '3rd place match removed');
+      await refresh();
+    } catch (e) { toast(e.message, true); b.disabled = false; }
+  });
+}
+
 function bracketColumns(el, bracket, title, gfMatch, division) {
   const ms = T.matches.filter(m => m.bracket === bracket && (!division || (m.division || 0) === division));
   if (!ms.length) return;
@@ -1550,6 +1636,10 @@ function bracketColumns(el, bracket, title, gfMatch, division) {
       // "won" the bye has already been advanced into its next-round match, so it shows there.
       if (isPhantomMatch(m)) continue;
       mc.appendChild(matchBox(m));
+    }
+    if (bracket === 'wb' && r === rounds && !division && mc.children.length) {
+      const m3 = thirdPlaceMatchOf(T);
+      if (m3 && !isPhantomMatch(m3)) hangUnderFinal(mc, thirdPlaceBlock(m3));
     }
     col.appendChild(mc);
     if (mc.children.length) inner.appendChild(col);
@@ -1636,9 +1726,11 @@ function drawBracket(el) {
       hdr.innerHTML = '<h2 style="margin:0 0 10px">Playoffs <span class="h2-strong">'
         + esc(String(T.stage2.cutTo)) + '-team ' + (T.stage2.type === 'double' ? 'double' : 'single') + ' elimination</span></h2>'
         + '<p class="muted small" style="margin:0 0 12px">' + playoffOriginHTML() + '</p>'
-        + playoffActionsHTML(true);
+        + playoffActionsHTML(true)
+        + (T.stage2.type === 'double' ? '' : thirdPlaceToolsHTML());
       el.appendChild(hdr);
       wirePlayoffActions(hdr);
+      wireThirdPlaceTools(hdr);
       if (T.stage2.type === 'double') {
         const gf = T.matches.find(m => m.bracket === 'gf');
         bracketColumns(el, 'wb', 'Winners bracket', gf, 0);
@@ -1691,6 +1783,13 @@ function drawBracket(el) {
       bracketColumns(el, 'wb', '', null, d);
     }
   } else {
+    const tools = thirdPlaceToolsHTML();
+    if (tools) {
+      const bar = document.createElement('div');
+      bar.innerHTML = tools;
+      el.appendChild(bar);
+      wireThirdPlaceTools(bar);
+    }
     bracketColumns(el, 'wb', '');
   }
   alignBracketSections(el);
@@ -1973,6 +2072,15 @@ function drawBracketPreview(el) {
         box.dataset.pid = idFor(r, i);
         mc.appendChild(box);
       }
+    }
+    // the 3rd place match, under the final, when one is planned (it needs four real players)
+    if (!isDouble && r === R && R >= 2 && n >= 4 && thirdPlaceOn(T) && !((T.divisions || 0) > 1) && mc.children.length) {
+      const blk = document.createElement('div');
+      blk.className = 'bthird';
+      blk.innerHTML = '<div class="bcol-title">3RD PLACE</div>';
+      blk.appendChild(previewBox({ txt: 'Loser of ' + wbTag(R - 1, 0), tbd: true }, { txt: 'Loser of ' + wbTag(R - 1, 1), tbd: true },
+        (T.cfg && T.cfg.thirdBo) || boForRound(R - 1), '3RD PLACE'));
+      hangUnderFinal(mc, blk);
     }
     col.appendChild(mc);
     if (mc.children.length) inner.appendChild(col); else col.remove();
@@ -2416,9 +2524,42 @@ function playoffSetupPanelHTML() {
     </div>
     <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn amber" id="po_save">Save</button></div>
     ${playoffActionsHTML(false)}`}
+    ${playoffThirdHTML()}
   </div>`;
 }
+// The 3rd place match of the playoffs. A switch of its own, saved the moment it is clicked: it
+// changes nobody's matchups, so it stays open after the playoffs are locked - until it starts itself.
+function playoffThirdHTML() {
+  const s2 = stageTwoCfgOf(T);
+  if (!s2 || s2.type === 'double' || !thirdPlaceEligible(T)) return '';
+  const m3 = thirdPlaceMatchOf(T);
+  const fixed = !!(m3 && thirdPlaceTouched(m3));
+  const note = fixed ? 'It has started, so it stays.'
+    : m3 ? 'It is on the bracket, under the final. It can be removed until it starts.'
+    : s2.built ? 'Ticking this adds it to the bracket straight away, the same length as the semi-finals (the length can be changed on the Bracket tab). A semi-final already played sends its loser into it.'
+    : 'It is added when the playoff bracket is built.';
+  return `<div class="po-third" style="margin-top:16px;padding-top:12px;border-top:1px solid var(--line-solid)">
+    <label style="display:flex;align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text);margin:0">
+      <input type="checkbox" id="po_third"${thirdPlaceOn(T) ? ' checked' : ''}${fixed ? ' disabled' : ''}> 3rd place match: the two beaten semi-finalists play for 3rd
+    </label>
+    <div class="muted small" style="margin:4px 0 0 22px">${esc(note)}</div>
+  </div>`;
+}
+function wirePlayoffThird() {
+  const ck = document.getElementById('po_third');
+  if (!ck) return;
+  ck.onchange = async () => {
+    const on = ck.checked;
+    ck.disabled = true;
+    try {
+      await api('/api/t/' + T.id + '/third_place', { on: on ? 1 : 0, admin: adminToken() });
+      toast(on ? (stageTwoLive() ? '3rd place match added' : 'The playoffs will have a 3rd place match') : '3rd place match removed');
+      await refresh();
+    } catch (e) { toast(e.message, true); ck.checked = !on; ck.disabled = false; }
+  };
+}
 function wirePlayoffSetup() {
+  wirePlayoffThird();
   const P = T.playoffs;
   const sel = document.getElementById('po_pick');
   if (!P || !sel) return;
