@@ -190,6 +190,12 @@ Zero runtime dependencies: plain Node.js (built-in `http` only), JSON file stora
   in the final; the drawn matches fill the other slots, best seed first. The draw is seeded like the
   Swiss draw: unpredictable beforehand, reproducible afterwards. If nobody went through unbeaten there
   is nothing to pick and every matchup is drawn. Both options need a playoff of 4, 8, 16 or 32.
+- A third option, **only the unbeaten pick, and only from the lowest record that went through** - the
+  3-0s choose among the 3-2s. Nobody else picks: everyone left is **paired by seed**, the best
+  remaining seed against the lowest (with 3-0s taking two 3-2s that is seed 3 against the last 3-2,
+  and 4 against 5 - where the standard bracket puts them anyway). Seeds follow the standings, then
+  the sum of the scores of the opponents each player beat; choosing this option sets that tiebreak.
+  A lapsed clock gives the standard matchup (1 v 8), which is a 3-2.
 - **It stays open while the Swiss is played.** The Format panel locks when the stage starts, so the
   **Playoffs** panel on the Admin tab takes over: who picks (nobody, the top half, or the unbeaten)
   and the clock can be changed right up to the end of the Swiss.

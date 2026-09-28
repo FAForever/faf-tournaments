@@ -709,8 +709,9 @@ async function drawAdmin(el) {
           <div id="af_pickModeRow" style="display:none;margin:0 0 8px">
             <div class="muted small">Who picks</div>
             <select id="af_pickMode">
-              <option value="half"${T.pickMode !== 'unbeaten' ? ' selected' : ''}>The top half of the playoff seeds</option>
+              <option value="half"${T.pickMode !== 'unbeaten' && T.pickMode !== 'bottom' ? ' selected' : ''}>The top half of the playoff seeds</option>
               <option value="unbeaten"${T.pickMode === 'unbeaten' ? ' selected' : ''}>Only the unbeaten; everyone else is drawn</option>
+              <option value="bottom"${T.pickMode === 'bottom' ? ' selected' : ''}>Only the unbeaten, from the lowest record; everyone else is seeded</option>
             </select>
           </div>
           <div class="row" style="gap:10px;align-items:flex-end">
@@ -1553,11 +1554,25 @@ async function drawAdmin(el) {
         if (g('af_pickModeRow')) g('af_pickModeRow').style.display = playoffs ? '' : 'none';
         const cutsOn = g('af_swcuts') && g('af_swcuts').checked;
         const win = cutsOn ? (parseInt((g('af_swwin') || {}).value, 10) || 0) : 0;
+        const loss = cutsOn ? (parseInt((g('af_swloss') || {}).value, 10) || 0) : 0;
+        const bottomRec = (win && loss) ? win + '-' + (loss - 1) : 'lowest record';
         if (g('af_pickMode') && g('af_pickMode').options[1]) {
           g('af_pickMode').options[1].textContent = 'Only the unbeaten (' + (win ? win + '-0' : 'no losses') + '); everyone else is drawn';
         }
+        if (g('af_pickMode') && g('af_pickMode').options[2]) {
+          g('af_pickMode').options[2].textContent = 'Only the unbeaten (' + (win ? win + '-0' : 'no losses') + '), from the ' + bottomRec + 's; everyone else is seeded';
+        }
+        const mode = playoffs && g('af_pick') && g('af_pick').checked && g('af_pickMode') ? g('af_pickMode').value : 'half';
+        // that option always seeds by the beaten score, so the tiebreak follows it (and comes back after)
+        const tbSel = g('af_tiebreak');
+        if (tbSel) {
+          if (mode === 'bottom') { if (!tbSel.disabled) tbSel.dataset.was = tbSel.value; tbSel.value = 'beaten'; tbSel.disabled = true; }
+          else if (tbSel.disabled) { tbSel.disabled = false; if (tbSel.dataset.was) tbSel.value = tbSel.dataset.was; }
+        }
         if (g('af_pickWhat')) {
-          g('af_pickWhat').textContent = (playoffs && g('af_pickMode') && g('af_pickMode').value === 'unbeaten')
+          g('af_pickWhat').textContent = mode === 'bottom'
+            ? 'Everyone who went through the Swiss without a loss chooses their playoff opponent from the ' + bottomRec + 's, in seed order. The rest are paired by seed, the best remaining against the lowest. Seeds follow the standings, then the sum of the scores of the opponents each player beat. Needs a playoff of 4, 8, 16 or 32. Can still be changed while the Swiss is played, on this tab.'
+            : mode === 'unbeaten'
             ? 'Everyone who went through the Swiss without a loss chooses their playoff opponent, in seed order. The rest are drawn against each other, a different record against each other where possible. Needs a playoff of 4, 8, 16 or 32. Can still be changed while the Swiss is played, on this tab.'
             : 'The top half of the seeds each pick who they play, in seed order. Needs a full bracket (4, 8, 16, 32...).';
         }
@@ -1570,7 +1585,7 @@ async function drawAdmin(el) {
       g('af_ffinalsize').style.display = g('af_ffinalmode').value === '1' ? '' : 'none';
       syncPm();
     };
-    for (const id of ['af_comp', 'af_size', 'af_form', 'af_bt', 'af_fsize', 'af_fmode', 'af_fcutmode', 'af_ffinalmode', 'af_perRound', 'af_swcuts', 'af_sw2', 'af_pick', 'af_stopOn', 'af_pickMode', 'af_swwin']) { const e = g(id); if (e) e.onchange = sync; }
+    for (const id of ['af_comp', 'af_size', 'af_form', 'af_bt', 'af_fsize', 'af_fmode', 'af_fcutmode', 'af_ffinalmode', 'af_perRound', 'af_swcuts', 'af_sw2', 'af_pick', 'af_stopOn', 'af_pickMode', 'af_swwin', 'af_swloss']) { const e = g(id); if (e) e.onchange = sync; }
     sync();
 
     g('af_save').onclick = async () => {

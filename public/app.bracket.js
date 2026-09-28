@@ -2242,12 +2242,18 @@ function drawPickPhase(el) {
   if (p.status === 'open') {
     const turnName = p.turn ? nm(p.turn) : '';
     const n = (p.order || []).length;
+    const seededRest = unbeaten && p.rest === 'seed';
+    // "from the 3-2s": the records of the players they may pick from, when the pool is narrowed
+    const poolRecs = seededRest ? (p.pool || []).map(recOf).filter((v, i, a) => v && a.indexOf(v) === i) : [];
+    const from = poolRecs.length ? ' from the ' + poolRecs.join(' / ') + 's' : '';
+    const seedsLine = (T.tiebreak === 'beaten' && p.forWhat === 'stage2') ? ' Seeds come from the Swiss record, then the sum of the scores of the opponents each player beat.' : '';
     const who = unbeaten
-      ? (n === 1 ? 'The one player who went through unbeaten chooses who they play.'
-        : 'The ' + n + ' players who went through unbeaten each choose who they play, in seed order.')
-        + ' Everyone else is then drawn against each other at random, a different record against each other where possible.'
-      : `The top ${p.half} seeds each choose who they play, in seed order.`
-        + (T.tiebreak === 'beaten' && p.forWhat === 'stage2' ? ' Seeds come from the Swiss record, then the sum of the scores of the opponents each player beat.' : '');
+      ? (n === 1 ? 'The one player who went through unbeaten chooses who they play' + from + '.'
+        : 'The ' + n + ' players who went through unbeaten each choose who they play' + from + ', in seed order.')
+        + (seededRest
+          ? ' Everyone else is then paired by seed, the best remaining seed against the lowest.' + seedsLine
+          : ' Everyone else is then drawn against each other at random, a different record against each other where possible.')
+      : `The top ${p.half} seeds each choose who they play, in seed order.` + seedsLine;
     body += `<p class="muted small" style="margin:2px 0 12px">${esc(who)}
       ${p.perPickMs ? 'Each pick has a time limit; if it runs out, the standard bracket matchup is used.' : 'There is no time limit.'}</p>`;
     if (p.myTurn) {
@@ -2319,8 +2325,14 @@ function playoffUnbeatenLabel(t) {
   const c = swissCutCfg(t || T);
   return c.win ? c.win + '-0' : 'no losses';
 }
+// The lowest record that can go through: "3-2" when 3 wins qualify and 3 losses eliminate.
+function playoffBottomLabel(t) {
+  const c = swissCutCfg(t || T);
+  return (c.win && c.loss) ? c.win + '-' + (c.loss - 1) : 'lowest record through';
+}
 function playoffPickText(pick, t) {
   if (pick === 'unbeaten') return 'Only the unbeaten (' + playoffUnbeatenLabel(t) + ') pick their opponent, everyone else is drawn';
+  if (pick === 'bottom') return 'Only the unbeaten (' + playoffUnbeatenLabel(t) + ') pick, from the ' + playoffBottomLabel(t) + 's; everyone else is seeded';
   if (pick === 'half') return 'The top half of the playoff seeds pick their opponent';
   return 'Nobody picks: the bracket is seeded from the Swiss standings';
 }
@@ -2373,7 +2385,7 @@ function playoffOriginHTML() {
   if (p.mode === 'unbeaten') {
     const drawn = p.drawn || [];
     return (chosen.length ? 'Chosen by the unbeaten: ' + chosen.map(vs).join(' · ') + '. ' : 'Nobody went through unbeaten, so nothing was picked. ')
-      + (drawn.length ? 'Drawn: ' + drawn.map(vs).join(' · ') + '.' : '');
+      + (drawn.length ? (p.rest === 'seed' ? 'Seeded: ' : 'Drawn: ') + drawn.map(vs).join(' · ') + '.' : '');
   }
   return 'The top seeds chose their opponents: ' + chosen.map(vs).join(' · ') + '.';
 }
@@ -2393,7 +2405,7 @@ function playoffSetupPanelHTML() {
     ${P.locked
       ? `<div class="infocell"><div class="mono small muted">SET UP AS</div><div>${esc(playoffPickText(P.pick))}</div><div class="muted small">${esc(swissTiebreakText(T.tiebreak))}</div></div>`
       : `<label>When the Swiss stage ends</label>
-    <select id="po_pick">${opt('off')}${opt('half')}${opt('unbeaten')}</select>
+    <select id="po_pick">${opt('off')}${opt('half')}${opt('unbeaten')}${opt('bottom')}</select>
     <div id="po_help" class="muted small" style="margin:6px 0 0"></div>
     <label>Order within the same record</label>
     <select id="po_tb"><option value="gd"${T.tiebreak !== 'beaten' ? ' selected' : ''}>Game difference</option><option value="beaten"${T.tiebreak === 'beaten' ? ' selected' : ''}>Sum of the scores of the opponents beaten, then random</option></select>
@@ -2422,7 +2434,14 @@ function wirePlayoffSetup() {
   const sync = () => {
     const v = sel.value;
     document.getElementById('po_minsRow').style.display = v === 'off' ? 'none' : '';
-    let h = v === 'unbeaten'
+    // The 3-0s-from-the-3-2s option always seeds by the beaten score, so the choice below follows it.
+    if (tb) {
+      if (v === 'bottom') { if (!tb.disabled) tb.dataset.was = tb.value; tb.value = 'beaten'; tb.disabled = true; }
+      else if (tb.disabled) { tb.disabled = false; if (tb.dataset.was) tb.value = tb.dataset.was; }
+    }
+    let h = v === 'bottom'
+      ? 'Everyone who went through the Swiss without a loss chooses their opponent from the ' + playoffBottomLabel(T) + 's, in seed order. The players left over are then paired by seed, the best remaining seed against the lowest. Seeds follow the standings, then the sum of the scores of the opponents each player beat.'
+      : v === 'unbeaten'
       ? 'Everyone who went through the Swiss without a loss chooses their opponent from the rest of the qualifiers, in seed order. The players left over are then drawn against each other at random, a different record against each other where possible' + example + '.'
       : v === 'half'
         ? 'Seeds 1-' + (cut / 2) + ' of the playoff choose their opponent from seeds ' + (cut / 2 + 1) + '-' + cut + ', in seed order.'

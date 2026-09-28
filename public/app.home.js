@@ -434,6 +434,7 @@ async function renderHost() {
               <select id="pPickMode">
                 <option value="half">The top half of the playoff seeds</option>
                 <option value="unbeaten">Only the unbeaten (3-0); everyone else is drawn</option>
+                <option value="bottom">Only the unbeaten (3-0), from the 3-2s; everyone else is seeded</option>
               </select>
             </div>
             <div class="row" style="gap:10px;align-items:flex-end">
@@ -599,8 +600,21 @@ async function renderHost() {
       const win = parseInt((document.getElementById('pSwWinCut') || {}).value, 10) || 0;
       const cutsOn = !!(document.getElementById('pSwCuts') || {}).checked;
       const unb = (cutsOn && win) ? win + '-0' : 'no losses';
+      const loss = parseInt((document.getElementById('pSwLossCut') || {}).value, 10) || 0;
+      const bottomRec = (cutsOn && win && loss) ? win + '-' + (loss - 1) : 'lowest record';
       if (modeSel && modeSel.options[1]) modeSel.options[1].textContent = 'Only the unbeaten (' + unb + '); everyone else is drawn';
-      what.textContent = (playoffs && modeSel && modeSel.value === 'unbeaten')
+      if (modeSel && modeSel.options[2]) modeSel.options[2].textContent = 'Only the unbeaten (' + unb + '), from the ' + bottomRec + 's; everyone else is seeded';
+      const pickOn = !!(document.getElementById('pPickPhase') || {}).checked;
+      const mode = (playoffs && pickOn && modeSel) ? modeSel.value : 'half';
+      // that option always seeds by the beaten score, so the tiebreak follows it (and comes back after)
+      const tbSel = document.getElementById('pTiebreak');
+      if (tbSel) {
+        if (mode === 'bottom') { if (!tbSel.disabled) tbSel.dataset.was = tbSel.value; tbSel.value = 'beaten'; tbSel.disabled = true; }
+        else if (tbSel.disabled) { tbSel.disabled = false; if (tbSel.dataset.was) tbSel.value = tbSel.dataset.was; }
+      }
+      what.textContent = mode === 'bottom'
+        ? 'Everyone who went through the Swiss without a loss chooses their playoff opponent from the ' + bottomRec + 's, in seed order. The rest are paired by seed, the best remaining against the lowest. Seeds follow the standings, then the sum of the scores of the opponents each player beat. Needs a playoff of 4, 8, 16 or 32.'
+        : mode === 'unbeaten'
         ? 'Everyone who went through the Swiss without a loss chooses their playoff opponent, in seed order. The rest are drawn against each other, a different record against each other where possible. Needs a playoff of 4, 8, 16 or 32.'
         : 'The top half of the seeds each pick who they play, in seed order, instead of the bracket deciding. Needs a full bracket (4, 8, 16, 32...).';
     }
@@ -651,7 +665,7 @@ async function renderHost() {
       if (box) box.style.display = e.checked ? '' : 'none';
     });
   });
-  ['pSwCuts', 'pSwStage2', 'pSwWinCut', 'pSwLossCut', 'pPickMode'].forEach(id => {
+  ['pSwCuts', 'pSwStage2', 'pSwWinCut', 'pSwLossCut', 'pPickMode', 'pPickPhase'].forEach(id => {
     const e = document.getElementById(id);
     if (e) { e.addEventListener('change', syncSwissExtras); e.addEventListener('input', syncSwissExtras); }
   });

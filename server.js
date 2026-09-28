@@ -521,7 +521,14 @@ function cleanSwissExtras(src, prev) {
 // the playoff seeds, the original rule) or 'unbeaten' (only those who went through without a
 // loss; everyone else is drawn). Anything else is 'half', which is what every tournament created
 // before the choice existed has always done.
-function cleanPickMode(v) { return v === 'unbeaten' ? 'unbeaten' : 'half'; }
+// 'bottom' (hybrid): only the unbeaten pick, and only from the lowest record that went through
+// (the 3-0s choose among the 3-2s); whoever nobody picked is paired by seed, and the seeds come from
+// the standings then the sum of the scores of the opponents beaten - the option sets that tiebreak.
+function cleanPickMode(v) { return (v === 'unbeaten' || v === 'bottom') ? v : 'half'; }
+// The option that implies a tiebreak. One helper, so create, the Format panel and the Playoffs panel agree.
+function tiebreakForPick(pickOn, mode, tiebreak) {
+  return (pickOn && mode === 'bottom') ? 'beaten' : (tiebreak === 'beaten' ? 'beaten' : 'gd');
+}
 
 function buildStageTwo(ex, cfgSrc) {
   // ex.pickPhase and ex.pickMode are threaded in by the caller from t.pickOpponents / t.pickMode
@@ -646,25 +653,39 @@ function openStagePicks(t, field) {
     return false;
   }
   const nm = id => { const tm = teamById(t, id); return tm ? tm.name : id; };
-  if (t.stage2 && t.stage2.pickMode === 'unbeaten') {
+  const s2mode = t.stage2 ? t.stage2.pickMode : null;
+  if (s2mode === 'unbeaten' || s2mode === 'bottom') {
     const rec = swissRecord(t);
     const records = {};
     for (const id of field) records[id] = rec[id] ? (rec[id].wins + '-' + rec[id].losses) : '';
     const pickers = field.filter(id => rec[id] && rec[id].losses === 0);
-    if (!PICKS.startPickPhase(t, field, { perPickMs: pickClockMs(t), mode: 'unbeaten',
-      pickers, records, drawKey: playoffDrawKey(t) })) return false;
+    const opts = { perPickMs: pickClockMs(t), mode: 'unbeaten', pickers, records, drawKey: playoffDrawKey(t) };
+    if (s2mode === 'bottom') {
+      // The pool is the lowest record that went through - the most losses in the playoff field.
+      // lib/picks tops it up from the bottom seeds if it is ever smaller than the number picking.
+      const worst = Math.max.apply(null, field.map(id => (rec[id] ? rec[id].losses : 0)));
+      opts.pool = field.filter(id => rec[id] && rec[id].losses === worst);
+      opts.poolRule = 'bottom';
+      opts.rest = 'seed';
+    }
+    if (!PICKS.startPickPhase(t, field, opts)) return false;
     t.pickFor = 'stage2';
     const ph = PICKS.pickPhaseOf(t);
+    const restText = s2mode === 'bottom'
+      ? ' Everyone else is then paired by seed, the best remaining seed against the lowest.'
+      : ' The rest are then drawn, different records against each other where possible.';
     if (!ph.order.length) {
-      tpush(t, 'System', 'The Swiss stage is over. Nobody went through unbeaten, so there are no picks: every playoff matchup is drawn.');
+      tpush(t, 'System', 'The Swiss stage is over. Nobody went through unbeaten, so there are no picks: every playoff matchup is '
+        + (s2mode === 'bottom' ? 'seeded.' : 'drawn.'));
       buildAfterPicks(t);
       return true;
     }
+    const from = s2mode === 'bottom' ? ' from the ' + (ph.pool || []).map(id => records[id]).filter((v, i, a) => a.indexOf(v) === i).join(' / ') + 's' : '';
     tpush(t, 'System', 'The Swiss stage is over. ' + (ph.order.length === 1
-      ? nm(ph.order[0]) + ' went through unbeaten and now chooses a playoff opponent.'
+      ? nm(ph.order[0]) + ' went through unbeaten and now chooses a playoff opponent' + from + '.'
       : 'The ' + ph.order.length + ' players who went through unbeaten (' + ph.order.map(nm).join(', ')
-        + ') now choose their playoff opponent, in seed order.')
-      + ' The rest are then drawn, different records against each other where possible.');
+        + ') now choose their playoff opponent' + from + ', in seed order.')
+      + restText);
     return true;
   }
   if (!PICKS.startPickPhase(t, field, { perPickMs: pickClockMs(t) })) return false;
@@ -708,9 +729,10 @@ function buildAfterPicks(t) {
   const chosen = ph.order.filter(k => ph.picks[k]).map(k => [k, ph.picks[k]]);
   if (ph.mode === 'unbeaten') {
     const drawn = (ph.drawn || []).map(vs).join(' \u00b7 ');
+    const how = ph.rest === 'seed' ? 'Seeded' : 'Drawn';
     tpush(t, 'System', chosen.length
-      ? 'All opponents chosen: ' + chosen.map(vs).join(' \u00b7 ') + '.' + (drawn ? ' Drawn: ' + drawn + '.' : '')
-      : 'Playoff matchups drawn: ' + drawn + '.');
+      ? 'All opponents chosen: ' + chosen.map(vs).join(' \u00b7 ') + '.' + (drawn ? ' ' + how + ': ' + drawn + '.' : '')
+      : 'Playoff matchups ' + how.toLowerCase() + ': ' + drawn + '.');
   } else {
     tpush(t, 'System', 'All opponents chosen: ' + chosen.map(vs).join(' \u00b7 ') + '.');
   }
@@ -2605,8 +2627,9 @@ async function handleAPI(req, res, url) {
       pickOpponents: b.pickOpponents ? 1 : 0,
       pickMinutes: intIn(b.pickMinutes, 0, 1440, 0),
       pickMode: cleanPickMode(b.pickMode),
-      // Swiss: how equal records are ordered ('gd' game difference, or 'beaten' - see lib/swiss.js)
-      tiebreak: b.tiebreak === 'beaten' ? 'beaten' : 'gd',
+      // Swiss: how equal records are ordered ('gd' game difference, or 'beaten' - see lib/swiss.js).
+      // The "3-0s pick from the 3-2s" option always seeds by the beaten score.
+      tiebreak: tiebreakForPick(!!b.pickOpponents, cleanPickMode(b.pickMode), b.tiebreak),
       // declared up front so the bracket can say so from the start (0 = play it out)
       stopAtAlive: intIn(b.stopAtAlive, 0, 128, 0),
       cfg: null, maps: {}, mapDb: [], mapPools: [], poolAssign: {},
@@ -4844,12 +4867,14 @@ async function handleAPI(req, res, url) {
       if (['signup', 'draft', 'drafted'].indexOf(t.status) >= 0) return bad(res, 'Until the Swiss stage starts, set this on the Format panel');
       if (!stageTwoCfg(t)) return bad(res, 'This tournament has no playoff stage');
       if (t.status !== 'running') return bad(res, 'This tournament has already finished');
-      const pick = ['off', 'half', 'unbeaten'].indexOf(b.pick) >= 0 ? b.pick : null;
-      if (!pick) return bad(res, 'Choose who picks: nobody, the top half of the seeds, or the unbeaten');
+      const pick = ['off', 'half', 'unbeaten', 'bottom'].indexOf(b.pick) >= 0 ? b.pick : null;
+      if (!pick) return bad(res, 'Choose who picks: nobody, the top half of the seeds, the unbeaten, or the unbeaten from the lowest record');
       const minutes = intIn(b.minutes, 0, 1440, parseInt(t.pickMinutes, 10) || 0);
       // The tiebreak decides the playoff seeds - who picks, in what order, and where they sit - so
-      // it is part of the playoff setup. Absent means "leave it as it is".
-      const tiebreak = b.tiebreak === undefined ? swissTiebreakMode(t) : (b.tiebreak === 'beaten' ? 'beaten' : 'gd');
+      // it is part of the playoff setup. Absent means "leave it as it is". The 3-0s-from-the-3-2s
+      // option always seeds by the beaten score, whatever was sent.
+      const tiebreak = tiebreakForPick(pick !== 'off', pick,
+        b.tiebreak === undefined ? swissTiebreakMode(t) : b.tiebreak);
       const made = playoffsMade(t);
       const was = playoffPickSetting(t);
       const redo = !!b.redo && made;
@@ -4864,7 +4889,8 @@ async function handleAPI(req, res, url) {
       applyPlayoffPick(t, pick, minutes);
       const label = { off: 'seeded from the Swiss standings, no picks',
         half: 'the top half of the playoff seeds pick their opponent',
-        unbeaten: 'the unbeaten pick their opponent, the rest are drawn' }[pick];
+        unbeaten: 'the unbeaten pick their opponent, the rest are drawn',
+        bottom: 'the unbeaten pick from the lowest record that went through, the rest are seeded' }[pick];
       let reset = null;
       if (redo) {
         reset = resetPlayoffs(t);
@@ -5376,6 +5402,7 @@ async function handleAPI(req, res, url) {
         if (b.pickMinutes !== undefined) t.pickMinutes = intIn(b.pickMinutes, 0, 1440, t.pickMinutes || 0);
         if (b.pickMode !== undefined) t.pickMode = cleanPickMode(b.pickMode);
         if (b.tiebreak !== undefined) t.tiebreak = b.tiebreak === 'beaten' ? 'beaten' : 'gd';
+        t.tiebreak = tiebreakForPick(!!t.pickOpponents, cleanPickMode(t.pickMode), t.tiebreak);
         if (b.stopAtAlive !== undefined) t.stopAtAlive = intIn(b.stopAtAlive, 0, 128, t.stopAtAlive || 0);
         const pb = b.plan || {};
         const op = (t.plan && typeof t.plan === 'object') ? t.plan : {};
