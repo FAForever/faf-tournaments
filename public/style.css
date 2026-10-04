@@ -362,9 +362,6 @@ tbody tr:hover { background: #ffffff05; }
 .veto-abtag.team-A { color: #7db8ff; border: 1px solid #2d5a9e; }
 .veto-abtag.team-B { color: #ffb066; border: 1px solid #6b5220; }
 .veto-history { margin-bottom: 8px; }
-.veto-games { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
-.veto-game { display: flex; align-items: center; gap: 5px; }
-.vg-num { font-family: var(--mono); font-size: 10px; color: var(--muted); }
 .vg-dec { font-family: var(--mono); font-size: 9px; color: var(--amber); text-transform: uppercase; }
 .veto-map.act-ban { cursor: pointer; color: var(--text); background: var(--panel2); }
 .veto-map.act-ban:hover { border-color: var(--red); color: var(--red); }
@@ -973,9 +970,23 @@ body.modal-open .turnbanner { animation: none !important; }
 .veto-card-head { flex-wrap: nowrap; gap: 12px; }
 .veto-card-head h2 { white-space: nowrap; }
 
-/* Vetoes tab: my-matches / all scope switch (competitors only) */
-.veto-scope { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 12px; }
-.veto-scope .btn.on { border-color: var(--amber); color: var(--amber); background: var(--amber-dim, #2a2113); }
+/* Vetoes tab: a sub-page per part of the tournament (Swiss stage / playoffs, or a division) and
+   the follow box that narrows the page to one team or player */
+.veto-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 14px; }
+.subtabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.subtab {
+  font-family: var(--display); font-size: 12px; letter-spacing: 1px; text-transform: uppercase;
+  padding: 6px 12px; cursor: pointer; color: var(--muted);
+  background: var(--panel); border: 1px solid var(--line-solid); border-radius: 4px;
+}
+.subtab:hover { color: var(--text); border-color: #3a5878; }
+.subtab.active { color: var(--amber); border-color: #ffb44788; background: var(--amber-dim); box-shadow: inset 0 -2px 0 var(--amber); }
+.veto-follow { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.veto-follow select { width: auto; max-width: 280px; padding: 6px 9px; }
+@media (max-width: 700px) {
+  .veto-follow { margin-left: 0; width: 100%; }
+  .veto-follow select { flex: 1; max-width: none; }
+}
 
 /* replay ids link to the FAF vault */
 .replay-link { color: inherit; text-decoration: underline dotted; }
@@ -1021,7 +1032,7 @@ body.modal-open .turnbanner { animation: none !important; }
 .sr-swatch.on { border-color: currentColor; box-shadow: 0 0 0 1px currentColor inset; }
 
 /* ---------- faction veto ---------- */
-/* Sits to the right of each game's map inside .veto-game. Colours stand in for faction logos
+/* A game's faction choice (inside the games table, .vgt). Colours stand in for faction logos
    (which are game assets we don't ship); the initial plus the name keeps it unambiguous. */
 .fveto-col {
   margin-left: auto; padding-left: 14px; border-left: 1px solid #2a3d55;
@@ -1080,8 +1091,29 @@ body.modal-open .turnbanner { animation: none !important; }
 .fchip.dim .fchip-name { text-decoration: line-through; }
 .fchip.on { border-color: var(--green); }
 .fchip[disabled] { cursor: default; }
-/* the game row becomes a flex line so the faction column can sit beside the map */
-.veto-game { display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+/* The games of a series, one aligned row each: game, map, then each team's faction. Used in the
+   veto popup, on the Vetoes tab and in the match details. */
+.vgt { width: 100%; margin-top: 4px; font-size: 13px; }
+/* phones turn panel tables into sideways scrollers; this one is built to fit instead */
+.panel table.vgt { display: table; overflow-x: visible; white-space: normal; }
+.vgt th { font-size: 10px; padding: 5px 8px; }
+.vgt td { padding: 6px 8px; vertical-align: middle; }
+.vgt .vgt-n { width: 1%; white-space: nowrap; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.vgt td.vgt-map .veto-map { display: inline-block; margin-right: 6px; }
+.vgt th.vgt-f { min-width: 72px; white-space: normal; overflow-wrap: anywhere; }
+.vgt td.vgt-f { width: 1%; white-space: nowrap; }
+/* an open faction choice spans both team columns; it sits in the row, not beside it */
+.vgt .fveto-col { margin: 0; padding: 0; border: none; min-width: 0; max-width: none; width: auto; }
+.vgt .fveto-col.active { padding: 2px 0 4px 10px; border-left: 3px solid var(--amber); }
+@media (max-width: 520px) {
+  .vgt th, .vgt td { padding: 5px 4px; }
+  .vgt td.vgt-f .fchip-name { display: none; }
+  /* the ban / pick order: the team above its map, no thumbnail, so the map name keeps its width */
+  .vlog-row, .vlog-row.with-thumb { grid-template-columns: 18px 46px minmax(0, 1fr); row-gap: 1px; }
+  .vlog-row .vlog-thumb, .vlog-row .vlog-noimg { display: none; }
+  .vlog-row .vlog-team, .vlog-row .vlog-map { grid-column: 3; }
+  .vlog-row .vlog-n, .vlog-row .vlog-act { grid-row: span 2; }
+}
 @media (max-width: 700px) {
   .fveto-col { margin-left: 0; padding-left: 0; border-left: none; border-top: 1px solid #2a3d55; padding-top: 8px; width: 100%; max-width: none; }
 }
@@ -1464,3 +1496,87 @@ tr.row-out > td { opacity: .55; }
 .r1n { width: 20px; flex: none; color: var(--muted, #8b93a1); font-size: 12px; text-align: right; }
 .r1edit .warn { color: var(--amber, #d99a2b); }
 @media (max-width: 560px) { .r1row select { flex-basis: 100%; max-width: none; } }
+
+/* ---------- divisions (King / Prince) ---------- */
+.champ-row { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 22px; }
+.champ-row .champ { flex: 1; min-width: 240px; margin-bottom: 0; }
+.div-draft { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line-solid); }
+.div-draft-h { font-family: var(--display); font-size: 13px; letter-spacing: 1px; text-transform: uppercase; color: var(--amber); margin: 14px 0 6px; }
+.div-draft .div-draft-h { margin-top: 0; }
+
+/* ---------- Hall of Fame ---------- */
+.hof-search { margin: 0 0 12px; }
+.hof-search input { width: 100%; max-width: 420px; }
+.hof-pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
+
+/* ---------- Predictions ---------- */
+.pred-prize { margin-top: 12px; padding: 10px 14px; border: 1px solid #ffb44766; background: var(--amber-dim); border-radius: 4px; color: var(--text); font-size: 14px; }
+.pred-prize-k { font-family: var(--mono); font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: var(--amber); margin-right: 8px; }
+.pred-state { font-family: var(--mono); font-size: 9px; letter-spacing: .5px; padding: 1px 5px; border-radius: 3px; margin-left: 4px; vertical-align: 1px; border: 1px solid var(--line-solid); }
+.pred-state.open { color: #3fb950; border-color: #2ea04366; }
+.pred-state.locked { color: var(--muted); }
+.pred-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.pred-head h2 { margin: 0; }
+.pred-note { margin: 0 0 12px; padding: 8px 12px; border-left: 3px solid var(--line-solid); background: var(--panel2); font-size: 13px; }
+.pred-note.ok { border-left-color: var(--green); }
+.pred-note.warn { border-left-color: var(--amber); color: var(--amber); }
+.pred-viewing { margin: 0 0 12px; padding: 8px 12px; border: 1px solid #4c8fd455; background: #4c8fd41a; border-radius: 4px; font-size: 13px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pred-score { margin: 0 0 12px; font-size: 13px; }
+.pred-score .ok, .pred-mark.ok { color: #3fb950; }
+.pred-score .no, .pred-mark.no { color: #ff6369; }
+.pred-div { font-family: var(--display); font-size: 14px; letter-spacing: 1px; text-transform: uppercase; color: var(--amber); margin: 16px 0 8px; }
+.pred-round { margin: 0 0 14px; }
+.pred-round-h { font-family: var(--mono); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; }
+.pred-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; }
+.pred-match { display: flex; flex-direction: column; gap: 4px; padding: 6px; border: 1px solid var(--line-solid); border-radius: 4px; background: var(--panel2); min-width: 0; }
+.pred-match.ok { border-color: #2ea04366; }
+.pred-match.no { border-color: #ff636955; }
+.pm-label { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10px; color: var(--muted); padding: 0 2px; }
+.pred-team {
+  display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; text-align: left;
+  padding: 6px 8px; border: 1px solid var(--line-solid); border-radius: 3px; background: var(--bg);
+  color: var(--text); font: inherit; font-size: 13px; cursor: pointer;
+}
+.pred-team .seedtag { margin-right: 0; }
+.pred-team .pt-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pred-team:hover:not(:disabled) { border-color: var(--amber); }
+.pred-team.on { border-color: var(--green); background: #2ea04322; box-shadow: inset 3px 0 0 var(--green); }
+.pred-team:disabled { cursor: default; }
+.pred-team:disabled:not(.on) { opacity: .75; }
+.pred-team .pt-won { font-family: var(--mono); font-size: 9px; letter-spacing: .5px; color: var(--amber); }
+.pred-team.won { border-style: dashed; }
+.pred-tbd { padding: 6px 8px; font-size: 12px; color: var(--muted); font-style: italic; border: 1px dashed var(--line-solid); border-radius: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pred-mark { font-weight: 700; min-width: 12px; display: inline-block; text-align: center; }
+.pred-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line-solid); }
+.pred-dist { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 8px; }
+.pd-item { font-family: var(--mono); font-size: 11px; padding: 3px 8px; border: 1px solid var(--line-solid); border-radius: 3px; color: var(--muted); }
+.pd-item strong { color: var(--text); margin-right: 4px; }
+.pd-item.off { border-color: #ffb44788; color: var(--amber); }
+.pred-recs { display: flex; flex-direction: column; gap: 4px; }
+.pred-recrow { display: grid; grid-template-columns: 28px minmax(90px, 1fr) auto 90px 18px; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 3px; }
+.pred-recrow:nth-child(odd) { background: var(--panel2); }
+.pred-recrow.ok { box-shadow: inset 3px 0 0 #2ea043; }
+.pred-recrow.no { box-shadow: inset 3px 0 0 #ff6369; }
+.pred-recrow .pr-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pred-rec { display: flex; gap: 4px; flex-wrap: wrap; }
+.pred-rec select { width: auto; padding: 4px 8px; }
+.pred-rc { font-family: var(--mono); font-size: 12px; padding: 4px 8px; border: 1px solid var(--line-solid); border-radius: 3px; background: var(--bg); color: var(--muted); cursor: pointer; }
+.pred-rc:hover:not(:disabled) { border-color: var(--amber); color: var(--text); }
+.pred-rc.on { border-color: var(--green); background: #2ea04333; color: var(--text); }
+.pred-rc:disabled { cursor: default; }
+.pred-names { display: flex; gap: 6px; flex-wrap: wrap; }
+.pred-names .me { border-color: var(--amber); }
+.pred-board tr.me td { background: var(--amber-dim); }
+.pred-badge { font-family: var(--mono); font-size: 9px; letter-spacing: .5px; padding: 1px 6px; border-radius: 3px; vertical-align: 1px; margin-left: 4px; }
+.pred-badge.perfect { color: #0A1420; background: var(--amber); }
+.pred-badge.alive { color: #3fb950; border: 1px solid #2ea04366; }
+.pred-perfect-line { margin: 0 0 10px; padding: 8px 12px; border: 1px solid #ffb44766; background: var(--amber-dim); border-radius: 4px; }
+@media (max-width: 560px) {
+  /* name, record so far and mark on one line, the record buttons under them */
+  .pred-recrow { grid-template-columns: 24px minmax(0, 1fr) auto 18px; row-gap: 4px; }
+  .pred-recrow .seedtag { grid-column: 1; grid-row: 1; }
+  .pred-recrow .pr-name { grid-column: 2; grid-row: 1; }
+  .pred-recrow .pr-now { grid-column: 3; grid-row: 1; }
+  .pred-recrow .pred-mark { grid-column: 4; grid-row: 1; }
+  .pred-recrow .pred-rec { grid-column: 1 / -1; grid-row: 2; }
+}

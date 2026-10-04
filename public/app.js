@@ -209,7 +209,7 @@ function myToken() { return adminToken() || capToken(); }
 // `?streamer=<token>` share link; it is a FAF-account role now, so there is nothing to carry.
 function viewToken() { return myToken(); }
 
-const VALID_TABS = ['overview', 'news', 'chat', 'players', 'teams', 'bracket', 'maps', 'vetoes', 'standings', 'admin', 'log'];
+const VALID_TABS = ['overview', 'news', 'chat', 'players', 'teams', 'bracket', 'bracket2', 'bracket3', 'bracket4', 'matches', 'stats', 'maps', 'vetoes', 'standings', 'predictions', 'admin', 'log'];
 let pendingOrganizerClaim = null; // { id, token } — set when an ?admin= link is opened
 function captureTokensFromURL() {
   const id = tourneyId();
@@ -346,7 +346,12 @@ document.addEventListener('click', e => {
   }
 });
 
+// With divisions a match label says which one: "PRINCE · SEMIS".
 function roundLabel(m) {
+  const core = roundLabelCore(m);
+  return (m && m.division && divisionsOnT()) ? divisionNameOf(m.division).toUpperCase() + ' \u00b7 ' + core : core;
+}
+function roundLabelCore(m) {
   if (m.bracket === 'gf') return T.bracketType === 'swiss' ? 'FINAL' : 'GRAND FINAL';
   if (m.bracket === '3p') return '3RD PLACE MATCH';
   if (m.bracket === 'sw') return 'ROUND ' + m.round;
@@ -356,8 +361,10 @@ function roundLabel(m) {
     return (cnt === 1 && m.round === maxR && m.round > 1) ? 'FINAL' : 'ROUND ' + m.round;
   }
   if (m.bracket === 'lb') return 'LOSERS BRACKET R' + m.round;
-  // wb
-  const R = T.rounds || 1;
+  // wb - each division has its own number of rounds
+  const R = (m.division && divisionsOnT())
+    ? (T.matches || []).filter(x => x.bracket === 'wb' && (x.division || 0) === m.division).reduce((a, x) => Math.max(a, x.round || 0), 0) || 1
+    : (T.rounds || 1);
   const prefix = T.bracketType === 'double' ? 'WINNERS BRACKET ' : '';
   if (m.round === R) return prefix + (T.bracketType === 'double' ? 'FINAL' : 'FINAL');
   if (m.round === R - 1) return prefix + 'SEMIS';
@@ -719,6 +726,102 @@ function statusPillClass(t) {
   return signupsNotOpenYet(t) ? 'presignup' : t.status;
 }
 
+// ---- divisions (King / Prince ...) ----
+// Each division is its own bracket on its own tab: 'bracket' for division 1, 'bracket2'... after.
+const DIVISION_DEFAULT_NAMES = ['King', 'Prince', 'Duke', 'Baron'];
+function divisionsOnT(t) {
+  t = t || T;
+  return !!t && t.competition === 'team' && (t.bracketType === 'single' || t.bracketType === 'double') && (parseInt(t.divisions, 10) || 0) > 1;
+}
+function divisionNameOf(d, t) {
+  t = t || T;
+  const names = (t && t.divisionNames) || [];
+  return names[d - 1] || DIVISION_DEFAULT_NAMES[d - 1] || ('Division ' + d);
+}
+function divisionChampionOf(d, t) { t = t || T; return ((t && t.divisionChampions) || [])[d - 1] || null; }
+function divisionTeamsOf(d, t) { t = t || T; return ((t && t.teams) || []).filter(x => (x.division || 0) === d); }
+function divisionTab(d) { return d <= 1 ? 'bracket' : 'bracket' + d; }
+function isBracketTab(tab) { return /^bracket[2-4]?$/.test(tab || ''); }
+function tabDivision(tab) { const m = /^bracket([2-4])$/.exec(tab || ''); return m ? parseInt(m[1], 10) : 1; }
+// The tab a match is shown on.
+function bracketTabFor(m) { return (m && m.division && divisionsOnT()) ? divisionTab(m.division) : 'bracket'; }
+// How many teams a division is going to have, before its teams exist: what the split or the draft
+// will produce. Null when nobody can know yet (captains still to be picked by hand).
+function plannedDivisionSize(d, t) {
+  t = t || T;
+  const n = parseInt(t.divisions, 10) || 0;
+  if (!(n > 1) || d < 1 || d > n) return null;
+  const made = divisionTeamsOf(d, t).length;
+  if (made || (t.teams || []).some(x => x.division)) return made;
+  if (t.formation === 'draft') {
+    if (d === 1) return parseInt(t.captainCount, 10) || null;
+    const c = (t.divCaptains || []).find(x => x.division === d);
+    return (c && c.mode !== 'manual' && c.count) ? c.count : null;
+  }
+  const total = (typeof projectedTeamCount === 'function') ? projectedTeamCount() : (t.teams || []).length;
+  if (!total) return null;
+  const top = parseInt(t.divisionTop, 10) || 0;
+  if (n === 2 && top > 0 && top < total) return d === 1 ? top : total - top;
+  const per = Math.ceil(total / n);
+  return Math.max(0, Math.min(per, total - per * (d - 1)));
+}
+// How many rounds a division's bracket is shifted against the largest one. The round lengths are
+// set for the largest division and a smaller one plays them aligned back from the final, so its
+// round r takes the length - and the map pool - of the largest division's round r + offset.
+// Mirrors poolRoundKey in lib/match.js.
+function divisionRoundOffset(division) {
+  if (!division || !divisionsOnT()) return 0;
+  const wbRounds = d => (T.matches || []).filter(x => x.bracket === 'wb' && (x.division || 0) === d).reduce((a, x) => Math.max(a, x.round || 0), 0);
+  if (T.cfg) {
+    if (!T.cfg.divAlign) return 0;
+    const R = (Array.isArray(T.cfg.wb) ? T.cfg.wb : (T.cfg.rounds || [])).length;
+    return Math.max(0, R - wbRounds(division));
+  }
+  const lg = n => { let r = 0; while ((1 << r) < n) r++; return r; };
+  let maxN = 0;
+  for (let d = 1; d <= T.divisions; d++) maxN = Math.max(maxN, plannedDivisionSize(d) || 0);
+  const nd = plannedDivisionSize(division) || 0;
+  return (maxN && nd) ? Math.max(0, lg(maxN) - lg(nd)) : 0;
+}
+function poolRoundOf(bracket, round, division) {
+  const off = divisionRoundOffset(division);
+  if (!off || (bracket !== 'wb' && bracket !== 'lb')) return round;
+  return round + (bracket === 'wb' ? off : 2 * off);
+}
+function divisionListText(t) {
+  t = t || T;
+  const n = parseInt(t.divisions, 10) || 0;
+  const names = [];
+  for (let d = 1; d <= n; d++) names.push(divisionNameOf(d, t));
+  return names.length > 1 ? names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1] : names.join('');
+}
+
+// ---- playing order ----
+// When a match is played, as a number: sorting by it lists a tournament in the order it is played.
+// The Swiss rounds come first, then its playoffs or final. In an elimination bracket the losers
+// bracket interleaves with the winners bracket (its round 2k is played alongside winners round
+// k+1, just after it), the 3rd place match goes just before the final and a grand final last.
+// Divisions line up from their final, the way their match lengths do.
+function matchChrono(m) {
+  if (!m) return 0;
+  const b = m.bracket, r = m.round || 0;
+  if (b === 'sw' || b === 'ffa') return r;
+  const base = (T && T.bracketType === 'swiss') ? 10000 : 0;
+  if (b === 'gf') return base + 9999;
+  const off = m.division ? divisionRoundOffset(m.division) : 0;
+  const wbAt = x => (x <= 1 ? 0.5 : 2 * x - 2);
+  if (b === 'lb') return base + r + 2 * off + 0.1;
+  if (b === '3p') return base + wbAt(r + off) - 0.25;
+  return base + wbAt(r + off);
+}
+// A copy of `list` in playing order (newest first when asked), top of the bracket first within a
+// round. The order is worked out once per match, not once per comparison.
+function sortByPlay(list, newestFirst) {
+  const at = new Map();
+  for (const m of list) at.set(m, matchChrono(m));
+  return list.slice().sort((a, b) => (newestFirst ? at.get(b) - at.get(a) : at.get(a) - at.get(b)) || (a.index || 0) - (b.index || 0));
+}
+
 function typeLine(t) {
   // Challonge doesn't tell us the team size or our formation options, so don't fabricate a
   // format for an imported event - say where it came from and what Challonge called it.
@@ -738,7 +841,8 @@ function typeLine(t) {
   // A tournament created from a named preset says so: it is the format's identity, and only a
   // global tournament director can have made it.
   const head = t.presetName ? t.presetName + ' · ' : '';
-  return head + form + ' · ' + bt + swissTail + (t.maxTeams ? ' · max ' + t.maxTeams + ' teams' : '');
+  const divTail = divisionsOnT(t) ? ' \u00b7 ' + divisionListText(t) + ' brackets' : '';
+  return head + form + ' · ' + bt + swissTail + divTail + (t.maxTeams ? ' · max ' + t.maxTeams + ' teams' : '');
 }
 
 // ---- declared early stop (qualifiers) ----

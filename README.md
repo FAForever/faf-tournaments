@@ -106,7 +106,11 @@ Zero runtime dependencies: plain Node.js (built-in `http` only), JSON file stora
 - **How captains are chosen** is an option on the Teams tab: either the organizer marks them by hand (the default), or the organizer sets a number and the highest-rated N players become captains automatically. The number is editable right up until the draft starts, and the automatic list is worked out at that moment, so late signups, withdrawals and rating corrections are all reflected. Players still awaiting approval in request-mode signups are never picked. A live preview shows exactly who would be captain. A captain can undo their own most recent pick until the next captain picks; the organizer can undo the last pick at any time.
 - Solo brackets: every signup is an entrant.
 - Seeding by rating or random, with a manual seed override before the bracket starts (reorder, nudge, randomize, reset to rating, or **order by invite** - the order the invites went out, with anyone never invited keeping their order after them). The override works on every bracket type, Swiss included, and on a solo field it sits on the **Players tab** as well as the Admin tab. It is open between locking the entrants and starting. On a Swiss a seed only sets the round-1 draw and the last standings tiebreak, and the panel says so. During team formation, the Teams tab lists teams by combined rating and shows each team's projected seed (its rank by rating) until real seeds are locked.
-- King/Prince divisions: split full teams into skill divisions by combined rating, each playing its own bracket (single/double elim only).
+- **Divisions (King / Prince ...)**: a single or double elimination team event can be split into 2-4 divisions, each with its own bracket on its own tab, its own champion and its own placings. The default names are King, Prince, Duke and Baron; rename them on the hosting window or the Format panel. The tournament's champion (and its Hall of Fame win) is the top division's, and the tournament finishes when every division has its champion.
+  - With **premade teams or a solo field**, the teams are split by combined rating when signups close - evenly, or "the N best in King" with two divisions - and can be moved between divisions until the start.
+  - With a **captain draft**, the divisions are drafted one after the other. The King captains draft first and everyone they pick plays in the King bracket; the players nobody picked are then drafted into the Prince bracket by its own captains, and so on down. How each later division's captains are chosen is set on the Teams tab before the draft: the N highest rated of the players left (that draft then starts by itself the moment the one above ends), or by hand at that point (the draft waits for the organizer). The organizer can undo back across the boundary into the division above.
+  - Seeds are unique across the field until the start, then run from 1 in each division. Round lengths are set once, for the biggest division; a smaller one plays them counted back from the final (its final is the final's length, its semi-finals the semi-finals'), and takes its map pools the same way.
+  - Not available together with an early stop at a survivor count.
 - Free agents (players not yet on a team) get their own prominent panel with a card per player, sortable by rating, name or newest, showing the pool's average rating and invite/assign actions.
 - Withdrawing or removing a player detaches them cleanly from any team (captain reassigns to the next member; emptied teams are removed during signup), so teams never keep a "ghost" slot.
 
@@ -336,6 +340,7 @@ A **global tournament director** is not a site admin. What the role grants:
 - A quiet unread marker appears wherever a chat is linked (the CHAT tab, match-chat links, and the room list) when there are messages you haven't seen. It is deliberately softer than the red @mention badge - a mention needs you personally, unread just means something was said.
 - Being @mentioned also raises a banner on your Overview linking to the chat.
 - Organizers are listed one per row with their Discord handle where they have set one.
+- **Deleting a message** (organizers) leaves the rest of the room on screen - it used to empty the panel until the room was picked again - and every other open panel on that room drops the deleted message on its next poll: the room carries a revision that a deletion bumps, and a panel that sees it change loads the room again.
 - Match chats are also linked from the Bracket and Vetoes tabs.
 - **Pin a chat to the right.** Every chat panel carries a **"Pin this chat on the right"** button, and every non-completed room in the Chats list carries a 📌 next to it. Pinning docks that room to a rail down the right-hand side of the screen, so a match chat stays readable while the user works through the Bracket, Matches and Vetoes tabs. This is additive - every existing way of opening a chat still works exactly as before.
   - **One at a time.** Pinning a second chat replaces the first; no chat stack to manage.
@@ -384,9 +389,29 @@ A **global tournament director** is not a site admin. What the role grants:
 
 ### Vetoes tab
 - Opening a **map pool** shows exactly how its veto will run before it happens: the numbered ban/pick sequence, which side acts first and why, the decider, and whether the sequence completes upfront or step by step. Players no longer meet the sequence for the first time when it is their turn.
-- Shows each match's ban/pick veto. Players see only vetoes for matches their own team is in; organizers, casters, tournament directors on official events, and site admins see all.
-- In-progress vetoes are listed first (newest round first), then completed ones (highlighted, with the decided maps).
-- On a **finished** tournament, a Veto statistics panel shows "most banned" and "most played" maps. It is visible only to organizers of that tournament, tournament directors (on official tournaments), and site admins.
+- A tournament played in parts gets a **sub-page per part**: the Swiss stage and its playoffs (or final), or each division's bracket. The playoffs page is the one that opens once it exists.
+- Each page lists the vetoes that need action first, then the results, both **in playing order, newest on top**. A Swiss round never sorts above the playoffs that came after it, and a losers-bracket round sits between the winners rounds it is played alongside. The Matches tab and the Overview's recent results use the same order.
+- A **Follow** box narrows the page to one team or player (in a team event, a player follows their team), or to your own matches. Someone playing starts on their own matches, everyone else on all of them; the choice is remembered per tournament in that browser. The sub-pages count what they hold for the current choice, and an empty page points to the one that has them.
+- A veto's games are **one aligned table**: game, map (marked if it was the decider), then each side's faction under that team's name, so the rows line up however long a map's name is. The veto popup on the bracket is wide enough for it. On a phone the faction chips shrink to their letter and the ban/pick order puts the team above its map.
+- On a **finished** tournament, a Veto statistics panel shows "most banned" and "most played" maps for the page's part of the tournament. It is visible only to organizers of that tournament, tournament directors (on official tournaments), and site admins.
+
+### Predictions
+- A **Predictions** tab lets anyone logged in with FAF predict who wins every match before the tournament starts. A win is a win; the score does not matter. Logged-out visitors can look but not predict.
+- **When.** A stage opens as soon as its matches can be known: when the teams are locked (the bracket the start will make is projected from the seeding as it stands), or, with opponent picking, once the seeds have chosen their opening matches. It closes the moment its first match is played - a result, a live score or a submitted score - and taking that result back does not reopen it. The organizer can close a stage earlier, and reopen it as long as none of its matches has been played.
+- **Every format.**
+  - Single and double elimination, divisions included: the winner of every match, in a bracket that fills itself in as you pick, so a later match always shows the two teams your earlier picks put there. Changing an early pick drops the later picks it invalidates. Byes decide themselves.
+  - Swiss: every team's final record (3-0, 3-1 ... 0-3), because the pairings after round one depend on results and cannot be predicted as matches. When the field splits evenly (16 at 3/3, say) the page shows how many teams each record will end up with.
+  - A Swiss with playoffs or a final has a **second stage** for those matches, which opens only once the Swiss is complete and they exist.
+  - FFA: the champion.
+- **Private until closed.** Nobody's picks are sent to anyone, organizers included, until the stage closes; then everyone's can be viewed from the leaderboard.
+- **Out of date predictions.** A prediction remembers the draw it was made for (the opening matches, or the Swiss field and format). If the organizer reseeds, moves a team between divisions or changes the format before the start, earlier predictions are flagged and have to be made again; one still out of date when the stage closes counts for nothing.
+- **Scoring.** Right, wrong and still to play, per predictor. A pick is wrong as soon as it cannot come true (that team is already out), and a match left unpicked counts as wrong. A prediction is **perfect** when every stage was predicted and every pick came true; matches never played (an early finish) do not count. The organizer can put up a **prize for a perfect prediction**, shown at the top of the tab, and once the tournament is over the tab names everyone who earned it.
+- The tab's badge and a line on the Overview remind a logged-in viewer whose prediction is missing, out of date or incomplete while a stage is open.
+- Stored on the tournament (`predictions`, keyed by FAF id, and `predict` for the settings and locks) and never put in the tournament payload: the page gets a summary (what is open, how many have predicted, whether you have), and the tab reads `GET /api/t/<id>/predictions`.
+
+### Hall of Fame
+- Players only: a team's win counts for every player on it. With divisions, a tournament's win is the top division's.
+- Ranked by championships, then tournaments entered. Search by name (any part of it) or exact FAF id, 100 players to a page. The search and page are kept in the address so a result can be linked, and the # column is always the place on the whole board.
 
 ### Keyboard shortcuts
 - Single keys, no modifiers: **F** shows players instead of team names in the bracket, **S** toggles streamer mode, **V** toggles view-as-player (organizers only).
@@ -475,7 +500,8 @@ lib/match.js         match core + veto engine (create/route/evaluate/finalize wi
                      forced winner, builders, pools, ban/pick sequence, A/B)
 lib/swiss.js         Swiss standings/pairing/progression
 lib/ffa.js           FFA groups/points/ranking/rounds
-lib/teams.js         team formation (open create/join/invite, draft, seeding)
+lib/teams.js         team formation (open create/join/invite, draft, divisions, seeding)
+lib/predict.js       predictions: stages, the bracket as a graph, validation, locks, scoring
 lib/maps.js          map lookups and the public (id-stripped) map view
 public/index.html
 public/app.js        client (loaded first; shared globals, helpers, streamer/player-view state)
@@ -483,6 +509,7 @@ public/app.home.js   client (home, tournament shell, overview, header toggles, p
 public/app.entrants.js  client (players, teams/draft/open-team invites, start config)
 public/app.bracket.js   client (bracket/rounds, per-round Bo, bye hiding, veto, veto stats, team popup)
 public/app.results.js   client (report/forfeit, standings, chat, admin, routing)
+public/app.predict.js   client (Predictions tab)
 public/style.css
 docker-compose.yml
 ```

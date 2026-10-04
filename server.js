@@ -19,15 +19,18 @@ const {
 const { BO_OK, seedOrder, nextPow2, log2i, seededSlots, cleanBoList } = require('./lib/bracket');
 // Match core + veto engine (one cohesive unit) live in lib/match.js.
 const {
-  poolById, poolForMatch, poolMapIds, cleanSequence, cleanVeto, abRating, decideTeamA,
+  poolById, poolForMatch, poolRoundKey, poolMapIds, cleanSequence, cleanVeto, abRating, decideTeamA,
   initVeto, vetoCurrentStep, vetoAdvance, initMatchVetoes,
   FACTIONS, factionVetoOn, initFactionVeto, newFactionGame, factionSideKey, factionNextStep, factionResolve, factionViewFor,
   newMatch, routeVal, setSlot, evaluate, finalizeMatch, undoMatch, backfillMatchLinks,
   buildSingle, buildDouble, thirdPlaceMatch, addThirdPlace, removeThirdPlace, thirdPlaceStarted,
+  divisionsOn, divisionFinal, divisionChampion, allDivisionsDone,
 } = require('./lib/match');
 // Swiss and FFA formats (import the shared match primitives internally).
 const { PRESETS, presetById, presetsFor } = require('./lib/presets');
 const PICKS = require('./lib/picks');
+// Predictions (pick'em): stages, the bracket graph, validation and scoring.
+const PRED = require('./lib/predict');
 const { swissPairRound, swissAfterReport, swissStandings,
         swissCuts, swissCutRounds, swissRecord, swissAdvanced, swissPlanRound1, swissShufflePlan,
         stageTwoCfg, stageTwoField, stageTwoBuild, swissStageDone, swissFinishIfDone,
@@ -35,13 +38,14 @@ const { swissPairRound, swissAfterReport, swissStandings,
         swissRound1Open, swissSetRound1, swissShuffleRound1 } = require('./lib/swiss');
 const { ffaCreateRound, ffaAfterReport, ffaRank } = require('./lib/ffa');
 // Team formation and map lookups.
-const { buildDraft, finishDraftIfDone, finalizeOpenTeams, formTeamsGrouped } = require('./lib/teams');
+const { buildDraft, finishDraftIfDone, finalizeOpenTeams, formTeamsGrouped,
+        divisionCaptainCfg, divisionPool, startNextDivision, splitIntoDivisions } = require('./lib/teams');
 const { mapById, publicMapView, secretNumbers, revealedSecrets, maskedMapView } = require('./lib/maps');
 // Wire the Swiss progression hook into the match core (see lib/match.js). Must come
 // after the swiss require above, since swissAfterReport is now imported, not hoisted.
 require('./lib/match').setHooks({ swissAfterReport });
 require('./lib/swiss').setSwissHooks({ openStagePicks });
-require('./lib/match').setHooks({ afterFinalize: (t) => { autoStopIfReached(t); } });
+require('./lib/match').setHooks({ afterFinalize: (t) => { autoStopIfReached(t); PRED.stampLocks(t, PRED_CTX); } });
 
 const PORT = parseInt(process.env.PORT || '8090', 10);
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -558,6 +562,176 @@ function buildStageTwo(ex, cfgSrc) {
   return single;
 }
 
+// ---------- divisions (King / Prince ...) ----------
+// A tournament can be split into 2-4 divisions, each its own bracket on its own tab. t.divisions
+// holds the number, and is also the PLAN before any team exists: with a captains draft the
+// division-1 captains draft first, and whoever they leave is drafted into the next division by
+// its own captains; any other formation is split by combined rating when teams are locked.
+// Division 1 is the top one. Its champion is the tournament's (t.championTeamId); each division's
+// champion is the winner of its final, read from the bracket rather than stored.
+const DIVISION_DEFAULT_NAMES = ['King', 'Prince', 'Duke', 'Baron'];
+function cleanDivisions(v) { const n = parseInt(v, 10); return (n >= 2 && n <= 4) ? n : 0; }
+function cleanDivisionNames(v) {
+  if (!Array.isArray(v)) return null;
+  const out = v.slice(0, 4).map(x => cleanName(x, 24) || '');
+  return out.some(Boolean) ? out : null;
+}
+function divisionName(t, d) {
+  const set = Array.isArray(t && t.divisionNames) ? t.divisionNames : [];
+  return set[d - 1] || DIVISION_DEFAULT_NAMES[d - 1] || ('Division ' + d);
+}
+// Divisions are separate elimination brackets, so they exist for team competition with single or
+// double elimination only (a Swiss already sorts the field, and an FFA has no bracket).
+function divisionsAllowed(competition, bracketType) {
+  return competition === 'team' && (bracketType === 'single' || bracketType === 'double');
+}
+function divisionTeams(t, d) { return (t.teams || []).filter(x => (x.division || 0) === d); }
+// The tournament's champion: with divisions, the top division's.
+function tournamentChampion(t) { return divisionsOn(t) ? divisionChampion(t, 1) : (t.championTeamId || null); }
+// Every team in a division, and every division big enough for its bracket. Null when it can start.
+function divisionStartCheck(t, divs, min) {
+  const loose = (t.teams || []).filter(x => !((x.division || 0) >= 1 && (x.division || 0) <= divs));
+  if (loose.length) {
+    return loose.length + (loose.length === 1 ? ' team is' : ' teams are') + ' not in any division yet ('
+      + loose.map(x => x.name).join(', ') + ') - put them in one on the Teams tab';
+  }
+  for (let d = 1; d <= divs; d++) {
+    const k = divisionTeams(t, d).length;
+    if (k < min) {
+      return 'The ' + divisionName(t, d) + ' division needs at least ' + min + ' teams to play a bracket (it has ' + k
+        + '). Move teams into it on the Teams tab, or play the tournament as one bracket.';
+    }
+  }
+  return null;
+}
+function largestDivision(t, divs) {
+  let n = 0;
+  for (let d = 1; d <= divs; d++) n = Math.max(n, divisionTeams(t, d).length);
+  return n;
+}
+// Round lengths are set once, for the largest division. A smaller division plays them aligned back
+// from the final: its final is the final's length, its semi-finals the semi-finals', and so on.
+function divisionCfg(t, cfg, d) {
+  const Rd = Math.max(1, log2i(nextPow2(divisionTeams(t, d).length)));
+  if (t.bracketType === 'double') {
+    return Object.assign({}, cfg, { wb: cfg.wb.slice(-Rd), lb: cfg.lb.slice(-Math.max(2 * Rd - 2, 1)) });
+  }
+  return Object.assign({}, cfg, { rounds: cfg.rounds.slice(-Rd) });
+}
+// Seeds are unique across the whole field until the start; each division then plays seeds 1..n.
+function numberDivisionSeeds(t, divs) {
+  for (let d = 1; d <= divs; d++) {
+    divisionTeams(t, d).sort((a, b) => (a.seed || 0) - (b.seed || 0)).forEach((tm, i) => { tm.seed = i + 1; });
+  }
+}
+// Say in the log when one division's draft hands over to the next.
+function noteDraftChain(t, divBefore) {
+  const d = t.draft;
+  if (!d || !d.division || !(d.division > (divBefore || 0)) || t.status !== 'draft') return;
+  const prev = divisionName(t, d.division - 1), next = divisionName(t, d.division);
+  if (d.waiting) {
+    tpush(t, 'System', 'The ' + prev + ' draft is complete. The ' + next + ' draft is waiting for its captains to be chosen.');
+  } else if (d.auto) {
+    const caps = divisionTeams(t, d.division).map(tm => { const p = playerById(t, tm.captainId); return p ? p.name : tm.name; });
+    tpush(t, 'System', 'The ' + prev + ' draft is complete. The ' + next + ' draft starts now, captained by '
+      + caps.join(', ') + ' (the ' + caps.length + ' highest rated of the players left).');
+  }
+}
+
+// ---------- predictions ----------
+// The engine is lib/predict.js; these are the two things it needs from the host, and the views.
+// A Swiss that has not started yet: the format its start will use, from the stored plan, with the
+// same defaults start_bracket applies.
+function predictSwissPlan(t) {
+  const ex = cleanSwissExtras({}, t.plan || {});
+  const n = (t.teams || []).length;
+  const defR = Math.max(1, log2i(nextPow2(Math.max(2, n))));
+  const rounds = swissCutRounds(ex.winCut, ex.lossCut) || intIn((t.plan || {}).rounds, 1, 15, defR);
+  return { win: ex.winCut, loss: ex.lossCut, rounds, final: (!ex.stage2 && t.plan && t.plan.final) ? 1 : 0, stage2: ex.stage2 ? 1 : 0 };
+}
+const PRED_CTX = {
+  divisionCheck: t => divisionStartCheck(t, parseInt(t.divisions, 10) || 0, t.bracketType === 'double' ? 3 : 2),
+  swissPlan: predictSwissPlan
+};
+// 1 = predicted, 'stale' = made for a draw that has changed since, 'part' = some of an open
+// stage still unpicked (a 3rd place match added at the start, say), 0 = nothing yet.
+function predictMineState(p, s) {
+  if (!p) return 0;
+  if (p.layout && s.layout && p.layout !== s.layout) return 'stale';
+  if (s.state === 'open' && s.kind !== 'champion') {
+    const c = PRED.cleanPicks(null, s, p.picks);
+    if (c.count < c.total) return 'part';
+  }
+  return 1;
+}
+// The few facts the tournament page needs on every poll: whether to show the tab, what is open,
+// and whether this viewer has predicted. Nobody's picks.
+function predictSummary(t, sess) {
+  const stages = PRED.stagesOf(t, PRED_CTX);
+  if (!stages.length) return null;
+  const pr = t.predict || {};
+  const preds = t.predictions || {};
+  const mine = (sess && sess.fafId && preds[String(sess.fafId)]) || null;
+  const out = { on: pr.off ? 0 : 1, prize: pr.prize || '', count: Object.keys(preds).length, stages: [], mine: {} };
+  for (const s of stages) {
+    out.stages.push({ key: s.key, label: s.label, state: s.state });
+    const st = predictMineState(mine && mine[s.key], s);
+    if (st) out.mine[s.key] = st;
+  }
+  return out;
+}
+// The Predictions tab: every stage with what is needed to pick it, the viewer's own prediction,
+// the board, and - once a stage has locked - anyone's picks on request (?of=fafId).
+function predictionsView(t, sess, organizer, ofFid) {
+  const stages = PRED.stagesOf(t, PRED_CTX);
+  const pr = t.predict || {};
+  const preds = t.predictions || {};
+  const meFid = (sess && sess.fafId) ? String(sess.fafId) : null;
+  const mine = meFid ? preds[meFid] : null;
+  const ofPred = (ofFid && preds[ofFid]) ? preds[ofFid] : null;
+  const out = {
+    on: pr.off ? 0 : 1, prize: pr.prize || '', loggedIn: meFid ? 1 : 0, me: meFid, organizer: organizer ? 1 : 0,
+    count: Object.keys(preds).length, finished: t.status === 'finished' ? 1 : 0, stages: [], board: [],
+    of: ofPred ? { fafId: ofFid, name: ofPred.name || ('FAF ' + ofFid) } : null
+  };
+  const rec = t.bracketType === 'swiss' ? swissRecord(t) : null;
+  for (const s of stages) {
+    const o = { key: s.key, kind: s.kind, label: s.label, state: s.state, why: s.why || '', by: s.by || null, at: s.at || null, projected: s.projected ? 1 : 0 };
+    if (s.kind === 'bracket' && s.graph) {
+      o.positions = s.graph.order.map(p => ({ k: p.k, d: p.d, b: p.b, r: p.r, i: p.i, s: p.s.map(x => (x.t !== undefined ? { t: x.t } : { f: x.f, w: x.w })) }));
+      o.total = PRED.pickableKeys(s.graph).length;
+      if (!s.projected) {
+        o.actual = {};
+        for (const p of s.graph.order) {
+          const m = p.m;
+          o.actual[p.k] = { w: (m.status === 'done' || m.status === 'bye') ? (m.winner || null) : null, o: [m.team1 || null, m.team2 || null], st: m.status };
+        }
+      }
+    } else if (s.kind === 'records') {
+      o.teams = s.teams; o.choices = s.choices; o.plan = s.plan; o.total = s.teams.length;
+      if (rec && (t.status === 'running' || t.status === 'finished')) {
+        o.actual = {};
+        for (const id of s.teams) { const r = rec[id]; if (r) o.actual[id] = { w: r.wins, l: r.losses, st: r.state }; }
+      }
+    } else if (s.kind === 'champion') {
+      o.teams = s.teams; o.total = 1;
+      o.actual = { champion: t.status === 'finished' ? (t.championTeamId || null) : null };
+    }
+    const keys = s.state === 'locked' ? PRED.stageKeys(t, s) : null;
+    const pack = p => {
+      const v = { at: p.at || 0, picks: p.picks || {}, stale: (p.layout && s.layout && p.layout !== s.layout) ? 1 : 0 };
+      if (keys) { const sc = PRED.score(t, s, p, keys); v.marks = sc.marks; delete sc.marks; v.score = sc; }
+      return v;
+    };
+    if (mine && mine[s.key]) o.mine = pack(mine[s.key]);
+    // someone else's picks: never before the stage has locked
+    if (ofPred && ofPred[s.key] && s.state === 'locked') o.of = pack(ofPred[s.key]);
+    out.stages.push(o);
+  }
+  out.board = PRED.board(t, stages);
+  return out;
+}
+
 // ---------- stopping a qualifier early ----------
 // A qualifier exists to decide who goes through, not to crown anyone, so once the field is down
 // to the number that qualifies there is nothing left worth playing. t.stopAtAlive declares that
@@ -825,6 +999,7 @@ function resetPlayoffs(t, keepPicks) {
   for (const id of Object.keys(ids)) {
     // those match rooms and per-match settings can never be reached again
     if (t.chat) delete t.chat['match:' + id];
+    if (t.chatRev) delete t.chatRev['match:' + id];
     if (t.chatPings) delete t.chatPings['match:' + id];
     if (t.poolAssign && t.poolAssign['match:' + id]) { delete t.poolAssign['match:' + id]; dropped++; }
   }
@@ -919,34 +1094,47 @@ function tournamentRanking(t) {
 // Elimination: champion first, then by how late each team was knocked out. The stage key matches
 // the bracket's own ordering, so surviving longer always ranks higher. Only bracket matches count,
 // so a Swiss stage feeding a playoff bracket does not pollute the playoff ranking.
+// With divisions every division is ranked on its own and the lists follow each other, top
+// division first: the whole of the King bracket places above the whole of the Prince bracket.
 function eliminationRanking(t) {
+  if (!divisionsOn(t)) return eliminationRankingOf(t, null);
+  const out = [];
+  for (let d = 1; d <= t.divisions; d++) {
+    for (const id of eliminationRankingOf(t, d)) if (out.indexOf(id) < 0) out.push(id);
+  }
+  return out;
+}
+function eliminationRankingOf(t, division) {
   const BR = { wb: 1, lb: 1, gf: 1 };
+  const inDiv = m => division == null || (m.division || 0) === division;
   const stage = m => (m.bracket === 'gf' ? 1000 : 0) + ((m.round || 0) * 10) + (m.bracket === 'lb' ? 1 : 0);
   const out = {};
   for (const m of (t.matches || [])) {
-    if (!BR[m.bracket]) continue;
+    if (!BR[m.bracket] || !inDiv(m)) continue;
     if (m.status !== 'done' || !m.loser || m.loser === 'BYE') continue;
     const k = stage(m);
     if (out[m.loser] == null || k > out[m.loser]) out[m.loser] = k;   // their FINAL loss
   }
   // A played 3rd place match splits the two beaten semi-finalists: its winner is 3rd, its loser
   // 4th - both still behind the beaten finalist, both ahead of everyone out before the semis.
-  const third = thirdPlaceMatch(t, 0);
+  const third = division == null ? thirdPlaceMatch(t, 0) : null;
   if (third && (third.status === 'done' || third.status === 'bye')) {
     const semi = stage({ bracket: 'wb', round: third.round - 1 });
     if (third.winner && third.winner !== 'BYE') out[third.winner] = semi + 6;
     if (third.loser && third.loser !== 'BYE') out[third.loser] = semi + 5;
   }
+  const champ = division == null ? t.championTeamId : divisionChampion(t, division);
   const seedOf = id => { const tm = (t.teams || []).find(x => x.id === id); return (tm && tm.seed) || 9999; };
-  const losers = Object.keys(out).filter(id => id !== t.championTeamId)
+  const losers = Object.keys(out).filter(id => id !== champ)
     .sort((a, b) => out[b] - out[a] || seedOf(a) - seedOf(b));
   const ranked = [];
-  if (t.championTeamId) ranked.push(t.championTeamId);
+  if (champ) ranked.push(champ);
   else {
     // A tournament stopped early has no champion. Whoever is still standing outranks everyone
     // who was knocked out, winners-bracket survivors first - that is exactly the Q1/Q2 order.
     const sp = survivorSplit(t);
-    for (const id of sp.wb.concat(sp.lb)) if (ranked.indexOf(id) < 0) ranked.push(id);
+    const mine = id => division == null || ((teamById(t, id) || {}).division || 0) === division;
+    for (const id of sp.wb.concat(sp.lb)) if (mine(id) && ranked.indexOf(id) < 0) ranked.push(id);
   }
   for (const id of losers) if (ranked.indexOf(id) < 0) ranked.push(id);
   return ranked;
@@ -1602,12 +1790,23 @@ function playerTeamOfSession(t, req) {
 // match in each round represents that round's Bo.
 function syncPlanFromMatches(t) {
   if (!Array.isArray(t.matches) || !t.matches.length) return;
+  // With divisions the largest division carries every round length (the smaller ones play the
+  // tail of the same list), so the plan is read from it.
+  let ms = t.matches;
+  if (divisionsOn(t)) {
+    let best = 0, bestR = -1;
+    for (let d = 1; d <= t.divisions; d++) {
+      const R = t.matches.filter(x => x.bracket === 'wb' && (x.division || 0) === d).reduce((a, x) => Math.max(a, x.round || 0), 0);
+      if (R > bestR) { bestR = R; best = d; }
+    }
+    ms = t.matches.filter(x => (x.division || 0) === best);
+  }
   const firstBo = (bracket, round) => {
-    const any = t.matches.find(x => x.bracket === bracket && x.round === round);
+    const any = ms.find(x => x.bracket === bracket && x.round === round);
     return any ? any.bo : null;
   };
   const roundsOf = (bracket) => {
-    const rs = [...new Set(t.matches.filter(x => x.bracket === bracket).map(x => x.round))].sort((a, b) => a - b);
+    const rs = [...new Set(ms.filter(x => x.bracket === bracket).map(x => x.round))].sort((a, b) => a - b);
     return rs.map(r => firstBo(bracket, r)).filter(v => v != null);
   };
   t.plan = t.plan || {};
@@ -1616,12 +1815,18 @@ function syncPlanFromMatches(t) {
   } else if (t.bracketType === 'double') {
     t.plan.wbList = roundsOf('wb');
     t.plan.lbList = roundsOf('lb');
-    const gf = t.matches.find(x => x.bracket === 'gf');
+    const gf = ms.find(x => x.bracket === 'gf');
     if (gf) t.plan.gf = gf.bo;
   }
 }
 
+// With divisions every label says which division it is in: "Prince Round 2 Match 1".
 function matchLabel(t, m) {
+  if (!m) return '';
+  const core = matchLabelCore(t, m);
+  return (m.division && divisionsOn(t)) ? divisionName(t, m.division) + ' ' + core : core;
+}
+function matchLabelCore(t, m) {
   if (!m) return '';
   // A two-stage tournament is Swiss on top of a real bracket, so its bracket matches are
   // labelled like a bracket, not like a swiss final.
@@ -1844,13 +2049,22 @@ function publicView(t) {
     })),
     draft: t.draft,
     matches: t.matches,
-    championTeamId: t.championTeamId || null,
+    championTeamId: tournamentChampion(t),
     subs: t.subs || [],
     pendingCaptains: t.pendingCaptains || [],
     fveto: t.fveto ? { enabled: t.fveto.enabled ? 1 : 0, bans: t.fveto.bans, picks: t.fveto.picks } : null,
     captainMode: t.captainMode || 'manual',
     captainCount: t.captainCount || 0,
     divisions: t.divisions || 0,
+    // the names in use (King, Prince... or the organizer's own), and the custom ones as typed
+    divisionNames: DIVISION_DEFAULT_NAMES.map((x, i) => divisionName(t, i + 1)),
+    divisionNamesSet: Array.isArray(t.divisionNames) ? t.divisionNames.slice() : null,
+    // each division's champion, division 1 first (null until its final is won)
+    divisionChampions: divisionsOn(t) ? Array.from({ length: t.divisions }, (x, i) => divisionChampion(t, i + 1)) : null,
+    // how the captains of division 2 and below are chosen
+    divCaptains: divisionsOn(t) ? Array.from({ length: t.divisions - 1 }, (x, i) => Object.assign({ division: i + 2 }, divisionCaptainCfg(t, i + 2))) : null,
+    // division drafts already finished, so the page can offer to take back their last pick
+    draftDone: (t.draftDone || []).map(d => ({ division: d.division || 0, picks: d.current || 0 })),
     imported: t.imported || false,
     // Challonge imports: source format, per-group tables, final placements, and whether the event
     // had no reproducible bracket (free-for-all / round robin / group-only).
@@ -2640,6 +2854,9 @@ async function handleAPI(req, res, url) {
       mods: cleanName(b.mods, 500),
       competition, formation, teamSize, draftOrder, bracketType, ffaCfg,
       plan, maxTeams,
+      // King / Prince: 0 = one bracket, 2-4 = that many divisions (single/double elimination only)
+      divisions: divisionsAllowed(competition, bracketType) ? cleanDivisions(b.divisions) : 0,
+      divisionNames: cleanDivisionNames(b.divisionNames) || undefined,
       preset: preset ? preset.id : null, presetName: preset ? preset.name : null,
       // opponent pick phase: off unless asked for (0 minutes = no clock, picks wait forever)
       pickOpponents: b.pickOpponents ? 1 : 0,
@@ -3305,8 +3522,8 @@ async function handleAPI(req, res, url) {
         // needed by statusPillLabel: `status` is 'signup' from creation, including while waiting
         // for a scheduled opening, so without this the series page says "Signups open" too early
         signupOpensAt: t.signupOpensAt || null,
-        championTeamId: t.championTeamId || null,
-        champion: t.championTeamId ? ((t.teams || []).find(x => x.id === t.championTeamId) || {}).name || null : null
+        championTeamId: tournamentChampion(t),
+        champion: tournamentChampion(t) ? ((t.teams || []).find(x => x.id === tournamentChampion(t)) || {}).name || null : null
       }));
     const canEdit = canManageSeries(req, s);
     return json(res, 200, {
@@ -3431,10 +3648,11 @@ async function handleAPI(req, res, url) {
   }
 
   if (parts.length === 2 && parts[1] === 'halloffame' && method === 'GET') {
-    // Aggregated across all published, non-archived tournaments. No schema change:
-    // players are keyed by FAF id, teams by normalized name.
+    // Players only, keyed by FAF id, across every published, non-archived tournament. A team's
+    // win counts for every player on it - that is what a player's tally means. With divisions the
+    // tournament's win is the top division's. ?q= finds a player by name (part of it) or by exact
+    // FAF id, ?page= pages through 100 at a time; `rank` is always the place on the whole board.
     const players = {};   // fafId -> { fafId, name, wins, entered }
-    const teams = {};     // nameKey -> { name, wins }
     for (const t of Object.values(db.tournaments)) {
       if (t.published === false || t.archived) continue;
       for (const p of (t.players || [])) {
@@ -3443,26 +3661,29 @@ async function handleAPI(req, res, url) {
         players[p.fafId].entered++;
         players[p.fafId].name = p.name;
       }
-      if (t.status === 'finished' && t.championTeamId) {
-        const champ = (t.teams || []).find(x => x.id === t.championTeamId);
-        if (champ) {
-          const key = (champ.name || '').trim().toLowerCase();
-          if (key) { if (!teams[key]) teams[key] = { name: champ.name, wins: 0 }; teams[key].wins++; }
-          for (const pid of (champ.playerIds || [])) {
-            const p = (t.players || []).find(x => x.id === pid);
-            if (p && p.fafId) {
-              if (!players[p.fafId]) players[p.fafId] = { fafId: p.fafId, name: p.name, wins: 0, entered: 0 };
-              players[p.fafId].wins++;
-            }
+      const champId = t.status === 'finished' ? tournamentChampion(t) : null;
+      const champ = champId ? (t.teams || []).find(x => x.id === champId) : null;
+      if (champ) {
+        for (const pid of (champ.playerIds || [])) {
+          const p = (t.players || []).find(x => x.id === pid);
+          if (p && p.fafId) {
+            if (!players[p.fafId]) players[p.fafId] = { fafId: p.fafId, name: p.name, wins: 0, entered: 0 };
+            players[p.fafId].wins++;
           }
         }
       }
     }
-    const playerList = Object.values(players)
+    const all = Object.values(players)
       .filter(p => p.wins > 0 || p.entered > 0)
-      .sort((a, b) => b.wins - a.wins || b.entered - a.entered || a.name.localeCompare(b.name));
-    const teamList = Object.values(teams).sort((a, b) => b.wins - a.wins || a.name.localeCompare(b.name));
-    return json(res, 200, { players: playerList, teams: teamList });
+      .sort((a, b) => b.wins - a.wins || b.entered - a.entered || String(a.name || '').localeCompare(String(b.name || '')));
+    all.forEach((p, i) => { p.rank = i + 1; });
+    const q = String(url.searchParams.get('q') || '').trim().toLowerCase().slice(0, 60);
+    const hits = q ? all.filter(p => String(p.name || '').toLowerCase().indexOf(q) >= 0 || String(p.fafId) === q) : all;
+    const PER = 100;
+    const pages = Math.max(1, Math.ceil(hits.length / PER));
+    let page = parseInt(url.searchParams.get('page'), 10) || 1;
+    page = Math.min(Math.max(1, page), pages);
+    return json(res, 200, { players: hits.slice((page - 1) * PER, page * PER), total: hits.length, all: all.length, page, pages, perPage: PER, q });
   }
 
   if (parts.length === 2 && parts[1] === 'articles' && method === 'GET') {
@@ -3773,12 +3994,19 @@ async function handleAPI(req, res, url) {
           return copy;
         });
       }
+      // Predictions: whether there is a tab and what is open in it. Never anyone's picks.
+      view.predict = predictSummary(t, sess);
       return json(res, 200, view);
     }
 
     // imported tournaments are display-only: only GET and site-admin delete are allowed
     if (t.imported && method === 'POST' && sub !== 'delete' && sub !== 'edit_date') {
       return bad(res, 'Imported tournaments are read-only.');
+    }
+
+    if (method === 'GET' && sub === 'predictions') {
+      const organizer = isAdmin(t, url.searchParams.get('admin'), req) || isOrganizer(t, req);
+      return json(res, 200, predictionsView(t, currentSession(req), organizer, String(url.searchParams.get('of') || '')));
     }
 
     if (method === 'GET' && sub === 'secrets') {
@@ -3914,7 +4142,7 @@ async function handleAPI(req, res, url) {
         if (!Object.keys(t.userPings[rsess.fafId]).length) delete t.userPings[rsess.fafId];
         saveDB();
       }
-      return json(res, 200, { room, messages: msgs, muted: chatMuted(t, (currentSession(req) || {}).fafId) ? 1 : 0 });
+      return json(res, 200, { room, messages: msgs, muted: chatMuted(t, (currentSession(req) || {}).fafId) ? 1 : 0, rev: (t.chatRev && t.chatRev[room]) || 0 });
     }
 
     if (method !== 'POST') return bad(res, 'Unsupported');
@@ -4437,7 +4665,9 @@ async function handleAPI(req, res, url) {
           const available = t.players.filter(x => !x.teamId).length;
           const remaining = t.draft.order.length - t.draft.current;
           if (remaining > available) t.draft.order.length = t.draft.current + available;
+          const divBefore = t.draft.division || 0;
           finishDraftIfDone(t);
+          noteDraftChain(t, divBefore);
         }
       } else {
         return bad(res, 'Players already on a team can\u2019t be removed \u2014 use Edit to substitute them instead');
@@ -5008,6 +5238,7 @@ async function handleAPI(req, res, url) {
       if (err) return bad(res, err);
       // that match room and any per-match pool setting can never be reached again
       if (t.chat) delete t.chat['match:' + have.id];
+      if (t.chatRev) delete t.chatRev['match:' + have.id];
       if (t.chatPings) delete t.chatPings['match:' + have.id];
       if (t.poolAssign) delete t.poolAssign['match:' + have.id];
       flag(false);
@@ -5017,21 +5248,31 @@ async function handleAPI(req, res, url) {
     }
 
     // ===== divisions (King/Prince split) =====
-    // Auto-split the CURRENT full teams into N divisions by combined rating (division 1 = strongest).
+    // Split the CURRENT teams into N divisions by combined rating (division 1 = strongest). With
+    // two divisions `top` can say how many go into the top one ("the 6 best are King").
     if (sub === 'split_divisions') {
       if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
       if (t.status !== 'drafted') return bad(res, 'Split into divisions after forming teams and before starting the bracket');
-      if (t.competition === 'ffa') return bad(res, 'Divisions are for bracket tournaments');
-      const n = intIn(b.divisions, 1, 6, 2);
-      if (n === 1) { for (const tm of t.teams) tm.division = 0; t.divisions = 0; saveDB(); return json(res, 200, { ok: true }); }
-      // sort teams by combined rating (desc) and slice into n roughly-equal divisions
-      const sorted = t.teams.slice().sort((a, b2) =>
-        b2.playerIds.reduce((s, pid) => s + ((playerById(t, pid) || {}).rating || 0), 0) -
-        a.playerIds.reduce((s, pid) => s + ((playerById(t, pid) || {}).rating || 0), 0)
-      );
-      const per = Math.ceil(sorted.length / n);
-      sorted.forEach((tm, i) => { tm.division = Math.min(n, Math.floor(i / per) + 1); });
-      t.divisions = n;
+      if (!divisionsAllowed(t.competition, t.bracketType)) return bad(res, 'Divisions are for single or double elimination team brackets');
+      const n = intIn(b.divisions, 1, 4, 2);
+      if (n === 1) {
+        for (const tm of t.teams) tm.division = 0;
+        t.divisions = 0;
+        delete t.divisionTop;
+        tlog(t, req, b.admin, 'put every team back into one bracket (no divisions)');
+        saveDB();
+        return json(res, 200, { ok: true, divisions: 0 });
+      }
+      let top = 0;
+      if (n === 2 && b.top !== undefined && b.top !== null && b.top !== '') {
+        top = parseInt(b.top, 10) || 0;
+        if (top < 0) top = 0;
+        if (top && top >= t.teams.length) return bad(res, 'Leave at least one team for the ' + divisionName(t, 2) + ' division');
+      }
+      splitIntoDivisions(t, n, top);
+      if (top) t.divisionTop = top; else delete t.divisionTop;
+      tlog(t, req, b.admin, 'split the teams by rating into ' + Array.from({ length: n }, (x, i) =>
+        divisionName(t, i + 1) + ' (' + divisionTeams(t, i + 1).length + ')').join(', '));
       saveDB();
       return json(res, 200, { ok: true, divisions: n });
     }
@@ -5042,7 +5283,15 @@ async function handleAPI(req, res, url) {
       if (t.status !== 'drafted') return bad(res, 'Divisions are locked once the bracket starts');
       const team = teamById(t, b.teamId);
       if (!team) return bad(res, 'Team not found');
-      team.division = intIn(b.division, 0, 6, 0);
+      const n = parseInt(t.divisions, 10) || 0;
+      if (n > 1) {
+        const dv = parseInt(b.division, 10);
+        if (!(dv >= 1 && dv <= n)) return bad(res, 'Choose one of the ' + n + ' divisions');
+        team.division = dv;
+        tlog(t, req, b.admin, 'moved ' + team.name + ' to the ' + divisionName(t, dv) + ' division');
+      } else {
+        team.division = intIn(b.division, 0, 4, 0);
+      }
       saveDB();
       return json(res, 200, { ok: true });
     }
@@ -5460,6 +5709,17 @@ async function handleAPI(req, res, url) {
       // structural changes only while signups are open
       const structural = ['competition', 'teamSize', 'formation', 'draftOrder', 'seeding'].some(k => b[k] !== undefined);
       if (structural && t.status !== 'signup') return bad(res, 'Reopen signups to change the team setup');
+      // Divisions. Checked before anything is changed, so a refusal leaves the format as it was.
+      // During a captains draft the draft itself decides them; once a division draft has made the
+      // teams they stay as drafted. Otherwise a change re-splits the locked teams by rating.
+      const wantDivs = b.divisions !== undefined ? cleanDivisions(b.divisions) : null;
+      const haveDivs = parseInt(t.divisions, 10) || 0;
+      if (wantDivs !== null && wantDivs !== haveDivs) {
+        if (t.status === 'draft') return bad(res, 'The draft is under way - it decides the divisions. Reopen signups to change them.');
+        if (t.status === 'drafted' && t.formation === 'draft' && t.draft && (t.draft.division || (t.draftDone || []).length)) {
+          return bad(res, 'The divisions came out of the draft. Reopen signups to change them.');
+        }
+      }
 
       const competition = b.competition !== undefined ? (b.competition === 'ffa' ? 'ffa' : 'team') : t.competition;
       let teamSize = t.teamSize, formation = t.formation;
@@ -5521,6 +5781,20 @@ async function handleAPI(req, res, url) {
           t.plan = Object.assign({ bo: pb.bo !== undefined ? ((parseInt(pb.bo, 10) === 1) ? 1 : 3) : (op.bo || 3), final: pb.final !== undefined ? (pb.final ? 1 : 0) : (op.final !== undefined ? op.final : 1), finalBo: bo(pb.finalBo, op.finalBo || 5), fast: pb.fast !== undefined ? (pb.fast ? 1 : 0) : (op.fast ? 1 : 0) }, cleanSwissExtras(pb, op));
         }
         t.ffaCfg = null;
+        // divisions only exist for single/double elimination
+        if (!divisionsAllowed('team', t.bracketType)) {
+          if (t.divisions) { t.divisions = 0; for (const tm of (t.teams || [])) tm.division = 0; }
+        } else if (wantDivs !== null && wantDivs !== haveDivs) {
+          if (t.status === 'drafted') {
+            if (wantDivs) splitIntoDivisions(t, wantDivs, t.divisionTop);
+            else for (const tm of (t.teams || [])) tm.division = 0;
+          }
+          t.divisions = wantDivs;
+        }
+        if (b.divisionNames !== undefined) {
+          const nm = cleanDivisionNames(b.divisionNames);
+          if (nm) t.divisionNames = nm; else delete t.divisionNames;
+        }
       } else {
         const oc = t.ffaCfg || {};
         t.ffaCfg = {
@@ -5534,6 +5808,7 @@ async function handleAPI(req, res, url) {
         if (t.ffaCfg.cutTo === 1) t.ffaCfg.cutTo = 2;
         if (t.ffaCfg.finalSize === 1) t.ffaCfg.finalSize = 2;
         t.plan = null;
+        if (t.divisions) { t.divisions = 0; for (const tm of (t.teams || [])) tm.division = 0; }
       }
       saveDB();
       return json(res, 200, { ok: true });
@@ -5753,7 +6028,14 @@ async function handleAPI(req, res, url) {
     if (sub === 'chat_delete') {
       if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
       const room = String(b.room || '');
+      const had = (t.chat && t.chat[room]) ? t.chat[room].length : 0;
       if (t.chat && t.chat[room]) t.chat[room] = t.chat[room].filter(mm => mm.id !== b.id);
+      // Open chat panels only ask for messages newer than the last one they have, so they would
+      // keep showing a deleted message. The room's revision tells them to load it again.
+      if (t.chat && t.chat[room] && t.chat[room].length < had) {
+        t.chatRev = t.chatRev || {};
+        t.chatRev[room] = (t.chatRev[room] || 0) + 1;
+      }
       saveDB();
       return json(res, 200, { ok: true });
     }
@@ -6025,7 +6307,7 @@ async function handleAPI(req, res, url) {
         for (const m of t.matches) {
           if (m.bracket === 'ffa' || m.status === 'done') continue;
           if (!m.team1 || !m.team2 || m.team1 === 'BYE' || m.team2 === 'BYE') continue;
-          const mk = 'match:' + m.id, rk = m.bracket + ':' + m.round;
+          const mk = 'match:' + m.id, rk = poolRoundKey(t, m);
           // a 3rd place match with no pool of its own plays the semi-finals' one (poolForMatch)
           const fk = m.bracket === '3p' ? 'wb:' + (m.round - 1) : null;
           if (key !== mk && key !== rk && key !== fk) continue;  // not affected by this key
@@ -6160,6 +6442,7 @@ async function handleAPI(req, res, url) {
         if (['signup', 'draft', 'drafted'].indexOf(t.status) < 0) return bad(res, 'Bracket already started');
         t.status = 'signup';
         t.teams = []; t.draft = null; t.subs = [];
+        t.draftDone = null;
         t.plannedR1 = null;
         for (const p of t.players) p.teamId = null;
         tlog(t, req, b.admin, 'reopened signups (teams reset)');
@@ -6173,6 +6456,26 @@ async function handleAPI(req, res, url) {
       // and rating corrections are picked up). Editable until the draft actually starts.
       if (a === 'set_captain_mode') {
         if (t.formation !== 'draft') return bad(res, 'This tournament does not use a draft');
+        const dv = parseInt(b.division, 10) || 0;
+        if (dv > 1) {
+          // Division 2 and below: how their captains are chosen when the division above finishes.
+          if (!divisionsOn(t) || dv > t.divisions) return bad(res, 'This tournament has no ' + divisionName(t, dv) + ' division');
+          const cur = t.draft ? (t.draft.division || 0) : 0;
+          const open = t.status === 'signup' || (t.status === 'draft' && (cur < dv || (cur === dv && t.draft.waiting)));
+          if (!open) return bad(res, 'The ' + divisionName(t, dv) + ' draft has already started');
+          t.divCaptains = t.divCaptains || {};
+          const c = Object.assign({}, t.divCaptains[dv] || {});
+          if (b.mode !== undefined) c.mode = b.mode === 'manual' ? 'manual' : 'rating';
+          if (b.count !== undefined) {
+            const n = parseInt(b.count, 10);
+            if (!isFinite(n) || n < 2 || n > 64) return bad(res, 'Number of captains must be between 2 and 64');
+            c.count = n;
+          }
+          t.divCaptains[dv] = c;
+          saveDB();
+          const cfg = divisionCaptainCfg(t, dv);
+          return json(res, 200, { ok: true, division: dv, mode: cfg.mode, count: cfg.count });
+        }
         if (t.status !== 'signup') return bad(res, 'Draft already started');
         if (b.mode !== undefined) t.captainMode = b.mode === 'rating' ? 'rating' : 'manual';
         if (b.count !== undefined) {
@@ -6184,10 +6487,16 @@ async function handleAPI(req, res, url) {
         return json(res, 200, { ok: true, mode: t.captainMode || 'manual', count: t.captainCount || 0 });
       }
 
+      // A division waiting for its captains (the one above has finished drafting).
+      const waitingDiv = (t.status === 'draft' && t.draft && t.draft.waiting) ? t.draft.division : 0;
+      const undrafted = id => { const p = playerById(t, id); return !!(p && !p.teamId && !p.pending); };
+
       if (a === 'set_captains') {
         if (t.formation !== 'draft') return bad(res, 'This tournament does not use a draft');
-        if (t.status !== 'signup') return bad(res, 'Draft already started');
-        const capIds = Array.isArray(b.captainIds) ? b.captainIds.filter(id => playerById(t, id)) : [];
+        if (t.status !== 'signup' && !waitingDiv) return bad(res, 'Draft already started');
+        let capIds = Array.isArray(b.captainIds) ? b.captainIds.filter(id => playerById(t, id)) : [];
+        // a later division's captains come from the players nobody has drafted
+        if (waitingDiv) capIds = capIds.filter(undrafted);
         // dedupe
         const seen = {}; t.pendingCaptains = [];
         for (const id of capIds) { if (!seen[id]) { seen[id] = 1; t.pendingCaptains.push(id); } }
@@ -6197,27 +6506,38 @@ async function handleAPI(req, res, url) {
 
       if (a === 'start_draft') {
         if (t.formation !== 'draft') return bad(res, 'This tournament does not use a draft');
-        if (t.status !== 'signup') return bad(res, 'Draft already started');
+        if (t.status !== 'signup' && !waitingDiv) return bad(res, 'Draft already started');
+        // Division 1 opens the draft (and closes signups); a waiting division is started on its own.
+        const div = waitingDiv || (divisionsOn(t) ? 1 : 0);
+        const cfg = div > 1 ? divisionCaptainCfg(t, div) : { mode: t.captainMode === 'rating' ? 'rating' : 'manual', count: t.captainCount || 0 };
         let capIds;
-        if (t.captainMode === 'rating') {
+        if (cfg.mode === 'rating') {
           // Top N by rating, resolved now rather than when the setting was saved, so late
           // signups, withdrawals and rating corrections are all reflected.
-          const n = t.captainCount || 0;
+          const n = cfg.count || 0;
           if (n < 2) return bad(res, 'Set how many captains there should be first');
-          const ranked = (t.players || []).filter(p => !p.pending)
+          const ranked = waitingDiv ? divisionPool(t) : (t.players || []).filter(p => !p.pending)
             .slice().sort((x, y) => (y.rating || 0) - (x.rating || 0));
-          if (ranked.length < n) return bad(res, 'Only ' + ranked.length + ' player' + (ranked.length === 1 ? '' : 's') + ' signed up; need at least ' + n + ' for ' + n + ' captains');
+          if (ranked.length < n) {
+            return bad(res, waitingDiv
+              ? 'Only ' + ranked.length + ' player' + (ranked.length === 1 ? ' is' : 's are') + ' left for the ' + divisionName(t, div) + ' division; need at least ' + n + ' for ' + n + ' captains'
+              : 'Only ' + ranked.length + ' player' + (ranked.length === 1 ? '' : 's') + ' signed up; need at least ' + n + ' for ' + n + ' captains');
+          }
           capIds = ranked.slice(0, n).map(p => p.id);
         } else {
           // captains come from the pending list (or an explicit list for backward-compat)
           capIds = Array.isArray(b.captainIds) ? b.captainIds : (t.pendingCaptains || []);
+          if (waitingDiv) capIds = capIds.filter(undrafted);
         }
         capIds = capIds.filter(id => playerById(t, id));
         if (capIds.length < 2) return bad(res, 'Mark at least 2 captains in the player list first');
-        buildDraft(t, capIds);
+        buildDraft(t, capIds, div);
         finishDraftIfDone(t);
         t.pendingCaptains = [];
-        tlog(t, req, b.admin, 'closed signups & started the captains draft (' + capIds.length + ' captains' + (t.captainMode === 'rating' ? ', top by rating' : '') + ')');
+        const how = ' (' + capIds.length + ' captains' + (cfg.mode === 'rating' ? ', top by rating' : '') + ')';
+        tlog(t, req, b.admin, div > 1 ? 'started the ' + divisionName(t, div) + ' draft' + how
+          : (div === 1 ? 'closed signups & started the ' + divisionName(t, 1) + ' draft' + how : 'closed signups & started the captains draft' + how));
+        noteDraftChain(t, div);
         saveDB();
         return json(res, 200, { ok: true });
       }
@@ -6236,6 +6556,13 @@ async function handleAPI(req, res, url) {
         if (t.status !== 'signup') return bad(res, 'Teams already formed');
         const err = (t.formation === 'open') ? finalizeOpenTeams(t) : formTeamsGrouped(t);
         if (err) return bad(res, err);
+        // Divisions planned at creation: split the locked field by combined rating straight away.
+        // The Teams tab lets an organizer move teams between them before the start.
+        if (divisionsOn(t) && divisionsAllowed(t.competition, t.bracketType)) {
+          splitIntoDivisions(t, t.divisions, t.divisionTop);
+          tpush(t, 'System', 'Split by rating into ' + Array.from({ length: t.divisions }, (x, i) =>
+            divisionName(t, i + 1) + ' (' + divisionTeams(t, i + 1).length + ')').join(', ') + '.');
+        }
         // Seeds are set: move any qualifier arrivals into the seed block their link asked for.
         // No-op unless a link actually set one, so normal seeding is untouched.
         if (pinQualifierSeeds(t)) {
@@ -6289,6 +6616,7 @@ async function handleAPI(req, res, url) {
           if (t.competition === 'ffa' || t.bracketType === 'swiss') {
             return bad(res, 'Stopping at a survivor count only applies to single or double elimination. Turn it off on the Format panel, or change the bracket type.');
           }
+          if (divisionsOn(t)) return bad(res, 'Stopping at a survivor count does not work with divisions - each division plays its own bracket to a champion. Turn it off on the Format panel.');
           if (t.stopAtAlive < 2) return bad(res, 'Stopping at 1 survivor is just playing the tournament out - set 2 or more, or turn it off.');
           if (t.stopAtAlive >= n) return bad(res, 'This tournament is set to stop when ' + t.stopAtAlive + ' are left, but only ' + n + ' entered. Lower it, or turn it off on the Format panel.');
         }
@@ -6301,8 +6629,10 @@ async function handleAPI(req, res, url) {
           ffaCreateRound(t, 1, t.teams.map(x => x.id));
           t.status = 'running';
         } else if (t.bracketType === 'single') {
-          const divs = (t.divisions && t.divisions > 1) ? t.divisions : 0;
-          const R = log2i(nextPow2(n));
+          const divs = divisionsOn(t) ? t.divisions : 0;
+          if (divs) { const err = divisionStartCheck(t, divs, 2); if (err) return bad(res, err); }
+          // with divisions the lengths are set for the largest one; the others play the tail
+          const R = log2i(nextPow2(divs ? largestDivision(t, divs) : n));
           t.cfg = { rounds: cleanBoList(c.rounds, R) };
           // The start dialog says whether to play for 3rd; without it the stored plan decides.
           const third = c.thirdPlace !== undefined ? !!c.thirdPlace : !!(t.plan && t.plan.thirdPlace);
@@ -6320,20 +6650,19 @@ async function handleAPI(req, res, url) {
             return json(res, 200, { ok: true, picking: 1 });
           }
           if (divs) {
-            // validate each division has >= 2 teams
-            for (let d = 1; d <= divs; d++) {
-              const dn = t.teams.filter(x => (x.division || 0) === d).length;
-              if (dn < 2) return bad(res, 'Division ' + d + ' needs at least 2 teams (adjust the split)');
-            }
-            for (let d = 1; d <= divs; d++) { buildSingle(t, t.cfg, d); }
+            numberDivisionSeeds(t, divs);
+            t.cfg.divAlign = 1;   // smaller divisions play (and take pools from) the rounds aligned from the final
+            for (let d = 1; d <= divs; d++) buildSingle(t, divisionCfg(t, t.cfg, d), d);
+            t.rounds = R;
           } else {
             buildSingle(t, t.cfg, 0);
           }
           if (t.status !== 'finished') t.status = 'running';
         } else if (t.bracketType === 'double') {
           if (n < 3) return bad(res, 'Double elimination needs at least 3 teams');
-          const divs = (t.divisions && t.divisions > 1) ? t.divisions : 0;
-          const R = log2i(nextPow2(n));
+          const divs = divisionsOn(t) ? t.divisions : 0;
+          if (divs) { const err = divisionStartCheck(t, divs, 3); if (err) return bad(res, err); }
+          const R = log2i(nextPow2(divs ? largestDivision(t, divs) : n));
           t.cfg = {
             wb: cleanBoList(c.wb, R),
             lb: cleanBoList(c.lb, 2 * R - 2),
@@ -6351,11 +6680,10 @@ async function handleAPI(req, res, url) {
             return json(res, 200, { ok: true, picking: 1 });
           }
           if (divs) {
-            for (let d = 1; d <= divs; d++) {
-              const dn = t.teams.filter(x => (x.division || 0) === d).length;
-              if (dn < 3) return bad(res, 'Division ' + d + ' needs at least 3 teams for double elimination (adjust the split)');
-            }
-            for (let d = 1; d <= divs; d++) { buildDouble(t, t.cfg, d); }
+            numberDivisionSeeds(t, divs);
+            t.cfg.divAlign = 1;
+            for (let d = 1; d <= divs; d++) buildDouble(t, divisionCfg(t, t.cfg, d), d);
+            t.rounds = R;
           } else {
             buildDouble(t, t.cfg, 0);
           }
@@ -6409,6 +6737,10 @@ async function handleAPI(req, res, url) {
         }
         // reflect the per-round Bos actually generated in the stored plan lists (for the summary)
         if (t.bracketType === 'single' || t.bracketType === 'double') syncPlanFromMatches(t);
+        if (divisionsOn(t) && t.competition === 'team' && (t.bracketType === 'single' || t.bracketType === 'double')) {
+          tpush(t, 'System', 'Brackets started: ' + Array.from({ length: t.divisions }, (x, i) =>
+            divisionName(t, i + 1) + ' (' + divisionTeams(t, i + 1).length + ' teams)').join(', ') + '.');
+        }
         saveDB();
         return json(res, 200, { ok: true });
       }
@@ -6473,6 +6805,7 @@ async function handleAPI(req, res, url) {
       if (err) return bad(res, err);
       // the old match rooms can never be reached again, so do not leave them lying around
       if (t.chat) for (const id of removed) delete t.chat['match:' + id];
+      if (t.chatRev) for (const id of removed) delete t.chatRev['match:' + id];
       const nm = id => { const tm = teamById(t, id); return tm ? tm.name : id; };
       const drawn = (t.matches || []).filter(m => m.bracket === 'sw' && m.round === 1 && m.team2 !== 'BYE');
       tlog(t, req, b.admin, b.shuffle ? 're-drew the round 1 matchups' : 'set the round 1 matchups by hand');
@@ -6582,6 +6915,7 @@ async function handleAPI(req, res, url) {
     if (sub === 'pick') {
       if (t.status !== 'draft' || !t.draft) return bad(res, 'No draft in progress');
       const d = t.draft;
+      if (d.waiting) return bad(res, 'The ' + divisionName(t, d.division) + ' draft has not started yet - its captains are still to be chosen');
       if (d.current >= d.order.length) return bad(res, 'Draft is complete');
       const turnTeamId = d.order[d.current];
       const admin = isAdmin(t, b.token, req) || isOrganizer(t, req);
@@ -6598,13 +6932,36 @@ async function handleAPI(req, res, url) {
       d.current++;
       tlog(t, req, b.token, tTeamName(t, team.id) + ' drafted ' + p.name);
       finishDraftIfDone(t);
+      noteDraftChain(t, d.division || 0);
       saveDB();
       return json(res, 200, { ok: true });
     }
 
     if (sub === 'undo_pick') {
       if ((t.status !== 'draft' && t.status !== 'drafted') || !t.draft) return bad(res, 'No draft in progress');
-      const d = t.draft;
+      let d = t.draft;
+      // The last pick made belongs to the division above when this division is still waiting for
+      // its captains, or has not picked anyone yet. Taking it back reopens that draft and takes
+      // this division's (unpicked) teams down again - an organizer's call, never a captain's.
+      const prevDraft = (t.draftDone || []).length ? t.draftDone[t.draftDone.length - 1] : null;
+      if ((d.waiting || d.current === 0) && prevDraft && prevDraft.current > 0) {
+        if (!(isAdmin(t, b.token, req) || isOrganizer(t, req))) {
+          return json(res, 403, { error: 'Only an organizer can take back a pick from the ' + divisionName(t, prevDraft.division) + ' draft now' });
+        }
+        const dv = d.division;
+        for (const tm of t.teams.filter(x => (x.division || 0) === dv)) {
+          for (const pid of tm.playerIds) { const pl = playerById(t, pid); if (pl) pl.teamId = null; }
+        }
+        t.teams = t.teams.filter(x => (x.division || 0) !== dv);
+        t.pendingCaptains = [];
+        t.draftDone.pop();
+        delete prevDraft.done;
+        t.draft = prevDraft;
+        t.status = 'draft';
+        t.subs = [];
+        tlog(t, req, b.token, 'reopened the ' + divisionName(t, prevDraft.division) + ' draft (the ' + divisionName(t, dv) + ' draft had not started)');
+        d = t.draft;
+      }
       let lp = d.lastPick;
       // reconstruct for drafts started before pick-tracking existed: the last team to pick
       // is d.order[d.current-1], and their most recently appended player is that pick.
@@ -6650,6 +7007,74 @@ async function handleAPI(req, res, url) {
       m.veto.teamA = aTeam;
       m.veto.teamB = aTeam === m.team1 ? m.team2 : m.team1;
       tlog(t, req, b.admin, 'set the veto sides (A/B) of ' + tTeamName(t, m.team1) + ' vs ' + tTeamName(t, m.team2));
+      saveDB();
+      return json(res, 200, { ok: true });
+    }
+
+    // ---- predictions: make or change one's own ----
+    // Anyone logged in with FAF, for a stage that is open (its matches are known and none has been
+    // played). Only picks that fit the bracket are kept: a pick has to be one of the two teams the
+    // earlier picks put into that match. Saving part of a bracket is fine; it can be finished later.
+    if (sub === 'predict') {
+      const sess = currentSession(req);
+      if (!sess || !sess.fafId) return json(res, 401, { error: 'Log in with FAF to make a prediction' });
+      if (t.predict && t.predict.off) return bad(res, 'Predictions are switched off for this tournament');
+      const s = PRED.stagesOf(t, PRED_CTX).find(x => x.key === String(b.stage || 's1'));
+      if (!s) return bad(res, 'There is nothing to predict here');
+      if (s.state === 'upcoming') return bad(res, s.why || 'Predictions are not open yet');
+      if (s.state !== 'open') return bad(res, 'Predictions for the ' + s.label + ' are closed');
+      const fid = String(sess.fafId);
+      if (!t.predictions) t.predictions = {};
+      const cur = t.predictions[fid] || {};
+      cur.name = cleanName(sess.fafName || '', 60) || cur.name || ('FAF ' + fid);
+      if (b.clear) {
+        delete cur[s.key];
+        if (Object.keys(cur).some(k => k !== 'name')) t.predictions[fid] = cur; else delete t.predictions[fid];
+        saveDB();
+        return json(res, 200, { ok: true, cleared: 1 });
+      }
+      const c = PRED.cleanPicks(t, s, b.picks);
+      if (!c.count) return bad(res, s.kind === 'champion' ? 'Choose who wins' : (s.kind === 'records' ? 'Give at least one team a record' : 'Pick the winner of at least one match'));
+      cur[s.key] = { at: now(), layout: s.layout || null, picks: c.picks };
+      t.predictions[fid] = cur;
+      saveDB();
+      return json(res, 200, { ok: true, count: c.count, total: c.total, picks: c.picks });
+    }
+
+    // ---- predictions: settings (organizer) ----
+    // on/off, the prize for a perfect prediction, and closing a stage early (or reopening it while
+    // none of its matches has been played).
+    if (sub === 'predict_config') {
+      if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
+      const pr = Object.assign({}, t.predict || {});
+      const did = [];
+      if (b.on !== undefined) {
+        const off = !b.on;
+        if (off !== !!pr.off) { if (off) pr.off = 1; else delete pr.off; did.push(off ? 'switched predictions off' : 'switched predictions on'); }
+      }
+      if (b.prize !== undefined) {
+        const prize = cleanName(String(b.prize || ''), 120);
+        if (prize !== (pr.prize || '')) { if (prize) pr.prize = prize; else delete pr.prize; did.push(prize ? 'set the prize for a perfect prediction: ' + prize : 'removed the prediction prize'); }
+      }
+      if (b.close || b.reopen) {
+        const key = String(b.close || b.reopen);
+        const s = PRED.stagesOf(t, PRED_CTX).find(x => x.key === key);
+        if (!s) return bad(res, 'There is no such prediction stage');
+        pr.locked = Object.assign({}, pr.locked || {});
+        if (b.close) {
+          if (s.state !== 'open') return bad(res, 'Predictions for the ' + s.label + ' are not open');
+          pr.locked[key] = { at: now(), by: 'organizer', keys: PRED.stageKeys(t, s) };
+          did.push('closed predictions for the ' + s.label);
+        } else {
+          if (!pr.locked[key]) return bad(res, 'Predictions for the ' + s.label + ' are not closed');
+          if (t.status === 'finished' || (s.matches || []).some(PRED.playedMatch)) return bad(res, 'A match of the ' + s.label + ' has been played, so its predictions stay closed');
+          delete pr.locked[key];
+          did.push('reopened predictions for the ' + s.label);
+        }
+        if (!Object.keys(pr.locked).length) delete pr.locked;
+      }
+      if (Object.keys(pr).length) t.predict = pr; else delete t.predict;
+      for (const d of did) tlog(t, req, b.admin, d);
       saveDB();
       return json(res, 200, { ok: true });
     }
@@ -6834,6 +7259,7 @@ async function handleAPI(req, res, url) {
       // replay IDs are still worth keeping (casters, archive). Any Bo, including Bo1.
       const drawIds = Array.isArray(b.drawReplayIds) ? b.drawReplayIds.map(x => String(x).trim().replace(/\D/g, '').slice(0, 24)).filter(Boolean).slice(0, 10) : [];
       m.pendingReport = { score1: s1, score2: s2, replayIds: ids, drawReplayIds: drawIds, byTeam: myTeam.id, byName: actorOf(req, b).name || myTeam.name, at: now() };
+      PRED.stampLocks(t, PRED_CTX);   // a submitted score closes the predictions, like a result
       tlog(t, req, b.token, 'submitted ' + s1 + '\u2013' + s2 + ' for ' + tTeamName(t, m.team1) + ' vs ' + tTeamName(t, m.team2) + ' (awaiting confirmation)');
       saveDB();
       return json(res, 200, { ok: true, pending: 1 });
@@ -6868,6 +7294,7 @@ async function handleAPI(req, res, url) {
       } else {
         m.score1 = pr.score1; m.score2 = pr.score2;
         m.status = 'live';
+        PRED.stampLocks(t, PRED_CTX);
       }
       saveDB();
       return json(res, 200, { ok: true });
@@ -6923,6 +7350,7 @@ async function handleAPI(req, res, url) {
           m.points = stored;
           m.status = 'done';
           ffaAfterReport(t);
+          PRED.stampLocks(t, PRED_CTX);
           saveDB();
           return json(res, 200, { ok: true });
         }
@@ -6943,6 +7371,7 @@ async function handleAPI(req, res, url) {
           }
         }
         ffaAfterReport(t);
+        PRED.stampLocks(t, PRED_CTX);
         saveDB();
         return json(res, 200, { ok: true });
       }
@@ -7066,6 +7495,7 @@ async function handleAPI(req, res, url) {
       } else {
         m.score1 = s1; m.score2 = s2;
         m.status = 'live';
+        PRED.stampLocks(t, PRED_CTX);
       }
       settlePlayoffsAfterCorrection(t, playoffsFrom);
       saveDB();

@@ -950,13 +950,33 @@ function seedPanelHTML() {
   const swiss = T.bracketType === 'swiss';
   const solo = T.teamSize === 1;
   const noun = solo ? 'Players' : 'Teams';
-  const seeded = T.teams.slice().sort((a, b) => (a.seed || 0) - (b.seed || 0));
+  const bySeed = (a, b) => (a.seed || 0) - (b.seed || 0);
+  const seeded = T.teams.slice().sort(bySeed);
   const invited = seedInviteCount();
+  // With divisions every division is seeded on its own: one list each, top division first.
+  const byDiv = divisionsOnT() && T.teams.some(x => x.division);
   // What a seed actually DOES differs by format, and getting this wrong is how an organizer
   // spends an evening reordering a list that the pairer stops consulting after round 1.
   const what = swiss
     ? 'Seed 1 is the top seed. Seeds set the <strong>opening round\u2019s draw</strong> and break ties in the standings \u2014 from round 2 on, pairing follows records. Once the rounds start you can still rearrange round 1 by hand.'
-    : 'Seed 1 is the top seed. This determines the bracket \u2014 fixed once you start it.';
+    : (byDiv ? 'Each division is seeded on its own: the top of each list is that division\u2019s seed 1. It decides that division\u2019s bracket, and is fixed once you start it.'
+      : 'Seed 1 is the top seed. This determines the bracket \u2014 fixed once you start it.');
+  const item = tm => `<li class="seeditem" draggable="true" data-tid="${tm.id}">
+        <span class="seednum"></span>
+        <span class="seedname">${esc(tm.name)}</span>
+        <span class="seedbtns"><button class="seedup" title="Move up">\u25b2</button><button class="seeddown" title="Move down">\u25bc</button></span>
+      </li>`;
+  let lists = '';
+  if (byDiv) {
+    for (let d = 1; d <= T.divisions; d++) {
+      const teams = divisionTeamsOf(d).slice().sort(bySeed);
+      if (teams.length) lists += '<h3 class="div-draft-h">' + esc(divisionNameOf(d)) + '</h3><ol class="seedlist" data-seedlist="' + d + '">' + teams.map(item).join('') + '</ol>';
+    }
+    const loose = seeded.filter(x => !((x.division || 0) >= 1 && (x.division || 0) <= T.divisions));
+    if (loose.length) lists += '<h3 class="div-draft-h">Not in a division</h3><ol class="seedlist" data-seedlist="0">' + loose.map(item).join('') + '</ol>';
+  } else {
+    lists = '<ol id="seedList" class="seedlist" data-seedlist="all">' + seeded.map(item).join('') + '</ol>';
+  }
   return `<div class="panel section"><h2>Seeding</h2>
     <p class="muted small">Drag to reorder, or use the arrows. ${what}</p>
     <div style="margin:10px 0;display:flex;gap:8px;flex-wrap:wrap">
@@ -964,55 +984,59 @@ function seedPanelHTML() {
       <button class="btn ghost small" id="seedByRating" title="Highest rating first. Unrated go last.">Order by rating</button>
       ${invited ? `<button class="btn ghost small" id="seedByInvite" title="Seed in the order the invites went out (${invited} accepted). ${noun} nobody invited keep their order and follow the invited ones.">Order by invite</button>` : ''}
     </div>
-    <ol id="seedList" class="seedlist">
-      ${seeded.map(tm => `<li class="seeditem" draggable="true" data-tid="${tm.id}">
-        <span class="seednum"></span>
-        <span class="seedname">${esc(tm.name)}</span>
-        <span class="seedbtns"><button class="seedup" title="Move up">\u25b2</button><button class="seeddown" title="Move down">\u25bc</button></span>
-      </li>`).join('')}
-    </ol>
+    ${lists}
     <div style="margin-top:12px"><button class="btn amber" id="seedSave">Save seeding</button> <span class="muted small" id="seedDirty"></span></div>
   </div>`;
 }
 
 function wireSeedPanel() {
-  const seedList = document.getElementById('seedList');
-  if (!seedList) return;
-  const renumber = () => {
-    let i = 1;
-    seedList.querySelectorAll('.seeditem').forEach(li => { li.querySelector('.seednum').textContent = i++; });
-    const sd = document.getElementById('seedDirty'); if (sd) sd.textContent = 'unsaved changes';
+  const lists = Array.from(document.querySelectorAll('ol.seedlist[data-seedlist]'));
+  if (!lists.length) return;
+  const renumber = (dirty) => {
+    for (const list of lists) {
+      let i = 1;
+      list.querySelectorAll('.seeditem').forEach(li => { li.querySelector('.seednum').textContent = i++; });
+    }
+    const sd = document.getElementById('seedDirty'); if (sd) sd.textContent = dirty ? 'unsaved changes' : '';
   };
-  renumber();
-  const sd0 = document.getElementById('seedDirty'); if (sd0) sd0.textContent = '';
+  renumber(false);
+  for (const list of lists) wireSeedList(list, () => renumber(true));
+  wireSeedButtons(lists);
+}
 
+// Arrows and drag-and-drop inside one list. A team never leaves its list: with divisions the list
+// is its division, and moving between divisions is the Divisions panel's job.
+function wireSeedList(seedList, changed) {
   seedList.querySelectorAll('.seedup').forEach(b => b.onclick = e => {
     const li = e.target.closest('.seeditem'); const prev = li.previousElementSibling;
-    if (prev) { seedList.insertBefore(li, prev); renumber(); }
+    if (prev) { seedList.insertBefore(li, prev); changed(); }
   });
   seedList.querySelectorAll('.seeddown').forEach(b => b.onclick = e => {
     const li = e.target.closest('.seeditem'); const next = li.nextElementSibling;
-    if (next) { seedList.insertBefore(next, li); renumber(); }
+    if (next) { seedList.insertBefore(next, li); changed(); }
   });
-
   let dragEl = null;
   seedList.querySelectorAll('.seeditem').forEach(li => {
     li.addEventListener('dragstart', () => { dragEl = li; li.classList.add('dragging'); });
-    li.addEventListener('dragend', () => { if (dragEl) dragEl.classList.remove('dragging'); dragEl = null; renumber(); });
+    li.addEventListener('dragend', () => { if (dragEl) dragEl.classList.remove('dragging'); dragEl = null; changed(); });
   });
   seedList.addEventListener('dragover', e => {
     e.preventDefault();
+    if (!dragEl || dragEl.parentNode !== seedList) return;
     const after = [...seedList.querySelectorAll('.seeditem:not(.dragging)')].reduce((closest, child) => {
       const box = child.getBoundingClientRect();
       const offset = e.clientY - box.top - box.height / 2;
       if (offset < 0 && offset > closest.offset) return { offset, el: child };
       return closest;
     }, { offset: -Infinity, el: null }).el;
-    if (!dragEl) return;
     if (after == null) seedList.appendChild(dragEl);
     else seedList.insertBefore(dragEl, after);
   });
+}
 
+// Save, randomize, by rating, by invite. The saved order is the lists one after another, so with
+// divisions every division keeps its own order and the seeds stay unique across the field.
+function wireSeedButtons(lists) {
   // `mode` picks which of the three the server should do; only one is ever sent.
   const saveOrder = async (order, mode) => {
     const body = { admin: adminToken() };
@@ -1025,11 +1049,9 @@ function wireSeedPanel() {
       toast('Seeding saved');
     } catch (e) { toast(e.message, true); }
   };
-
-  document.getElementById('seedSave').onclick = () => {
-    const order = [...seedList.querySelectorAll('.seeditem')].map(li => li.dataset.tid);
-    saveOrder(order, null);
-  };
+  const idsOf = list => [...list.querySelectorAll('.seeditem')].map(li => li.dataset.tid);
+  const save = document.getElementById('seedSave');
+  if (save) save.onclick = () => saveOrder([].concat(...lists.map(idsOf)), null);
   const rnd = document.getElementById('seedRandom');
   if (rnd) rnd.onclick = () => saveOrder(null, 'random');
   const inv = document.getElementById('seedByInvite');
@@ -1037,14 +1059,136 @@ function wireSeedPanel() {
   const byr = document.getElementById('seedByRating');
   if (byr) byr.onclick = () => {
     // Rating order is recomputed here rather than stored, so it always reflects the ratings
-    // showing right now (an organizer edit to a rating lands immediately).
-    const withR = T.teams.map(tm => ({
-      id: tm.id,
-      r: tm.playerIds.reduce((s, pid) => { const p = T.players.find(x => x.id === pid); return s + (p && p.rating || 0); }, 0)
-    }));
-    withR.sort((a, b) => b.r - a.r);
-    saveOrder(withR.map(x => x.id), null);
+    // showing right now (an organizer edit to a rating lands immediately). Within each list.
+    const r = id => { const tm = T.teams.find(x => x.id === id); return tm ? tm.playerIds.reduce((s, pid) => { const p = T.players.find(x => x.id === pid); return s + (p && p.rating || 0); }, 0) : 0; };
+    saveOrder([].concat(...lists.map(list => idsOf(list).sort((a, b) => r(b) - r(a)))), null);
   };
+}
+
+// ---- the division draft (King / Prince ...) ----
+function divisionDraftIntro() {
+  const n = T.divisions || 0;
+  const nm = d => divisionNameOf(d);
+  return 'This tournament has ' + n + ' divisions, each with its own bracket. The ' + nm(1) + ' captains draft first, and everyone they pick plays in the '
+    + nm(1) + ' bracket. When their draft is over, the players nobody picked are drafted into the ' + nm(2) + ' bracket by the ' + nm(2) + ' captains'
+    + (n > 2 ? ', and so on down' : '') + '. Set how each division\u2019s captains are chosen below.';
+}
+// How each later division's captains are chosen. The top division's are set with the controls above.
+function laterDivisionsHTML() {
+  let h = '';
+  for (let d = 2; d <= (T.divisions || 0); d++) {
+    const c = (T.divCaptains || []).find(x => x.division === d) || { mode: 'rating', count: 0 };
+    h += `<div class="div-draft">
+      <h3 class="div-draft-h">${esc(divisionNameOf(d))} captains</h3>
+      <div class="row" style="gap:10px;align-items:flex-end;flex-wrap:wrap">
+        <div style="flex:2;min-width:220px"><div class="muted small">Chosen when the ${esc(divisionNameOf(d - 1))} draft ends</div>
+          <select data-divmode="${d}">
+            <option value="rating"${c.mode !== 'manual' ? ' selected' : ''}>The highest rated of the players left (automatic)</option>
+            <option value="manual"${c.mode === 'manual' ? ' selected' : ''}>I pick them myself at that point</option>
+          </select></div>
+        <div style="width:160px${c.mode === 'manual' ? ';display:none' : ''}" data-divnumwrap="${d}"><div class="muted small">How many captains</div>
+          <input type="number" min="2" max="64" data-divnum="${d}" value="${c.count || ''}" placeholder="e.g. 4"></div>
+      </div>
+      <div class="muted small" data-divhint="${d}" style="margin-top:6px"></div>
+    </div>`;
+  }
+  return h;
+}
+// Wire those settings (saved as they change) and keep a line under each saying how many players
+// will be left for it. Returns the repaint function, so the top division's controls can call it.
+function wireLaterDivisions(root) {
+  const modes = Array.from(root.querySelectorAll('[data-divmode]'));
+  if (!modes.length) return () => {};
+  const per = T.teamSize || 1;
+  const pool = T.players.filter(p => !p.pending).length;
+  const topCount = () => {
+    const sel = document.getElementById('capMode');
+    if (sel && sel.value === 'rating') return parseInt((document.getElementById('capNum') || {}).value, 10) || 0;
+    return Object.keys(F.capSel || {}).length;
+  };
+  const paint = () => {
+    let left = pool - topCount() * per;
+    for (let d = 2; d <= (T.divisions || 0); d++) {
+      const modeEl = root.querySelector('[data-divmode="' + d + '"]');
+      const numEl = root.querySelector('[data-divnum="' + d + '"]');
+      const hint = root.querySelector('[data-divhint="' + d + '"]');
+      const wrap = root.querySelector('[data-divnumwrap="' + d + '"]');
+      if (!modeEl) continue;
+      const manual = modeEl.value === 'manual';
+      if (wrap) wrap.style.display = manual ? 'none' : '';
+      const k = manual ? 0 : (parseInt(numEl && numEl.value, 10) || 0);
+      const leftHere = Math.max(0, left);
+      if (hint) {
+        if (manual) hint.textContent = leftHere + ' would be left for it. You choose its captains from them when the ' + divisionNameOf(d - 1) + ' draft ends.';
+        else if (k < 2) hint.textContent = leftHere + ' would be left for it. Enter how many captains it gets, or it waits for you to choose them.';
+        else hint.innerHTML = esc(leftHere + ' would be left for it (' + k + ' teams of ' + per + ' need ' + (k * per) + ').')
+          + (leftHere < k ? ' <span class="warn">Not enough for ' + k + ' captains - it will wait for you instead.</span>' : '');
+      }
+      left -= (manual ? 0 : k * per);
+    }
+  };
+  let timer = {};
+  const save = d => {
+    clearTimeout(timer[d]);
+    timer[d] = setTimeout(() => {
+      const modeEl = root.querySelector('[data-divmode="' + d + '"]');
+      const numEl = root.querySelector('[data-divnum="' + d + '"]');
+      const body = { action: 'set_captain_mode', division: d, mode: modeEl.value, admin: adminToken() };
+      const n = parseInt(numEl && numEl.value, 10);
+      if (isFinite(n) && n >= 2) body.count = n;
+      api('/api/t/' + T.id + '/phase', body).catch(e => toast(e.message, true));
+    }, 400);
+  };
+  for (const m of modes) m.onchange = () => { paint(); save(parseInt(m.dataset.divmode, 10)); };
+  root.querySelectorAll('[data-divnum]').forEach(n => { n.oninput = () => { paint(); save(parseInt(n.dataset.divnum, 10)); }; });
+  paint();
+  return paint;
+}
+// The division above has finished; this one waits for the organizer to choose its captains. The
+// controls reuse the top division's ids, so the same wiring drives both.
+function waitingDivisionHTML(admin) {
+  const d = T.draft.division;
+  const nm = divisionNameOf(d), prev = divisionNameOf(d - 1);
+  const left = T.players.filter(p => !p.teamId && !p.pending).sort((a, b) => (b.rating || 0) - (a.rating || 0));
+  const lastDone = (T.draftDone || []).slice(-1)[0];
+  let h = `<div class="draft-turn">The <strong>${esc(prev)}</strong> draft is complete. The <strong>${esc(nm)}</strong> draft starts once its captains are chosen.</div>`;
+  if (admin) {
+    const c = (T.divCaptains || []).find(x => x.division === d) || { mode: 'rating', count: 0 };
+    h += `<div class="panel section"><h2>${esc(nm)} <span class="h2-strong">captains</span></h2>
+      <p class="muted small">${left.length} player${left.length === 1 ? ' is' : 's are'} left for the ${esc(nm)} division. The number of captains is the number of ${esc(nm)} teams; each fills a team of ${T.teamSize}.</p>
+      <label>How are captains chosen?</label>
+      <select id="capMode">
+        <option value="manual"${c.mode === 'manual' ? ' selected' : ''}>I pick them myself</option>
+        <option value="rating"${c.mode !== 'manual' ? ' selected' : ''}>Top N by rating of the players left (automatic)</option>
+      </select>
+      <div id="capRatingWrap" style="${c.mode !== 'manual' ? '' : 'display:none'}">
+        <label style="margin-top:12px">How many captains</label>
+        <input type="number" id="capNum" min="2" max="64" step="1" value="${c.count || ''}" placeholder="e.g. 4" style="max-width:160px">
+        <div id="capPreview" class="cap-count"></div>
+      </div>
+      <div id="capManualWrap" style="${c.mode === 'manual' ? '' : 'display:none'}">
+        <p class="muted small" style="margin-top:12px">Mark who the captains are in the list below.</p>
+        <div class="pool" id="capPool"></div>
+        <div id="capCount" class="cap-count"></div>
+      </div>
+      <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn amber" id="startDraft">Start the ${esc(nm)} draft</button>
+        ${lastDone && lastDone.picks ? '<button class="btn ghost" id="undoPickBtn">\u21b6 Undo the last ' + esc(prev) + ' pick</button>' : ''}
+      </div></div>`;
+  } else {
+    h += `<div class="panel section"><h2>Players left <span class="h2-strong">(${left.length})</span></h2>
+      <p class="muted small">They are drafted into the ${esc(nm)} bracket once the organizer has chosen its captains.</p>
+      <div class="unteamed">${left.map(p => `<span class="unteamed-chip">${esc(p.name)}${p.rating != null ? ' <span class="muted mono">' + p.rating + '</span>' : ''}</span>`).join('') || '<span class="muted">Nobody.</span>'}</div></div>`;
+  }
+  return h;
+}
+// The seed a team shows. With divisions, before the start every seed is unique across the field;
+// the start numbers each division from 1, so the page shows the place within the division already.
+function shownSeed(team) {
+  if (!divisionsOnT() || !team.division || T.status === 'running' || T.status === 'finished') return team.seed;
+  const list = divisionTeamsOf(team.division).slice().sort((a, b) => (a.seed || 0) - (b.seed || 0));
+  const i = list.findIndex(x => x.id === team.id);
+  return i >= 0 ? i + 1 : team.seed;
 }
 
 function drawTeams(el) {
@@ -1064,8 +1208,11 @@ function drawTeams(el) {
         // Rating mode resolves at draft start, so show a live preview of who it would pick now.
         const capRanked = T.players.filter(p => !p.pending).slice().sort((a, b) => (b.rating || 0) - (a.rating || 0));
         const capWould = capN >= 2 ? capRanked.slice(0, capN) : [];
+        const divs = divisionsOnT() ? T.divisions : 0;
         html += `<div class="panel section"><h2>Captains &amp; draft</h2>
+          ${divs ? '<p class="muted small">' + esc(divisionDraftIntro()) + '</p>' : ''}
           <p class="muted small">The number of captains is the number of teams. Pick order: ${T.draftOrder === 'snake' ? 'snake (1\u2192N, N\u21921, ...)' : 'bottom seed to top seed, every round'}. Each captain fills a team of ${T.teamSize}.</p>
+          ${divs ? '<h3 class="div-draft-h">' + esc(divisionNameOf(1)) + ' captains</h3>' : ''}
           <label>How are captains chosen?</label>
           <select id="capMode">
             <option value="manual"${capMode === 'manual' ? ' selected' : ''}>I pick them myself</option>
@@ -1082,7 +1229,8 @@ function drawTeams(el) {
             <div class="pool" id="capPool"></div>
             <div id="capCount" class="cap-count"></div>
           </div>
-          <div style="margin-top:16px"><button class="btn amber" id="startDraft">Close signups &amp; start draft</button></div></div>`;
+          ${divs ? laterDivisionsHTML() : ''}
+          <div style="margin-top:16px"><button class="btn amber" id="startDraft">${divs ? 'Close signups &amp; start the ' + esc(divisionNameOf(1)) + ' draft' : 'Close signups &amp; start draft'}</button></div></div>`;
       } else {
         html += `<div class="panel section"><h2>Form ${T.teamSize === 1 ? 'entrants' : 'teams'}</h2>
           <p class="muted small">${T.teamSize === 1 ? 'Every signed-up player becomes an entrant.' : 'Teams are grouped by the team name players entered at signup. Players without a team name become substitutes.'}</p>
@@ -1152,20 +1300,29 @@ function drawTeams(el) {
     }
   }
 
-  if (T.status === 'draft' && T.draft) {
+  if (T.status === 'draft' && T.draft && T.draft.waiting) {
+    // the division above has finished drafting; this one waits for its captains
+    html += waitingDivisionHTML(admin);
+  } else if (T.status === 'draft' && T.draft) {
     const d = T.draft;
     const turnTeamId = d.order[d.current];
     // the team that made the most recent pick (authoritative: previous slot in the pick order)
     const lastTeamId = d.current > 0 ? d.order[d.current - 1] : null;
-    let canUndo = false, undoName = '';
+    let canUndo = false, undoName = '', undoLabel = '';
     if (lastTeamId) {
       undoName = teamName(lastTeamId);
       if (admin) canUndo = true;                                             // organizer: anytime
       else if (T.viewer && T.viewer.teamId === lastTeamId) canUndo = true;   // captain: only if they were last to pick
+      undoLabel = 'Undo ' + undoName + '\u2019s last pick';
+    } else if (admin && d.division && (T.draftDone || []).some(x => x.picks > 0)) {
+      // nobody has picked in this division yet: the last pick made was the division above's
+      canUndo = true;
+      undoLabel = 'Undo the last ' + divisionNameOf(d.division - 1) + ' pick';
     }
-    html += `<div class="draft-turn">Pick ${d.current + 1} of ${d.order.length} — <strong>${esc(teamName(turnTeamId))}</strong> is picking.
+    const divLbl = (d.division && divisionsOnT()) ? '<strong>' + esc(divisionNameOf(d.division)) + ' draft</strong> \u00b7 ' : '';
+    html += `<div class="draft-turn">${divLbl}Pick ${d.current + 1} of ${d.order.length} - <strong>${esc(teamName(turnTeamId))}</strong> is picking.
       ${capToken() && !admin ? '<span class="muted small"> If it\u2019s your team\u2019s turn, the pick buttons below work for you.</span>' : ''}
-      ${canUndo ? '<button class="btn ghost small" id="undoPickBtn" style="margin-left:10px">\u21b6 Undo ' + esc(undoName) + '\u2019s last pick</button>' : ''}
+      ${canUndo ? '<button class="btn ghost small" id="undoPickBtn" style="margin-left:10px">\u21b6 ' + esc(undoLabel) + '</button>' : ''}
     </div>`;
     const orderChips = d.order.map((tid, i) => {
       const cls = i < d.current ? 'po-done' : i === d.current ? 'po-now' : '';
@@ -1176,7 +1333,17 @@ function drawTeams(el) {
   }
 
   if (T.teams.length) {
-    html += `<div class="panel section"><h2>${T.teamSize === 1 ? 'Entrants' : 'Teams'}</h2><div class="teamgrid" id="tGrid"></div></div>`;
+    if (divisionsOnT() && T.teams.some(x => x.division)) {
+      // one grid per division, top division first
+      for (let dv = 1; dv <= T.divisions; dv++) {
+        const k = divisionTeamsOf(dv).length;
+        if (k) html += `<div class="panel section"><h2>${esc(divisionNameOf(dv))} <span class="h2-strong">(${k})</span></h2><div class="teamgrid" data-tgrid="${dv}"></div></div>`;
+      }
+      const loose = T.teams.filter(x => !((x.division || 0) >= 1 && (x.division || 0) <= T.divisions)).length;
+      if (loose) html += `<div class="panel section"><h2>Not in a division <span class="h2-strong">(${loose})</span></h2><div class="teamgrid" data-tgrid="0"></div></div>`;
+    } else {
+      html += `<div class="panel section"><h2>${T.teamSize === 1 ? 'Entrants' : 'Teams'}</h2><div class="teamgrid" id="tGrid" data-tgrid="all"></div></div>`;
+    }
   }
   if (T.subs && T.subs.length) {
     const subPs = T.subs.map(id => T.players.find(p => p.id === id)).filter(Boolean)
@@ -1188,31 +1355,37 @@ function drawTeams(el) {
       '</tbody></table></div>';
   }
 
-  // Divisions (King/Prince) — team single/double elim only, before the bracket starts
+  // Divisions (King/Prince) - team single/double elim only, before the bracket starts
   if (T.status === 'drafted' && admin && T.competition === 'team' && (T.bracketType === 'single' || T.bracketType === 'double')) {
-    const divs = T.divisions || 0;
+    const divs = divisionsOnT() ? T.divisions : 0;
+    const fromDraft = T.formation === 'draft' && T.draft && (T.draft.division || (T.draftDone || []).length);
     html += `<div class="panel section"><h2>Divisions</h2>
-      <p class="muted small">Optionally split teams into skill divisions (e.g. King &amp; Prince) \u2014 each plays its own bracket. Auto-split by combined team rating, then adjust below.</p>
-      <div class="row" style="gap:8px;align-items:center">
+      <p class="muted small">${fromDraft
+        ? 'The draft decided the divisions: every team plays in the division its captain drafted for. You can still move a team below.'
+        : 'Optionally split the teams into divisions (e.g. King and Prince). Each plays its own bracket, on its own tab, with its own champion. Split by combined team rating, then adjust below.'}</p>
+      <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
         <span class="muted small">Split into</span>
-        <select id="divCount">${[1,2,3,4].map(n => '<option value="' + n + '"' + ((divs || 1) === n ? ' selected' : '') + '>' + (n === 1 ? 'One bracket (no split)' : n + ' divisions') + '</option>').join('')}</select>
+        <select id="divCount" style="width:auto">${[1, 2, 3, 4].map(n => '<option value="' + n + '"' + ((divs || 1) === n ? ' selected' : '') + '>' + (n === 1 ? 'One bracket (no split)' : n + ' divisions') + '</option>').join('')}</select>
+        <span id="divTopWrap" class="muted small" style="display:${(divs || 1) === 2 ? 'inline-flex' : 'none'};align-items:center;gap:6px">with the
+          <input type="number" id="divTop" min="1" max="${Math.max(1, T.teams.length - 1)}" value="${T.divisionTop || ''}" placeholder="half" style="width:70px;margin:0">
+          best in ${esc(divisionNameOf(1))}</span>
         <button class="btn ghost small" id="divApply">Apply split</button>
       </div>`;
-    if (divs > 1) {
-      const divNames = ['', 'King', 'Prince', 'Duke', 'Baron', 'Knight', 'Squire'];
-      html += '<div class="divgrid" style="margin-top:14px">';
-      for (let d = 1; d <= divs; d++) {
-        const dteams = T.teams.filter(x => (x.division || 0) === d)
-          .sort((a, b) => teamRating(b) - teamRating(a));
-        html += `<div class="divcol"><h3>${esc(divNames[d] || ('Division ' + d))} <span class="muted mono">(${dteams.length})</span></h3>`;
-        for (const tm of dteams) {
-          const opts = [];
-          for (let dd = 1; dd <= divs; dd++) opts.push('<option value="' + dd + '"' + (dd === d ? ' selected' : '') + '>' + (divNames[dd] || ('Div ' + dd)) + '</option>');
-          html += `<div class="divteam"><span>${esc(tm.name)} <span class="muted mono">${teamRating(tm)}</span></span>
-            <select data-divteam="${tm.id}">${opts.join('')}</select></div>`;
+    if (divs) {
+      const loose = T.teams.filter(x => !((x.division || 0) >= 1 && (x.division || 0) <= divs));
+      const col = (dv, list, title) => {
+        let h = `<div class="divcol"><h3>${esc(title)} <span class="muted mono">(${list.length})</span></h3>`;
+        for (const tm of list.slice().sort((a, b) => teamRating(b) - teamRating(a))) {
+          const opts = (dv ? [] : ['<option value="0" selected>-</option>']);
+          for (let dd = 1; dd <= divs; dd++) opts.push('<option value="' + dd + '"' + (dd === dv ? ' selected' : '') + '>' + esc(divisionNameOf(dd)) + '</option>');
+          h += `<div class="divteam"><span>${esc(tm.name)} <span class="muted mono">${teamRating(tm)}</span></span>
+            <select data-divteam="${tm.id}" style="width:auto">${opts.join('')}</select></div>`;
         }
-        html += '</div>';
-      }
+        return h + '</div>';
+      };
+      html += '<div class="divgrid" style="margin-top:14px">';
+      for (let dv = 1; dv <= divs; dv++) html += col(dv, divisionTeamsOf(dv), divisionNameOf(dv));
+      if (loose.length) html += col(0, loose, 'Not in a division');
       html += '</div>';
     }
     html += '</div>';
@@ -1229,6 +1402,12 @@ function drawTeams(el) {
 
   el.innerHTML = html || '<div class="panel"><div class="empty">Nothing here yet.</div></div>';
 
+  // A later division waiting for its captains reuses the same controls; its captains come from
+  // the players nobody has drafted, and its setting is stored for that division.
+  const waitingDiv = (T.status === 'draft' && T.draft && T.draft.waiting) ? T.draft.division : 0;
+  const capCandidates = waitingDiv ? T.players.filter(p => !p.teamId && !p.pending) : T.players;
+  // the settings for division 2 and below, on the signup panel
+  const paintDivHints = wireLaterDivisions(el);
   // captain-selection mode (manual vs top-N-by-rating)
   const capModeSel = document.getElementById('capMode');
   if (capModeSel) {
@@ -1236,17 +1415,17 @@ function drawTeams(el) {
     const manualWrap = document.getElementById('capManualWrap');
     const numEl = document.getElementById('capNum');
     const prevEl = document.getElementById('capPreview');
-    const ranked = T.players.filter(p => !p.pending).slice().sort((a, b) => (b.rating || 0) - (a.rating || 0));
+    const ranked = capCandidates.filter(p => !p.pending).slice().sort((a, b) => (b.rating || 0) - (a.rating || 0));
     const paintPreview = () => {
       if (!prevEl) return;
       const n = parseInt(numEl.value, 10);
       if (!isFinite(n) || n < 2) { prevEl.innerHTML = '<span class="muted">Enter a number (2 or more) to preview.</span>'; return; }
       if (ranked.length < n) {
-        prevEl.innerHTML = '<span class="warn">Only ' + ranked.length + ' signed up so far; ' + (n - ranked.length) + ' more needed before the draft can start.</span>';
+        prevEl.innerHTML = '<span class="warn">Only ' + ranked.length + (waitingDiv ? ' left for this division' : ' signed up so far') + '; ' + (n - ranked.length) + ' more needed before the draft can start.</span>';
         return;
       }
       const need = n * T.teamSize;
-      const short = ranked.length < need ? ' <span class="warn">' + ranked.length + ' signed up; ' + (need - ranked.length) + ' more needed to fill all ' + n + ' teams.</span>' : '';
+      const short = ranked.length < need ? ' <span class="warn">' + ranked.length + (waitingDiv ? ' left' : ' signed up') + '; ' + (need - ranked.length) + ' more needed to fill all ' + n + ' teams.</span>' : '';
       prevEl.innerHTML = 'Captains right now would be: ' + ranked.slice(0, n).map(p => '<strong>' + esc(p.name) + '</strong> (' + (p.rating != null ? p.rating : '\u2014') + ')').join(', ') + '.' + short;
     };
     let capCfgTimer = null;
@@ -1254,6 +1433,7 @@ function drawTeams(el) {
       clearTimeout(capCfgTimer);
       capCfgTimer = setTimeout(() => {
         const body = { action: 'set_captain_mode', mode: capModeSel.value, admin: adminToken() };
+        if (waitingDiv) body.division = waitingDiv;
         const n = parseInt(numEl.value, 10);
         if (isFinite(n) && n >= 2) body.count = n;
         api('/api/t/' + T.id + '/phase', body).catch(() => {});
@@ -1264,8 +1444,9 @@ function drawTeams(el) {
       if (ratingWrap) ratingWrap.style.display = rating ? '' : 'none';
       if (manualWrap) manualWrap.style.display = rating ? 'none' : '';
       paintPreview(); persistCfg();
+      if (typeof paintDivHints === 'function') paintDivHints();
     };
-    if (numEl) numEl.oninput = () => { paintPreview(); persistCfg(); };
+    if (numEl) numEl.oninput = () => { paintPreview(); persistCfg(); if (typeof paintDivHints === 'function') paintDivHints(); };
     paintPreview();
   }
 
@@ -1275,16 +1456,19 @@ function drawTeams(el) {
     if (Object.keys(F.capSel).length === 0 && (T.pendingCaptains || []).length) {
       for (const id of T.pendingCaptains) F.capSel[id] = 1;
     }
-    const nPlayers = T.players.length;
+    // a waiting division picks its captains from the players left; drop any stale marks
+    if (waitingDiv) for (const id of Object.keys(F.capSel)) { if (!capCandidates.some(p => p.id === id)) delete F.capSel[id]; }
+    const nPlayers = capCandidates.length;
     const updateCount = () => {
       const n = Object.keys(F.capSel).length;
       const el = document.getElementById('capCount');
       if (!el) return;
+      if (typeof paintDivHints === 'function') paintDivHints();
       if (n < 2) { el.innerHTML = '<span class="muted">Mark at least 2 captains.</span>'; return; }
       const perTeam = T.teamSize;
       const needed = n * perTeam;
       const preview = 'Bracket preview: <strong>' + n + '</strong> team' + (n === 1 ? '' : 's') + ' (' + n + ' captain' + (n === 1 ? '' : 's') + ', ' + perTeam + ' per team = ' + needed + ' players needed).';
-      const have = nPlayers >= needed ? '' : ' <span class="warn">You have ' + nPlayers + ' signed up; ' + (needed - nPlayers) + ' more needed to fill all teams.</span>';
+      const have = nPlayers >= needed ? '' : ' <span class="warn">You have ' + nPlayers + (waitingDiv ? ' left' : ' signed up') + '; ' + (needed - nPlayers) + ' more needed to fill all teams.</span>';
       el.innerHTML = preview + have;
     };
     // debounced persistence of the captain set to the server
@@ -1298,7 +1482,7 @@ function drawTeams(el) {
     const tbl = document.createElement('table');
     tbl.innerHTML = '<thead><tr><th style="width:40px">#</th><th>Name</th><th style="width:90px">Rating</th><th style="width:110px">Captain</th></tr></thead>';
     const tb = document.createElement('tbody');
-    const sorted = T.players.slice().sort((a, b) => (b.rating || 0) - (a.rating || 0));
+    const sorted = capCandidates.slice().sort((a, b) => (b.rating || 0) - (a.rating || 0));
     sorted.forEach((p, i) => {
       const tr = document.createElement('tr');
       tr.innerHTML = `<td class="mono muted">${i + 1}</td><td>${esc(p.name)}</td><td class="mono">${p.rating != null ? p.rating : '\u2014'}</td>
@@ -1325,17 +1509,23 @@ function drawTeams(el) {
     const modeEl = document.getElementById('capMode');
     const rating = modeEl && modeEl.value === 'rating';
     const body = { action: 'start_draft', admin: adminToken() };
+    const forDiv = waitingDiv ? { division: waitingDiv } : {};
     if (rating) {
       const n = parseInt((document.getElementById('capNum') || {}).value, 10);
       if (!isFinite(n) || n < 2) return toast('Enter how many captains (2 or more)', true);
       // Make sure the number the organizer is looking at is the one the server uses, even if
       // the debounced save hasn't fired yet.
-      try { await api('/api/t/' + T.id + '/phase', { action: 'set_captain_mode', mode: 'rating', count: n, admin: adminToken() }); }
+      try { await api('/api/t/' + T.id + '/phase', Object.assign({ action: 'set_captain_mode', mode: 'rating', count: n, admin: adminToken() }, forDiv)); }
       catch (e) { return toast(e.message, true); }
     } else {
       const ids = Object.keys(F.capSel);
       if (ids.length < 2) return toast('Mark at least 2 captains', true);
       body.captainIds = ids;
+      // a waiting division starts from the captains marked here, whatever its stored setting was
+      if (waitingDiv) {
+        try { await api('/api/t/' + T.id + '/phase', { action: 'set_captain_mode', mode: 'manual', division: waitingDiv, admin: adminToken() }); }
+        catch (e) { return toast(e.message, true); }
+      }
     }
     try {
       await api('/api/t/' + T.id + '/phase', body);
@@ -1415,18 +1605,20 @@ function drawTeams(el) {
     }
   }
 
-  const tg = document.getElementById('tGrid');
-  if (tg) {
+  for (const tg of el.querySelectorAll('[data-tgrid]')) {
     const ratingOf = pid => { const p = T.players.find(x => x.id === pid); return p && p.rating != null ? p.rating : null; };
     // does ANY team have a rating? if not, hide the per-player rating column and TOTAL row
     const anyRatings = T.players.some(p => p.rating != null);
-    for (const team of T.teams.slice().sort((a, b) => a.seed - b.seed)) {
+    const which = tg.dataset.tgrid;
+    const inGrid = which === 'all' ? T.teams
+      : (which === '0' ? T.teams.filter(x => !((x.division || 0) >= 1 && (x.division || 0) <= T.divisions)) : divisionTeamsOf(parseInt(which, 10)));
+    for (const team of inGrid.slice().sort((a, b) => a.seed - b.seed)) {
       const card = document.createElement('div');
       card.className = 'teamcard' + ((team.eliminated && !streamerMode) ? ' elim' : '');
 
       // imported tournaments have no individual players/ratings — just show the team name
       if (T.imported) {
-        card.innerHTML = `<h3><span>${esc(team.name)}</span><span class="seedtag">SEED ${team.seed}</span></h3>` +
+        card.innerHTML = `<h3><span>${esc(team.name)}</span><span class="seedtag">SEED ${shownSeed(team)}</span></h3>` +
           (team.finalRank ? `<div class="teamtotal"><span>PLACED</span><span class="mono">#${team.finalRank}</span></div>` : '');
         tg.appendChild(card);
         continue;
@@ -1435,7 +1627,7 @@ function drawTeams(el) {
       const openSlots = (T.status === 'draft' || T.status === 'signup') ? Math.max(0, T.teamSize - team.playerIds.length) : 0;
       const total = team.playerIds.reduce((sum, pid) => sum + (ratingOf(pid) || 0), 0);
       const canRename = admin || !!(T.viewer && T.viewer.teamId === team.id && T.teamSize > 1 && !team.captainRenamed);
-      card.innerHTML = `<h3><span>${esc(team.name)}</span><span class="seedtag">SEED ${team.seed}</span>${canRename ? '<button class="btn ghost small" data-rename="' + team.id + '" style="margin-left:6px">Rename</button>' : ''}</h3>
+      card.innerHTML = `<h3><span>${esc(team.name)}</span><span class="seedtag">SEED ${shownSeed(team)}</span>${canRename ? '<button class="btn ghost small" data-rename="' + team.id + '" style="margin-left:6px">Rename</button>' : ''}</h3>
         <ul>${team.playerIds.map(pid => {
           const r = ratingOf(pid);
           return `<li style="display:flex;justify-content:space-between;gap:8px"><span>${esc(playerName(pid))}${pid === team.captainId && T.teamSize > 1 ? '<span class="captag">CAPTAIN</span>' : ''}</span>${anyRatings ? '<span class="mono muted">' + (r != null ? r : '\u2014') + '</span>' : ''}</li>`;
@@ -1453,14 +1645,24 @@ function drawTeams(el) {
     });
   }
 
+  const divCount = document.getElementById('divCount');
+  if (divCount) divCount.onchange = () => {
+    const w = document.getElementById('divTopWrap');
+    if (w) w.style.display = divCount.value === '2' ? 'inline-flex' : 'none';
+  };
   const divApply = document.getElementById('divApply');
   if (divApply) divApply.onclick = async () => {
     const n = parseInt(document.getElementById('divCount').value, 10) || 1;
-    try { await api('/api/t/' + T.id + '/split_divisions', { divisions: n, admin: adminToken() }); await refresh(); }
+    const body = { divisions: n, admin: adminToken() };
+    const topEl = document.getElementById('divTop');
+    if (n === 2 && topEl && topEl.value) body.top = parseInt(topEl.value, 10) || 0;
+    try { await api('/api/t/' + T.id + '/split_divisions', body); await refresh(); toast(n > 1 ? 'Split into ' + n + ' divisions' : 'One bracket'); }
     catch (e) { toast(e.message, true); }
   };
   document.querySelectorAll('[data-divteam]').forEach(sel => sel.onchange = async () => {
-    try { await api('/api/t/' + T.id + '/set_division', { teamId: sel.dataset.divteam, division: parseInt(sel.value, 10), admin: adminToken() }); await refresh(); }
+    const dv = parseInt(sel.value, 10);
+    if (!dv) return;   // "-" is where a team without a division starts; it is not a choice
+    try { await api('/api/t/' + T.id + '/set_division', { teamId: sel.dataset.divteam, division: dv, admin: adminToken() }); await refresh(); }
     catch (e) { toast(e.message, true); }
   });
 
@@ -1508,7 +1710,13 @@ function openStartConfig() {
       });
   }
 
-  const R = log2i(nextPow2(n));
+  // With divisions the lengths are set for the largest division; the others play the tail.
+  const divs = divisionsOnT() ? T.divisions : 0;
+  const sizes = [];
+  for (let d = 1; d <= divs; d++) sizes.push(divisionTeamsOf(d).length);
+  const R = log2i(nextPow2(divs ? Math.max.apply(null, sizes.concat([2])) : n));
+  const divNote = divs ? '<p class="muted small">' + esc(sizes.map((k, i) => divisionNameOf(i + 1) + ' ' + k).join(', ') + ' teams.')
+    + ' The lengths below are for the biggest division; a smaller one plays them counted back from the final: its final is the final below, its semi-finals the semi-finals below, and so on.</p>' : '';
 
   if (T.bracketType === 'single') {
     const rows = [];
@@ -1525,6 +1733,7 @@ function openStartConfig() {
     return modal(`
       <h3>Bracket setup — single elimination</h3>
       <p class="muted small">${n} teams, ${R} round${R > 1 ? 's' : ''}. Set the best-of per round.</p>
+      ${divNote}
       ${rows.join('')}
       ${thirdOK ? `<label style="display:flex;align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text);margin-top:10px">
         <input type="checkbox" id="cfgThird"${T.plan && T.plan.thirdPlace ? ' checked' : ''}> 3rd place match: the two beaten semi-finalists play for 3rd (same length as the semi-finals)
@@ -1560,6 +1769,7 @@ function openStartConfig() {
     return modal(`
       <h3>Bracket setup — double elimination</h3>
       <p class="muted small">${n} teams. Winners bracket: ${R} rounds, losers bracket: ${lbR} rounds.</p>
+      ${divNote}
       <label>Winners bracket</label>${wbRows.join('')}
       <label>Losers bracket</label>${lbRows.join('')}
       <label>Grand final</label>

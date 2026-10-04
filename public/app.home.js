@@ -413,6 +413,20 @@ async function renderHost() {
               <p class="muted small" style="margin:8px 0 0">The single top-2 final above is replaced by the bracket while this is on.</p>
             </div>
           </div>
+
+          <div id="divOpts" style="display:none">
+            <label>Divisions <span class="muted small">(optional - e.g. a King and a Prince bracket)</span></label>
+            <select id="cDivisions">
+              <option value="0" selected>One bracket</option>
+              <option value="2">2 divisions</option>
+              <option value="3">3 divisions</option>
+              <option value="4">4 divisions</option>
+            </select>
+            <div id="divNamesRow" class="row" style="gap:10px;margin-top:8px;display:none;flex-wrap:wrap">
+              ${[1, 2, 3, 4].map(d => '<div style="flex:1;min-width:120px" data-divnamebox="' + d + '"><div class="muted small">Division ' + d + ' name</div><input type="text" id="cDivName' + d + '" maxlength="24" placeholder="' + DIVISION_DEFAULT_NAMES[d - 1] + '" autocomplete="off"></div>').join('')}
+            </div>
+            <p class="muted small" id="divHow" style="margin:8px 0 0"></p>
+          </div>
         </div>
 
         <div id="stopAtOpts">
@@ -691,6 +705,27 @@ async function renderHost() {
       perMatch.innerHTML += '<option value="' + n + '"' + (n === Math.min(cur, maxL) ? ' selected' : '') + '>' + n + players + '</option>';
     }
   };
+  // Divisions: separate brackets for single or double elimination team events. How the teams get
+  // into them depends on the formation, so the line under the choice says which.
+  const syncDivOpts = () => {
+    const box = document.getElementById('divOpts');
+    if (!box) return;
+    const allowed = comp.value === 'team' && (cBracket.value === 'single' || cBracket.value === 'double');
+    box.style.display = allowed ? '' : 'none';
+    const n = parseInt((document.getElementById('cDivisions') || {}).value, 10) || 0;
+    const row = document.getElementById('divNamesRow');
+    if (row) row.style.display = n > 1 ? 'flex' : 'none';
+    document.querySelectorAll('[data-divnamebox]').forEach(el => { el.style.display = parseInt(el.dataset.divnamebox, 10) <= n ? '' : 'none'; });
+    const how = document.getElementById('divHow');
+    if (!how) return;
+    if (n < 2) { how.textContent = 'Everyone plays in one bracket.'; return; }
+    const nm = d => ((document.getElementById('cDivName' + d) || {}).value || '').trim() || DIVISION_DEFAULT_NAMES[d - 1];
+    const draft = formation.value === 'draft' && size.value !== '1';
+    how.textContent = draft
+      ? 'The ' + nm(1) + ' captains draft first, and everyone they pick plays in the ' + nm(1) + ' bracket. Whoever is left is drafted into the ' + nm(2) + ' bracket by its own captains' + (n > 2 ? ', and so on down' : '') + '. You set how many captains each division gets on the Teams tab.'
+      : 'When signups close, the teams are split by combined rating: the strongest into ' + nm(1) + ', the next into ' + nm(2) + (n > 2 ? ', and so on' : '') + '. You can move teams between divisions before the start. Each division plays its own bracket and has its own winner.';
+  };
+
   const syncVis = () => {
     const isFfa = comp.value === 'ffa';
     document.getElementById('teamOpts').style.display = isFfa ? 'none' : '';
@@ -706,8 +741,13 @@ async function renderHost() {
     document.getElementById('ffaElimOpts').style.display = ffaMode.value === 'elim' ? '' : 'none';
     document.getElementById('cFfaCutTo').style.display = cutMode.value === '1' ? '' : 'none';
     document.getElementById('cFfaFinalSize').style.display = finalMode.value === '1' ? '' : 'none';
+    syncDivOpts();
     syncPerMatch();
   };
+  ['cDivisions', 'cDivName1', 'cDivName2', 'cDivName3', 'cDivName4'].forEach(id => {
+    const e = document.getElementById(id);
+    if (e) { e.addEventListener('change', syncDivOpts); e.addEventListener('input', syncDivOpts); }
+  });
   comp.onchange = syncVis; size.onchange = syncVis; formation.onchange = syncVis;
   cBracket.onchange = syncVis; ffaSize.onchange = syncVis; ffaMode.onchange = syncVis;
   cutMode.onchange = syncVis; finalMode.onchange = syncVis;
@@ -884,6 +924,8 @@ async function renderHost() {
     else { if (size) size.value = t.teamSize; if (formation) formation.value = t.formation || 'draft'; if (cBracket) cBracket.value = t.bracketType || 'single'; }
     setv('cDraftOrder', t.draftOrder || 'linear');
     setv('cSeed', t.seeding || '');
+    setv('cDivisions', String(t.divisions || 0));
+    for (let d = 1; d <= 4; d++) setv('cDivName' + d, ((t.divisionNamesSet || [])[d - 1]) || '');
     setc('pPickPhase', t.pickOpponents); setv('pPickMins', t.pickMinutes || 0); setv('pPickMode', t.pickMode || 'half');
     setv('pTiebreak', t.tiebreak || 'gd');
     setc('pStopOn', t.stopAtAlive); setv('pStopAt', t.stopAtAlive || 4);
@@ -973,6 +1015,8 @@ async function renderHost() {
         draftOrder: document.getElementById('cDraftOrder').value,
         bracketType: bt,
         plan,
+        divisions: (!isFfa && (bt === 'single' || bt === 'double')) ? ((document.getElementById('cDivisions') || {}).value || 0) : 0,
+        divisionNames: [1, 2, 3, 4].map(d => ((document.getElementById('cDivName' + d) || {}).value || '').trim()),
         maxTeams: document.getElementById('cMaxTeams').value,
         minTeams: document.getElementById('cMinTeams').value,
         perMatch: perMatch.value,
@@ -1169,7 +1213,7 @@ function myTurnInfo() {
   const memberTeam = me.memberTeamId || me.teamId;
   if (memberTeam && T.matches) {
     const pm = T.matches.find(m => m.pendingReport && (m.pendingReport.byTeam === m.team1 ? m.team2 : m.team1) === memberTeam && m.pendingReport.byTeam !== memberTeam);
-    if (pm) return { text: 'Your opponent reported ' + pm.pendingReport.score1 + '\u2013' + pm.pendingReport.score2 + ' \u2014 confirm or reject it.', tab: 'bracket', cta: 'Review score' };
+    if (pm) return { text: 'Your opponent reported ' + pm.pendingReport.score1 + '\u2013' + pm.pendingReport.score2 + ' \u2014 confirm or reject it.', tab: bracketTabFor(pm), cta: 'Review score' };
   }
   // organizer: signup requests waiting
   if (me.organizer && T.status === 'signup') {
@@ -1197,7 +1241,7 @@ function myTurnInfo() {
     }
   }
   // 1. captain's draft pick
-  if (T.status === 'draft' && T.draft && T.draft.order) {
+  if (T.status === 'draft' && T.draft && T.draft.order && !T.draft.waiting) {
     const turnTeam = T.draft.order[T.draft.current];
     if (turnTeam && myTeam && turnTeam === myTeam) {
       return { text: "It's your pick — choose a player for your team.", tab: 'teams', cta: 'Go to the draft' };
@@ -1288,10 +1332,12 @@ function drawTournament() {
   const phaseIdx = { signup: 0, draft: 1, drafted: 1, running: 2, finished: 3 }[T.status];
   const midStep = T.competition === 'ffa' ? 'Teams' : (T.formation === 'draft' ? 'Draft' : 'Teams');
   // A Swiss is its rounds until its playoffs exist; then the step, like the tab, is the bracket.
-  const lastStep = T.bracketType === 'swiss' ? bracketTabName(T) : 'Bracket';
+  const lastStep = T.bracketType === 'swiss' ? bracketTabName(T) : (divisionsOnT() ? 'Brackets' : 'Bracket');
   const steps = ['Signups', midStep, lastStep, 'Results'];
 
   const tabs = ['overview', 'news', 'chat', 'players', 'teams', 'bracket'];
+  // King / Prince: one bracket tab per division
+  if (divisionsOnT()) for (let d = 2; d <= T.divisions; d++) tabs.push(divisionTab(d));
   // Vetoes tab appears once the bracket is running and vetoes are enabled - EITHER kind.
   // Faction vetoes are configured independently of map vetoes (`fveto_config` never looks at
   // `t.veto`), so a 1v1 with faction vetoes on and map vetoes off used to render no Vetoes tab
@@ -1310,6 +1356,8 @@ function drawTournament() {
   // Stats: a public wrap-up, only once the tournament is over.
   if (T.status === 'finished') tabs.push('stats');
   if (vetoActive) tabs.push('vetoes');
+  // Predictions: open to everyone logged in until the first match, the leaderboard after that.
+  if (typeof predictTabVisible === 'function' && predictTabVisible()) tabs.push('predictions');
   // Maps tab: always available (useful overview of maps and where they're played)
   tabs.push('maps');
   tabs.push('standings');
@@ -1321,11 +1369,13 @@ function drawTournament() {
     if (tb === 'chat') return 'Chat';
     if (tb === 'log') return 'Log';
     if (tb === 'teams' && T.status === 'draft') return 'Draft';
+    if (isBracketTab(tb) && divisionsOnT()) return divisionNameOf(tabDivision(tb)) + ' bracket';
     if (tb === 'bracket') return bracketTabName(T);
     if (tb === 'vetoes') {
       const pending = T.matches.filter(m => m.veto && !m.veto.done).length;
       return pending > 0 ? 'Vetoes (' + pending + ')' : 'Vetoes';
     }
+    if (tb === 'predictions') return 'Predictions';
     return tb;
   };
 
@@ -1361,6 +1411,11 @@ function drawTournament() {
             const owed = myVetoStepCount();
             if (owed > 0) badge = owed;
           }
+          // an open prediction stage this viewer has not filled in yet
+          if (tb === 'predictions' && tb !== currentTab && typeof predictBadgeCount === 'function') {
+            const n = predictBadgeCount();
+            if (n > 0) badge = { quiet: n };
+          }
           const badgeHtml = !badge ? ''
             : (typeof badge === 'object'
                 ? '<span class="tab-badge quiet">' + (badge.quiet > 9 ? '9+' : badge.quiet) + '</span>'
@@ -1386,7 +1441,7 @@ function drawTournament() {
         </div>
       </div>` : ''}
     </div>
-    <div id="tabBody" class="${currentTab === 'bracket' && T.competition !== 'ffa' && T.bracketType !== 'swiss' ? 'widepage' : 'page'}"></div>`;
+    <div id="tabBody" class="${isBracketTab(currentTab) && T.competition !== 'ffa' && T.bracketType !== 'swiss' ? 'widepage' : 'page'}"></div>`;
 
   if (typeof stopChatPoll === 'function' && currentTab !== 'chat') stopChatPoll();
   app.querySelectorAll('.tab').forEach(b => b.onclick = () => { if (typeof stopChatPoll === 'function') stopChatPoll(); currentTab = b.dataset.tab; syncTabURL(); drawTournament(); });
@@ -1426,7 +1481,7 @@ function drawTournament() {
   const banner = turnBannerHTML();
   if (banner) {
     const host = document.createElement('div');
-    host.className = currentTab === 'bracket' && T.competition !== 'ffa' && T.bracketType !== 'swiss' ? 'widepage' : 'page';
+    host.className = isBracketTab(currentTab) && T.competition !== 'ffa' && T.bracketType !== 'swiss' ? 'widepage' : 'page';
     host.style.paddingBottom = '0';
     host.innerHTML = banner;
     const tb = app.querySelector('#tabBody');
@@ -1442,10 +1497,11 @@ function drawTournament() {
   else if (currentTab === 'log') drawTlog(body);
   else if (currentTab === 'players') drawPlayers(body);
   else if (currentTab === 'teams') drawTeams(body);
-  else if (currentTab === 'bracket') drawBracket(body);
+  else if (isBracketTab(currentTab)) drawBracket(body, divisionsOnT() ? tabDivision(currentTab) : 0);
   else if (currentTab === 'matches') drawMatchesTab(body);
   else if (currentTab === 'stats') drawStats(body);
   else if (currentTab === 'vetoes') drawVetoes(body);
+  else if (currentTab === 'predictions') drawPredictions(body);
   else if (currentTab === 'maps') drawMaps(body);
   else if (currentTab === 'standings') drawStandings(body);
   else if (currentTab === 'admin') drawAdmin(body);
@@ -1730,7 +1786,14 @@ function drawOverview(el) {
     </div>`;
   }
 
-  if (T.championTeamId) {
+  if (divisionsOnT()) {
+    // one champion per division, top division first
+    const champs = [];
+    for (let d = 1; d <= T.divisions; d++) { const c = divisionChampionOf(d); if (c) champs.push({ d, c }); }
+    if (champs.length) {
+      html += '<div class="champ-row">' + champs.map(x => `<div class="champ"><div class="champ-label">${esc(divisionNameOf(x.d))} champion</div><h1>${esc(teamName(x.c))}</h1></div>`).join('') + '</div>';
+    }
+  } else if (T.championTeamId) {
     html += `<div class="champ"><div class="champ-label">Champion</div><h1>${esc(teamName(T.championTeamId))}</h1></div>`;
   }
 
@@ -1770,15 +1833,26 @@ function drawOverview(el) {
   }
 
   if (T.status === 'draft' && T.draft) {
-    const turnTeam = teamName(T.draft.order[T.draft.current]);
-    html += `<div class="draft-turn">Draft in progress — <strong>${esc(turnTeam)}</strong> is on the clock. Follow it in the <a href="#" data-goto="teams">Draft</a> tab.</div>`;
+    const divName = (T.draft.division && divisionsOnT()) ? divisionNameOf(T.draft.division) : '';
+    if (T.draft.waiting) {
+      html += `<div class="draft-turn">${esc(divName)} draft next - the organizer is choosing its captains. Follow it in the <a href="#" data-goto="teams">Draft</a> tab.</div>`;
+    } else {
+      const turnTeam = teamName(T.draft.order[T.draft.current]);
+      html += `<div class="draft-turn">${divName ? esc(divName) + ' draft' : 'Draft'} in progress - <strong>${esc(turnTeam)}</strong> is on the clock. Follow it in the <a href="#" data-goto="teams">Draft</a> tab.</div>`;
+    }
+  }
+
+  // Predictions open and this viewer has not made theirs (or it no longer fits the draw).
+  if (typeof predictBadgeCount === 'function' && predictBadgeCount() > 0) {
+    const pz = T.predict && T.predict.prize;
+    html += `<div class="draft-turn">Predictions are open until the first match is played - <a href="#" data-goto="predictions">make yours</a>${pz ? '. Prize for a perfect prediction: <strong>' + esc(pz) + '</strong>' : ''}.</div>`;
   }
 
   if (T.status === 'running' || T.status === 'finished') {
     const open = T.matches.filter(m => m.status === 'ready' || m.status === 'live')
       .sort((a, b) => brOrder(a) - brOrder(b) || a.round - b.round || a.index - b.index);
-    const done = T.matches.filter(m => m.status === 'done')
-      .sort((a, b) => b.round - a.round || a.index - b.index).slice(0, 8);
+    // newest first in playing order, so a Swiss round never lands above the playoffs after it
+    const done = sortByPlay(T.matches.filter(m => m.status === 'done'), true).slice(0, 8);
     // The "up next" queue was removed: the Matches tab lists every match with far more detail,
     // filtered into My matches / ongoing / undecided / concluded, so this duplicated it.
     html += `<div class="panel section"><h2>Recent results</h2><div class="queue" id="q2">
@@ -1887,7 +1961,7 @@ function fillQueue(el, matches, withReport) {
       if (m.score1 != null) inner += `<span class="qscore">${m.score1} — ${m.score2}</span>`;
       if (m.status === 'live') inner += `<span class="livechip">LIVE</span>`;
     }
-    const maps = mapsFor(m.bracket, m.round);
+    const maps = mapsFor(m.bracket, poolRoundOf(m.bracket, m.round, m.division));
     if (maps.length) inner += `<span class="mono small muted" title="Maps">${esc(maps.map((mp, i) => 'G' + (i + 1) + ': ' + mapName(mp)).join(' · '))}</span>`;
     const showBtn = !T.imported && withReport && (m.status === 'done' ? viewerIsAdmin() : canReportMatch(m));
     if (showBtn) inner += `<button class="btn amber small" data-m="${m.id}">Report</button>`;

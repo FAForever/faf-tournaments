@@ -378,18 +378,29 @@ function drawStandings(el) {
     return;
   }
 
-  // elimination formats: rank by how far each team got
+  // elimination formats: rank by how far each team got. With divisions, one table per division,
+  // each with its own champion and places - the King bracket first.
+  if (divisionsOnT()) {
+    let html = '';
+    for (let d = 1; d <= T.divisions; d++) {
+      html += `<div class="panel section"><h2>${esc(divisionNameOf(d))} <span class="h2-strong">Standings</span></h2>${eliminationPlacingsTable(divisionTeamsOf(d), divisionChampionOf(d), d)}</div>`;
+    }
+    el.innerHTML = html;
+    return;
+  }
   el.innerHTML = `<div class="panel section"><h2>Standings</h2>${eliminationPlacingsTable(T.teams)}</div>`;
 }
 
 // Place, name and result of everyone in an elimination bracket, best first: by how far each got.
 // A 3rd place match splits the two beaten semi-finalists (3rd and 4th); while it is still to be
 // played they sit behind the beaten finalist, as "plays for 3rd place".
-function eliminationPlacingsTable(teams) {
-  const m3 = thirdPlaceMatchOf(T);
+function eliminationPlacingsTable(teams, champ, division) {
+  // `champ`/`division`: one division's table, with that division's champion and round names
+  const champion = champ !== undefined ? champ : T.championTeamId;
+  const m3 = division ? null : thirdPlaceMatchOf(T);
   const for3rd = id => !!(m3 && m3.status !== 'done' && m3.status !== 'bye' && (m3.team1 === id || m3.team2 === id));
   const stage = team => {
-    if (T.championTeamId === team.id) return 1e9;
+    if (champion === team.id) return 1e9;
     if (team.out && team.out.bracket === '3p') return (team.out.round - 1) + (team.out.place === 3 ? 0.6 : 0.5);
     if (!team.out) return for3rd(team.id) ? (m3.round - 1) + 0.55 : 1e8; // still alive
     if (team.out.bracket === 'gf') return 1e6;
@@ -402,11 +413,11 @@ function eliminationPlacingsTable(teams) {
     shown++;
     const st = stage(team);
     if (st !== prevStage) { rank = shown; prevStage = st; }
-    const label = T.championTeamId === team.id ? '1' : (!team.out ? '—' : String(rank));
-    const note = T.championTeamId === team.id ? '🏆 Champion' : (!team.out ? (for3rd(team.id) ? 'Plays for 3rd place' : 'Still in') :
+    const label = champion === team.id ? '1' : (!team.out ? '—' : String(rank));
+    const note = champion === team.id ? '🏆 Champion' : (!team.out ? (for3rd(team.id) ? 'Plays for 3rd place' : 'Still in') :
       team.out.bracket === '3p' ? (team.out.place === 3 ? 'Won the 3rd place match' : 'Lost the 3rd place match') :
-      team.out.bracket === 'gf' || roundKeyLabel(team.out.bracket, team.out.round) === 'Final' ? 'Lost the final' :
-      'Out in ' + roundKeyLabel(team.out.bracket, team.out.round).toLowerCase());
+      team.out.bracket === 'gf' || roundKeyLabel(team.out.bracket, team.out.round, division) === 'Final' ? 'Lost the final' :
+      'Out in ' + roundKeyLabel(team.out.bracket, team.out.round, division).toLowerCase());
     return `<tr class="${label === '1' ? 'rank1' : label === '2' ? 'rank2' : (label === '3' ? 'rank3' : '')}">
       <td class="mono">${label}</td><td>${esc(team.name)}</td><td class="small muted">${esc(note)}</td></tr>`;
   }).join('');
@@ -658,6 +669,23 @@ async function drawAdmin(el) {
         <label id="af_thirdWrap" style="display:${T.bracketType === 'single' ? 'flex' : 'none'};align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text);margin-top:12px">
           <input type="checkbox" id="af_third"${p.thirdPlace ? ' checked' : ''}> 3rd place match: the two beaten semi-finalists play for 3rd
         </label>
+        ${(() => {
+          // Divisions (King / Prince): their own brackets. Once a draft is under way it decides
+          // them, so the number is fixed until signups are reopened; the names stay editable.
+          const nDiv = T.divisions || 0;
+          const divLocked = T.status === 'draft'
+            || (T.status === 'drafted' && T.formation === 'draft' && !!T.draft && !!(T.draft.division || (T.draftDone || []).length));
+          const names = T.divisionNamesSet || [];
+          return `<div id="af_divWrap" style="display:${(T.bracketType === 'single' || T.bracketType === 'double') ? 'block' : 'none'}">
+            <label>Divisions</label>
+            <select id="af_divisions"${divLocked ? ' disabled' : ''}>${[0, 2, 3, 4].map(n => '<option value="' + n + '"' + (n === nDiv ? ' selected' : '') + '>' + (n ? n + ' divisions' : 'One bracket') + '</option>').join('')}</select>
+            ${divLocked ? '<div class="muted small" style="margin-top:4px">The draft decides the divisions, so their number is fixed until signups are reopened. The names can still be changed.</div>'
+              : (T.status === 'drafted' ? '<div class="muted small" style="margin-top:4px">Changing this splits the locked teams by rating again. Move single teams on the Teams tab.</div>' : '')}
+            <div id="af_divNames" class="row" style="gap:10px;margin-top:8px;flex-wrap:wrap">
+              ${[1, 2, 3, 4].map(d => '<div style="flex:1;min-width:110px" data-afdivname="' + d + '"><div class="muted small">Division ' + d + ' name</div><input type="text" id="af_divName' + d + '" maxlength="24" placeholder="' + DIVISION_DEFAULT_NAMES[d - 1] + '" value="' + esc(names[d - 1] || '') + '" autocomplete="off"></div>').join('')}
+            </div>
+          </div>`;
+        })()}
         <div id="af_pSwiss" style="display:none">
           <label>Match lengths</label>
           <div class="row" style="gap:10px">
@@ -1564,6 +1592,12 @@ async function drawAdmin(el) {
       g('af_pDouble').style.display = (bt === 'double' && !perRound) ? '' : 'none';
       g('af_pSwiss').style.display = bt === 'swiss' ? '' : 'none';
       if (g('af_thirdWrap')) g('af_thirdWrap').style.display = bt === 'single' ? 'flex' : 'none';
+      if (g('af_divWrap')) {
+        g('af_divWrap').style.display = (bt === 'single' || bt === 'double') ? 'block' : 'none';
+        const nd = parseInt((g('af_divisions') || {}).value, 10) || 0;
+        el.querySelectorAll('[data-afdivname]').forEach(x => { x.style.display = parseInt(x.dataset.afdivname, 10) <= nd ? '' : 'none'; });
+        if (g('af_divNames')) g('af_divNames').style.display = nd > 1 ? 'flex' : 'none';
+      }
       if (g('af_sw2thirdWrap')) g('af_sw2thirdWrap').style.display = (g('af_sw2type') && g('af_sw2type').value === 'double') ? 'none' : 'flex';
       if (g('af_swCutBox')) g('af_swCutBox').style.display = (g('af_swcuts') && g('af_swcuts').checked) ? 'block' : 'none';
       if (g('af_sw2Box')) g('af_sw2Box').style.display = (g('af_sw2') && g('af_sw2').checked) ? 'block' : 'none';
@@ -1609,7 +1643,7 @@ async function drawAdmin(el) {
       g('af_ffinalsize').style.display = g('af_ffinalmode').value === '1' ? '' : 'none';
       syncPm();
     };
-    for (const id of ['af_comp', 'af_size', 'af_form', 'af_bt', 'af_fsize', 'af_fmode', 'af_fcutmode', 'af_ffinalmode', 'af_perRound', 'af_swcuts', 'af_sw2', 'af_pick', 'af_stopOn', 'af_pickMode', 'af_swwin', 'af_swloss', 'af_sw2type']) { const e = g(id); if (e) e.onchange = sync; }
+    for (const id of ['af_comp', 'af_size', 'af_form', 'af_bt', 'af_fsize', 'af_fmode', 'af_fcutmode', 'af_ffinalmode', 'af_perRound', 'af_swcuts', 'af_sw2', 'af_pick', 'af_stopOn', 'af_pickMode', 'af_swwin', 'af_swloss', 'af_sw2type', 'af_divisions']) { const e = g(id); if (e) e.onchange = sync; }
     sync();
 
     g('af_save').onclick = async () => {
@@ -1633,6 +1667,10 @@ async function drawAdmin(el) {
         if (g('af_tiebreak') && g('af_bt').value === 'swiss') body.tiebreak = g('af_tiebreak').value;
         body.bracketType = g('af_bt').value;
         body.perRoundBo = (g('af_perRound') && g('af_perRound').checked) ? 1 : 0;
+        if ((g('af_bt').value === 'single' || g('af_bt').value === 'double') && g('af_divisions')) {
+          if (!g('af_divisions').disabled) body.divisions = g('af_divisions').value;
+          body.divisionNames = [1, 2, 3, 4].map(d => ((g('af_divName' + d) || {}).value || '').trim());
+        }
         if (g('af_bt').value === 'single') body.plan = { early: g('af_early').value, semi: g('af_semi').value, final: g('af_final').value, thirdPlace: (g('af_third') && g('af_third').checked) ? 1 : 0 };
         else if (g('af_bt').value === 'double') body.plan = { wb: g('af_wb').value, wbFinal: g('af_wbf').value, lb: g('af_lb').value, lbFinal: g('af_lbf').value, gf: g('af_gf').value, lbHandicap: g('af_hcap').checked };
         else {
@@ -2018,17 +2056,26 @@ async function mountChat(host, room, label, opts) {
     if (!document.body.contains(host)) { destroyChat(inst); return; }
     try {
       const tok = viewToken();
-      const r = await api('/api/t/' + T.id + '/chat_read?room=' + encodeURIComponent(room) + (inst.since ? '&since=' + inst.since : '') + (tok ? '&token=' + encodeURIComponent(tok) : ''));
+      // Only the poll asks for what is newer than the last message; a full load asks for the
+      // whole room. A full load used to send `since` too, got nothing back and emptied the
+      // panel - which is what deleting (or muting) from it did.
+      const since = incremental ? inst.since : 0;
+      const r = await api('/api/t/' + T.id + '/chat_read?room=' + encodeURIComponent(room) + (since ? '&since=' + since : '') + (tok ? '&token=' + encodeURIComponent(tok) : ''));
       if (inst.dead) return;
       if (r.muted) note.textContent = 'You are muted by an organizer — you can read but not post.';
+      // A message was deleted since this panel last loaded the room. The poll only ever sees
+      // newer messages, so it would keep showing the deleted one: load the room again instead.
+      if (incremental && r.rev !== undefined && inst.rev !== undefined && r.rev !== inst.rev) { await load(false); return; }
+      if (r.rev !== undefined) inst.rev = r.rev;
       const incoming = r.messages || [];
-      if (incoming.length) {
-        if (incremental) inst.msgs = inst.msgs.concat(incoming);
-        else inst.msgs = incoming;
+      if (!incremental) {
+        inst.msgs = incoming;
+        inst.since = incoming.length ? incoming[incoming.length - 1].at : 0;
+        renderChatMessages(logEl, inst.msgs);
+      } else if (incoming.length) {
+        inst.msgs = inst.msgs.concat(incoming);
         inst.since = inst.msgs[inst.msgs.length - 1].at;
         renderChatMessages(logEl, inst.msgs);
-      } else if (!incremental) {
-        inst.msgs = []; renderChatMessages(logEl, inst.msgs);
       }
       // Reading the room clears its unread server-side, but the badges come from the cached
       // tournament view, and the poll deliberately doesn't redraw while you're in chat. Clear
@@ -2298,7 +2345,7 @@ async function drawChatTab(el) {
 }
 
 function openMatchChat(m) {
-  const label = mLabel(m) + ' — ' + teamName(m.team1) + ' vs ' + teamName(m.team2);
+  const label = mLabelFull(m) + ' - ' + teamName(m.team1) + ' vs ' + teamName(m.team2);
   const room = 'match:' + m.id;
   modal(`<h3>Match chat</h3><div id="mcHost" class="chat-compact"></div>
     <div class="actions"><button class="btn ghost" id="mcClose">Close</button></div>`, root => {
@@ -2345,25 +2392,62 @@ function route() {
   refreshPending();
 }
 
+// Hall of Fame: players only - a team's win counts for each of its players. Searchable by name or
+// FAF id, 100 to a page. The search and page live in the address (/hall?q=&page=) so a result can
+// be linked; the server does the filtering and paging.
+let _hofTimer = null;
 async function renderHall() {
   setTitle('Hall of Fame');
   drawTopbar('');
   const app = document.getElementById('app');
-  app.innerHTML = '<div class="page"><h1 style="margin:0 0 14px">Hall of Fame</h1><div id="hofBody"><div class="panel"><div class="empty">Loading…</div></div></div></div>';
+  const qs = new URLSearchParams(location.search);
+  const q0 = qs.get('q') || '';
+  app.innerHTML = `<div class="page"><h1 style="margin:0 0 14px">Hall of Fame</h1>
+    <div class="panel section">
+      <div class="hof-search"><input type="text" id="hofQ" placeholder="Search a player by name or FAF id" maxlength="60" autocomplete="off" value="${esc(q0)}"></div>
+      <div id="hofBody"><div class="empty">Loading\u2026</div></div>
+    </div></div>`;
+  const inp = document.getElementById('hofQ');
+  inp.oninput = () => {
+    clearTimeout(_hofTimer);
+    _hofTimer = setTimeout(() => loadHall(inp.value.trim(), 1), 250);
+  };
+  await loadHall(q0, parseInt(qs.get('page'), 10) || 1);
+}
+async function loadHall(q, page) {
+  const body = document.getElementById('hofBody');
+  if (!body) return;
   let data;
-  try { const r = await fetch('/api/halloffame'); data = await r.json(); if (!r.ok) throw new Error(data.error || 'Failed to load'); }
-  catch (e) { document.getElementById('hofBody').innerHTML = '<div class="panel"><div class="empty">' + esc(e.message) + '</div></div>'; return; }
-  const players = data.players || [], teams = data.teams || [];
-  let html = '<div class="panel section"><h2>Players <span class="muted small">(by championships)</span></h2>';
-  if (!players.length) html += '<div class="empty">No results yet — win a tournament to get on the board.</div>';
-  else html += '<table><thead><tr><th>#</th><th>Player</th><th>Wins</th><th>Entered</th></tr></thead><tbody>' +
-    players.map((p, i) => `<tr><td class="muted">${i + 1}</td><td>${esc(p.name)}</td><td class="mono">${p.wins}</td><td class="mono muted">${p.entered}</td></tr>`).join('') + '</tbody></table>';
-  html += '</div><div class="panel section"><h2>Teams <span class="muted small">(by championships)</span></h2>';
-  if (!teams.length) html += '<div class="empty">No champions yet.</div>';
-  else html += '<table><thead><tr><th>#</th><th>Team</th><th>Wins</th></tr></thead><tbody>' +
-    teams.map((t, i) => `<tr><td class="muted">${i + 1}</td><td>${esc(t.name)}</td><td class="mono">${t.wins}</td></tr>`).join('') + '</tbody></table>';
-  html += '</div>';
-  document.getElementById('hofBody').innerHTML = html;
+  try {
+    const r = await fetch('/api/halloffame?q=' + encodeURIComponent(q || '') + '&page=' + (page || 1));
+    data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'Failed to load');
+  } catch (e) { body.innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; return; }
+  // keep the address in step, without adding a history entry per keystroke
+  if (location.pathname === '/hall') {
+    const p = new URLSearchParams();
+    if (data.q) p.set('q', data.q);
+    if (data.page > 1) p.set('page', String(data.page));
+    history.replaceState(null, '', '/hall' + (p.toString() ? '?' + p.toString() : ''));
+  }
+  const players = data.players || [];
+  if (!data.all) { body.innerHTML = '<div class="empty">No results yet - win a tournament to get on the board.</div>'; return; }
+  const count = data.q
+    ? '<p class="muted small" style="margin:0 0 8px">' + data.total + ' of ' + data.all + ' players match</p>'
+    : '<p class="muted small" style="margin:0 0 8px">' + data.all + ' players, by championships</p>';
+  if (!players.length) { body.innerHTML = count + '<div class="empty">No player matches \u201c' + esc(data.q) + '\u201d.</div>'; return; }
+  const pager = data.pages > 1 ? `<div class="hof-pager">
+      <button class="btn ghost small" data-hofpage="${data.page - 1}"${data.page <= 1 ? ' disabled' : ''}>\u2039 Previous</button>
+      <span class="muted small">Page ${data.page} of ${data.pages}</span>
+      <button class="btn ghost small" data-hofpage="${data.page + 1}"${data.page >= data.pages ? ' disabled' : ''}>Next \u203a</button>
+    </div>` : '';
+  body.innerHTML = count + '<table><thead><tr><th>#</th><th>Player</th><th>Wins</th><th>Entered</th></tr></thead><tbody>' +
+    players.map(p => `<tr><td class="muted">${p.rank}</td><td>${esc(p.name)}</td><td class="mono">${p.wins}</td><td class="mono muted">${p.entered}</td></tr>`).join('') +
+    '</tbody></table>' + pager;
+  body.querySelectorAll('[data-hofpage]').forEach(b => b.onclick = () => {
+    loadHall(data.q, parseInt(b.dataset.hofpage, 10) || 1);
+    try { window.scrollTo(0, 0); } catch (e) {}
+  });
 }
 
 async function renderFaq() {
@@ -2498,7 +2582,12 @@ function drawStats(el) {
     </div>`;
 
   let html = '';
-  if (champ) {
+  if (divisionsOnT()) {
+    for (let d = 1; d <= T.divisions; d++) {
+      const c = divisionChampionOf(d);
+      if (c) html += `<div class="panel section st-champ"><div class="st-champ-lbl">${esc(divisionNameOf(d))} champion</div><h1 style="margin:4px 0 0">${esc(teamName(c))}</h1></div>`;
+    }
+  } else if (champ) {
     html += `<div class="panel section st-champ"><div class="st-champ-lbl">Champion</div><h1 style="margin:4px 0 0">${esc(champ)}</h1></div>`;
   }
 
