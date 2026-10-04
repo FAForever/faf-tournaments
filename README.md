@@ -537,6 +537,16 @@ docker compose up -d
 
 Edit the repo URL in `docker-compose.yml` to point at your fork. The container clones the repo at start and runs `server.js` - no image build needed. It listens on port 8090. Data lives in the `faf_tourney_data` volume and survives restarts; deleting the volume deletes all tournaments.
 
+### On FAF's cluster
+
+FAF runs the site from the image in `Dockerfile` (deployment: `apps/faf-tournaments` in [FAForever/gitops-stack](https://github.com/FAForever/gitops-stack)).
+
+- **Releasing is pushing to `main`.** The `Image` workflow checks the files parse, builds the image and publishes it as `ghcr.io/faforeverrustclient/faf-tournaments:latest`. The cluster notices a new `latest` within a couple of minutes and swaps the container itself. No tag, no PR to FAF, no restart by hand.
+- **Rolling back:** every image is also tagged with its commit (the first 12 characters of the hash). Point `latest` back at the previous one, or revert the commit on `main`.
+- **Health:** `GET /healthz` answers `ok` while the process is up.
+- **Shutdown:** the cluster stops the old container with `SIGTERM`; a save still waiting in its debounce is written first.
+- Data is the same `db.json` plus image folders, on a persistent volume mounted at `/data`.
+
 ### Environment variables
 
 | Variable | Purpose |
@@ -548,6 +558,8 @@ Edit the repo URL in `docker-compose.yml` to point at your fork. The container c
 | `FAF_CLIENT_SECRET` | FAF OAuth client secret (never in the repo). |
 | `FAF_REDIRECT_URI` | Must exactly match what FAF registered, e.g. `https://your.host/auth/faf/callback`. |
 | `MAP_IMG_DIR` | Optional. Where map images are written (default `DATA_DIR/map-images`). Set to relocate them to another drive. |
+| `FAF_HYDRA_HOST` | Optional. FAF's login server (default `hydra.faforever.com`). `hydra.faforever.xyz` on FAF's test cluster. |
+| `FAF_API_HOST` | Optional. FAF's API (default `api.faforever.com`). `api.faforever.xyz` on FAF's test cluster. |
 
 FAF login is active only when all three `FAF_*` variables are set. Removing them reverts to the legacy name-only flow (a safe rollback). Set secrets in your compose/stack config, never in the repo.
 
@@ -560,7 +572,7 @@ With FAF login on, do this once after deploy: log in with FAF, open `/siteadmin`
 
 ## Updating
 
-Overwrite the changed files on GitHub (the web UI upload works; the folder structure in an update zip matches the repo), then restart the container - it re-clones on start. Update zips may include files under `lib/`; make sure those land in the repo's `lib/` folder, not the root.
+Overwrite the changed files on GitHub (the web UI upload works; the folder structure in an update zip matches the repo), then restart the container - it re-clones on start. On FAF's cluster the upload alone is enough: it goes live by itself (see *On FAF's cluster* above). Update zips may include files under `lib/`; make sure those land in the repo's `lib/` folder, not the root.
 
 If updates do not appear after a restart: static files are served with no-cache headers, but a reverse proxy in front (e.g. Nginx Proxy Manager) may cache CSS/JS itself. Turn OFF any "Cache Assets" option on the proxy host, then hard-refresh once (Ctrl+Shift+R). Favicons cache aggressively - reopen the tab if the icon looks stale.
 

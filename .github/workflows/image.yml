@@ -1,0 +1,50 @@
+# Every push to main builds the image FAF's cluster runs and publishes it as
+# `latest`. The cluster picks up a new `latest` on its own within a couple of
+# minutes (Keel, see apps/faf-tournaments in FAForever/gitops-stack), so pushing
+# to main is the whole release: no tag, no PR anywhere else.
+#
+# Each image is also tagged with its commit, so a bad release is undone by
+# pointing `latest` back at the previous commit's image.
+name: Image
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # Blocks the release: a file that does not parse would not start.
+      - run: npm run check
+      # Reported, not blocking yet: the tree has type errors from before this
+      # check existed, and a red build here would stop every deploy.
+      - run: npm run typecheck
+        continue-on-error: true
+
+  image:
+    needs: check
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and publish
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build -t "$image:latest" -t "$image:${GITHUB_SHA::12}" .
+          docker push "$image:${GITHUB_SHA::12}"
+          docker push "$image:latest"
