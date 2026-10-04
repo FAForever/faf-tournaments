@@ -1,5 +1,6 @@
-# Every push to main builds the image FAF's cluster runs and publishes it as
-# `latest`. The cluster picks up a new `latest` on its own within a couple of
+# Every push to main builds the image FAF's cluster runs and publishes it to
+# Docker Hub as `faforever/faf-tournaments:latest`, where FAF keeps all its
+# images. The cluster picks up a new `latest` on its own within a couple of
 # minutes (Keel, see apps/faf-tournaments in FAForever/gitops-stack), so pushing
 # to main is the whole release: no tag, no PR anywhere else.
 #
@@ -14,7 +15,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   check:
@@ -39,12 +39,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # DOCKER_USERNAME and DOCKER_PASSWORD are the FAForever organization's
+      # Docker Hub credentials, the same ones faf-qai and faf-league-service use.
       - name: Build and publish
         env:
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
         run: |
-          image="ghcr.io/${GITHUB_REPOSITORY,,}"
-          echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          image="faforever/faf-tournaments"
+          echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
           docker build -t "$image:latest" -t "$image:${GITHUB_SHA::12}" .
           docker push "$image:${GITHUB_SHA::12}"
           docker push "$image:latest"

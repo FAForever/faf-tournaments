@@ -541,7 +541,7 @@ Edit the repo URL in `docker-compose.yml` to point at your fork. The container c
 
 FAF runs the site from the image in `Dockerfile` (deployment: `apps/faf-tournaments` in [FAForever/gitops-stack](https://github.com/FAForever/gitops-stack)).
 
-- **Releasing is pushing to `main`.** The `Image` workflow checks the files parse, builds the image and publishes it as `ghcr.io/faforeverrustclient/faf-tournaments:latest`. The cluster notices a new `latest` within a couple of minutes and swaps the container itself. No tag, no PR to FAF, no restart by hand.
+- **Releasing is pushing to `main`.** The `Image` workflow checks the files parse, builds the image and publishes it to Docker Hub as `faforever/faf-tournaments:latest`. The cluster notices a new `latest` within a couple of minutes and swaps the container itself. No tag, no PR to FAF, no restart by hand.
 - **Rolling back:** every image is also tagged with its commit (the first 12 characters of the hash). Point `latest` back at the previous one, or revert the commit on `main`.
 - **Health:** `GET /healthz` answers `ok` while the process is up.
 - **Shutdown:** the cluster stops the old container with `SIGTERM`; a save still waiting in its debounce is written first.
