@@ -76,8 +76,12 @@ const FAF_CLIENT_ID = process.env.FAF_CLIENT_ID || '';
 const FAF_CLIENT_SECRET = process.env.FAF_CLIENT_SECRET || '';
 const FAF_REDIRECT_URI = process.env.FAF_REDIRECT_URI || '';
 const FAF_OAUTH_ON = !!(FAF_CLIENT_ID && FAF_CLIENT_SECRET && FAF_REDIRECT_URI);
-const FAF_HYDRA = 'https://hydra.faforever.com';
-const FAF_API = 'https://api.faforever.com';
+// Production by default. FAF's test cluster runs its own Hydra and API (hydra.faforever.xyz,
+// api.faforever.xyz), and a login issued by one is not accepted by the other.
+const FAF_HYDRA_HOST = process.env.FAF_HYDRA_HOST || 'hydra.faforever.com';
+const FAF_API_HOST = process.env.FAF_API_HOST || 'api.faforever.com';
+const FAF_HYDRA = 'https://' + FAF_HYDRA_HOST;
+const FAF_API = 'https://' + FAF_API_HOST;
 const FAF_SCOPES = 'openid offline public_profile';
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const OAUTH_PENDING_TTL_MS = 10 * 60 * 1000;     // login must complete within 10 min
@@ -213,18 +217,22 @@ function saveDB() {
   if (saveTimer) return;
   saveTimer = setTimeout(() => {
     saveTimer = null;
-    try {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-      fs.mkdirSync(MAP_IMG_DIR, { recursive: true });
-      fs.mkdirSync(DESC_IMG_DIR, { recursive: true });
-      fs.mkdirSync(ARTICLE_IMG_DIR, { recursive: true });
-      const tmp = DB_FILE + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify(db));
-      fs.renameSync(tmp, DB_FILE);
-    } catch (e) {
-      console.error('save failed:', e.message);
-    }
+    writeDB();
   }, 150);
+}
+
+function writeDB() {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.mkdirSync(MAP_IMG_DIR, { recursive: true });
+    fs.mkdirSync(DESC_IMG_DIR, { recursive: true });
+    fs.mkdirSync(ARTICLE_IMG_DIR, { recursive: true });
+    const tmp = DB_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(db));
+    fs.renameSync(tmp, DB_FILE);
+  } catch (e) {
+    console.error('save failed:', e.message);
+  }
 }
 
 // ---------- FAF token encryption ----------
@@ -2291,7 +2299,7 @@ async function fafFetchIdentity(accessToken) {
   let fafId = null;
   try {
     const ui = await httpsRequest({
-      host: 'hydra.faforever.com', path: '/userinfo', method: 'GET',
+      host: FAF_HYDRA_HOST, path: '/userinfo', method: 'GET',
       headers: { 'Authorization': 'Bearer ' + accessToken, 'Accept': 'application/json' }
     });
     if (ui.status === 200) { const j = JSON.parse(ui.text); fafId = j.sub || null; }
@@ -2301,7 +2309,7 @@ async function fafFetchIdentity(accessToken) {
   let fafName = null;
   try {
     const me = await httpsRequest({
-      host: 'api.faforever.com', path: '/me', method: 'GET',
+      host: FAF_API_HOST, path: '/me', method: 'GET',
       headers: { 'Authorization': 'Bearer ' + accessToken, 'Accept': 'application/json' }
     });
     if (me.status === 200) {
@@ -2342,7 +2350,7 @@ async function fafValidToken(sess) {
       client_id: FAF_CLIENT_ID, client_secret: FAF_CLIENT_SECRET
     }).toString();
     const r = await httpsRequest({
-      host: 'hydra.faforever.com', path: '/oauth2/token', method: 'POST',
+      host: FAF_HYDRA_HOST, path: '/oauth2/token', method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' }
     }, form);
     if (r.status !== 200) return cur.access || null;
@@ -2364,7 +2372,7 @@ async function fafJournalRating(playerFilter, lbName, cutoffIso, token) {
   const path = '/data/leaderboardRatingJournal?filter=' + encodeURIComponent(filter) + '&sort=-createTime&page%5Bsize%5D=1&page%5Btotals%5D&include=leaderboard';
   const headers = { 'Accept': 'application/vnd.api+json' };
   if (token) headers['Authorization'] = 'Bearer ' + token;
-  const r = await httpsRequest({ host: 'api.faforever.com', path, method: 'GET', headers });
+  const r = await httpsRequest({ host: FAF_API_HOST, path, method: 'GET', headers });
   let rating = null, games = null;
   try {
     if (r.status === 200) {
@@ -2442,7 +2450,7 @@ async function fafLookupPlayer(login, token) {
   const path = '/data/player?filter=' + encodeURIComponent('login==' + rsqlQuote(login)) + '&page%5Bsize%5D=1';
   const headers = { 'Accept': 'application/vnd.api+json' };
   if (token) headers['Authorization'] = 'Bearer ' + token;
-  const r = await httpsRequest({ host: 'api.faforever.com', path, method: 'GET', headers });
+  const r = await httpsRequest({ host: FAF_API_HOST, path, method: 'GET', headers });
   if (r.status !== 200) return { error: 'FAF lookup failed (' + r.status + ')' };
   let row;
   try { row = (JSON.parse(r.text).data || [])[0]; } catch (e) { return { error: 'FAF lookup failed' }; }
@@ -2463,7 +2471,7 @@ async function fafLookupById(fafId, token, opts) {
   const headers = { 'Accept': 'application/vnd.api+json' };
   if (token) headers['Authorization'] = 'Bearer ' + token;
   try {
-    const r = await httpsRequest({ host: 'api.faforever.com', path: '/data/player/' + id, method: 'GET', headers });
+    const r = await httpsRequest({ host: FAF_API_HOST, path: '/data/player/' + id, method: 'GET', headers });
     if (r.status !== 200) return (strict && r.status !== 404) ? { error: 'FAF lookup failed (' + r.status + ')' } : null;
     const row = JSON.parse(r.text).data;
     const login = row && row.attributes && row.attributes.login;
@@ -2724,7 +2732,7 @@ async function handleAuth(req, res, url) {
         code_verifier: pending.verifier
       }).toString();
       tokenResp = await httpsRequest({
-        host: 'hydra.faforever.com', path: '/oauth2/token', method: 'POST',
+        host: FAF_HYDRA_HOST, path: '/oauth2/token', method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' }
       }, form);
     } catch (e) {
@@ -7558,6 +7566,8 @@ loadDB();
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
+  // Liveness probe for the cluster. Says the process is up and answering, nothing more.
+  if (url.pathname === '/healthz') { res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('ok'); }
   try {
     // Resolve an Authorization: Bearer session once, before anything reads currentSession().
     // Only costs a FAF round trip when a token is present and uncached.
@@ -7611,3 +7621,14 @@ function serveArticleImage(req, res, url) {
 }
 
 server.listen(PORT, () => console.log('FAF Tourney running on port ' + PORT));
+
+// A deploy stops the old container with SIGTERM (Ctrl+C sends SIGINT). Without a handler Node
+// dies on the spot and a save still waiting out its 150ms debounce is lost, so write it now.
+function shutdown(signal) {
+  console.log(signal + ' received, saving and shutting down');
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; writeDB(); }
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 5000).unref();
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
