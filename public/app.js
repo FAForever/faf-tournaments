@@ -319,7 +319,8 @@ function mapSpecHTML(m, cls) {
   return spec + desc;
 }
 
-// open a lightbox with the map's preview image (enlargeable) and description
+// open a lightbox with the map's preview image (enlargeable) and description. Opened from inside
+// another popup (veto, match details) it sits on top of it, and Close goes back there.
 function showMapInfo(id) {
   const m = mapObj(id);
   if (!m) return;
@@ -327,14 +328,21 @@ function showMapInfo(id) {
   const info = mapSpecHTML(m, 'map-desc');
   const body = `
     <h3>${esc(m.name)}</h3>
-    ${hasImg ? `<img src="/map-images/${esc(m.image)}" alt="${esc(m.name)}" class="map-lightbox-img" id="mapBig">` : ''}
+    ${hasImg ? `<img src="/map-images/${esc(m.image)}" alt="${esc(m.name)}" class="map-lightbox-img js-mapbig" title="Click to enlarge">` : ''}
     ${info || '<p class="muted small">No description.</p>'}
-    <div class="actions"><button class="btn ghost" id="miClose">Close</button></div>`;
-  modal(body, root => {
-    root.querySelector('#miClose').onclick = closeModal;
-    const big = root.querySelector('#mapBig');
-    if (big) big.onclick = () => window.open('/map-images/' + m.image, '_blank');
-  });
+    <div class="actions"><button class="btn ghost js-miclose">Close</button></div>`;
+  // Already looking at a map's details? Show this one in its place rather than stacking map on
+  // map (some thumbnails also have their own click handler, so a click can arrive here twice).
+  const root = document.getElementById('modalRoot');
+  const top = root.lastElementChild;
+  const topIsMap = !!(top && top.querySelector && top.querySelector('.js-miclose'));
+  const topStacked = !!(top && top.classList && top.classList.contains('modal-stacked'));
+  if (topIsMap && topStacked) top.remove();
+  modal(body, layer => {
+    layer.querySelector('.js-miclose').onclick = closeTopModal;
+    const big = layer.querySelector('.js-mapbig');
+    if (big) big.onclick = () => showImageViewer('/map-images/' + encodeURIComponent(m.image), m.name);
+  }, { stack: !(topIsMap && !topStacked) });
 }
 // delegate clicks on any [data-map-info] element to the lightbox — but NOT on the veto
 // action buttons (those perform the ban/pick; info is reachable from non-actionable chips)
@@ -650,6 +658,90 @@ function mountDayPicker(host, opts) {
       days = [ymd]; anchor = ymd; view = ymd.slice(0, 7); draw();
     },
     showMonthOf: (ymd) => { if (ymd) { view = ymd.slice(0, 7); draw(); } }
+  };
+}
+
+// ---- per-day start times (multi-day events) ----
+// Day 1 starts at the event date's time. `dayTimesMode` says whether the other days do too
+// ('same') or each has its own ('perday', `dayTimes` maps 'YYYY-MM-DD' -> 'HH:MM' UTC). Unanswered
+// (null) reads as 'same' everywhere, but a multi-day draft cannot be published until it is answered.
+function utcTimeOf(v) {
+  if (!v || /^\d{4}-\d{2}-\d{2}$/.test(String(v))) return null;
+  const d = new Date(v);
+  return isNaN(d.getTime()) ? null : d.toISOString().slice(11, 16);
+}
+// [{ day:'YYYY-MM-DD', iso: start instant or null (no time set), n: 1-based }] - [] when single-day
+function dayStartList(t) {
+  const days = eventDayList(t);
+  if (!days.length) return [];
+  const t1 = utcTimeOf(t.eventDate);
+  const per = t.dayTimesMode === 'perday' ? (t.dayTimes || {}) : {};
+  return days.map((d, i) => {
+    const tm = i === 0 ? t1 : (per[d] || t1);
+    return { day: d, iso: tm ? d + 'T' + tm + ':00Z' : null, n: i + 1 };
+  });
+}
+// "Sat 12 Sep 2026, 18:00 CEST" in the viewer's zone and date style (a bare date: no time, no zone)
+function fmtWeekdayDateTime(v) {
+  if (!v) return '';
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(v);
+  const d = dateOnly ? new Date(v + 'T00:00:00Z') : new Date(v);
+  if (isNaN(d.getTime())) return '';
+  const tz = dateOnly ? 'UTC' : resolvedTZ();
+  let wd = '';
+  try { wd = new Intl.DateTimeFormat('en-GB', { weekday: 'short', timeZone: tz }).format(d) + ' '; } catch (e) {}
+  return wd + fmtDateTime(v);
+}
+// "Sat 12 Sep" for a 'YYYY-MM-DD' (the date as stored, no time zone shift)
+function dayLabelShort(ymd) {
+  const p = String(ymd).split('-');
+  const d = new Date(Date.UTC(+p[0], +p[1] - 1, +p[2]));
+  try { return new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' }).format(d); }
+  catch (e) { return ymd; }
+}
+// The Yes/No question and, for Yes, a time per day. Mounted under the day picker on the host form
+// and on the Admin tab. Renders nothing for a single-day event.
+//   opts: { days, mode, times, mainTime: () => 'HH:MM' or '' }
+//   returns { get() -> {mode, times}, setDays(days), refresh() }
+let _dtSeq = 0;
+function mountDayTimes(host, opts) {
+  const o = opts || {};
+  let days = (o.days || []).slice().sort();
+  let mode = o.mode === 'same' || o.mode === 'perday' ? o.mode : null;
+  const times = Object.assign({}, o.times || {});
+  const name = 'dtm' + (++_dtSeq);
+  const readInputs = () => {
+    host.querySelectorAll('[data-dtday]').forEach(inp => { if (inp.value) times[inp.dataset.dtday] = inp.value; else delete times[inp.dataset.dtday]; });
+  };
+  const draw = () => {
+    if (days.length < 2) { host.innerHTML = ''; return; }
+    const first = (o.mainTime && o.mainTime()) || '';
+    host.innerHTML = `<div class="daytimes">
+      <div class="dt-q">Different start times per day? <span class="muted small">(${days.length} days - must be answered before publishing)</span></div>
+      <div class="dt-opts">
+        <label class="dt-opt"><input type="radio" name="${name}" value="same"${mode === 'same' ? ' checked' : ''}> No, every day starts at the event time${first ? ' (' + esc(first) + ' UTC)' : ''}</label>
+        <label class="dt-opt"><input type="radio" name="${name}" value="perday"${mode === 'perday' ? ' checked' : ''}> Yes, each day has its own start time</label>
+      </div>
+      ${mode === 'perday' ? `<div class="dt-rows">${days.map((d, i) => `<div class="dt-row">
+          <span class="dt-day">Day ${i + 1} <span class="muted">· ${esc(dayLabelShort(d))}</span></span>
+          ${i === 0
+            ? '<span class="dt-first">' + (first ? esc(first) + ' UTC <span class="muted small">(the event time above)</span>' : '<span class="warn small">Set the event time above</span>') + '</span>'
+            : '<input type="time" data-dtday="' + esc(d) + '" value="' + esc(times[d] || '') + '"> <span class="muted small">UTC</span>'}
+        </div>`).join('')}</div>` : ''}
+    </div>`;
+    host.querySelectorAll('input[name="' + name + '"]').forEach(r => r.onchange = () => { readInputs(); mode = r.value; draw(); });
+  };
+  draw();
+  return {
+    get: () => {
+      readInputs();
+      // the times are kept even while the answer is No, so switching back to Yes loses nothing
+      const out = {};
+      for (const d of days.slice(1)) if (times[d]) out[d] = times[d];
+      return { mode, times: out };
+    },
+    setDays: (next) => { readInputs(); days = (next || []).slice().sort(); draw(); },
+    refresh: () => { readInputs(); draw(); }
   };
 }
 
@@ -1114,20 +1206,57 @@ function planSummary(t) {
   return parts.join(' \u00b7 ');
 }
 
+// opts.stack: open ON TOP of a popup that is already showing instead of replacing it. Closing the
+// top one (its button, Escape, a click beside it) goes back to the one underneath, which is what
+// a map opened from the veto popup or the match details needs: look at one map, close it, look at
+// the next. With nothing open it behaves like a normal popup. onMount then gets the new layer.
+// opts.bare: no panel box around the content (the full-screen image viewer).
 function modal(html, onMount, opts) {
   const root = document.getElementById('modalRoot');
   const wide = opts && opts.wide ? ' modal-wide' : (opts && opts.mid ? ' modal-mid' : '');
-  root.innerHTML = '<div class="modal-bg"><div class="modal' + wide + '">' + html + '</div></div>';
-  root.querySelector('.modal-bg').addEventListener('mousedown', e => {
-    if (e.target.classList.contains('modal-bg')) closeModal();
+  const inner = (opts && opts.bare) ? html : '<div class="modal' + wide + '">' + html + '</div>';
+  if (opts && opts.stack && root.querySelector('.modal-bg')) {
+    const layer = document.createElement('div');
+    layer.className = 'modal-bg modal-stacked';
+    layer.innerHTML = inner;
+    layer.addEventListener('mousedown', e => { if (e.target === layer) closeTopModal(); });
+    root.appendChild(layer);
+    if (onMount) onMount(layer);
+    return layer;
+  }
+  root.innerHTML = '<div class="modal-bg">' + inner + '</div>';
+  const bg = root.querySelector('.modal-bg');
+  bg.addEventListener('mousedown', e => {
+    if (e.target === bg) closeModal();
   });
   // pause background animations while the overlay covers the page (see style.css)
   document.body.classList.add('modal-open');
   if (onMount) onMount(root);
+  return bg;
 }
 function closeModal() {
   document.getElementById('modalRoot').innerHTML = '';
   document.body.classList.remove('modal-open');
+}
+// Close only the top popup: back to the one underneath, or all closed if it was the only one.
+function closeTopModal() {
+  const root = document.getElementById('modalRoot');
+  const layers = Array.from(root.children).filter(el => el.classList.contains('modal-bg'));
+  if (layers.length > 1) { layers[layers.length - 1].remove(); return; }
+  closeModal();
+}
+// A picture at the largest size the window allows, on top of whatever is open. A click anywhere,
+// the close button or Escape puts you back where you were. Used for map previews, which used to
+// open in a new browser tab that had nothing on it but the picture.
+function showImageViewer(src, alt) {
+  modal(`<div class="img-viewer" role="dialog" aria-label="${esc(alt || 'Image')}">
+      <img class="img-viewer-img" src="${esc(src)}" alt="${esc(alt || '')}">
+      <button type="button" class="img-viewer-close" title="Close (Esc)">✕</button>
+      ${alt ? '<div class="img-viewer-cap">' + esc(alt) + '</div>' : ''}
+    </div>`, layer => {
+    layer.classList.add('img-viewer-layer');
+    layer.addEventListener('click', () => closeTopModal());
+  }, { stack: true, bare: true });
 }
 
 const BO_OPTS = [1, 3, 5, 7];
@@ -1323,6 +1452,23 @@ function drawTopbar(modeText) {
   };
   document.getElementById('cmdrBtn').onclick = loginFlow;
   { const ib = document.getElementById('importBtn'); if (ib) ib.onclick = importFlow; }
+  // The server cannot save (writeDB in server.js): tell the people who can get it fixed, on every
+  // page, until it is. Only site admins and directors are sent this.
+  {
+    let warn = document.getElementById('saveWarn');
+    const f = fafAuth.user && fafAuth.user.saveFailing;
+    if (f && !warn) {
+      warn = document.createElement('div');
+      warn.id = 'saveWarn';
+      warn.className = 'save-warn';
+      warn.setAttribute('role', 'alert');
+      document.body.insertBefore(warn, document.getElementById('app'));
+    }
+    if (warn && !f) warn.remove();
+    else if (warn) {
+      warn.innerHTML = '<strong>The server cannot save (' + esc(f.code) + ').</strong> Everything changed since it started is lost at its next restart or update. Get the data folder’s permissions fixed before anyone uses the site.';
+    }
+  }
   document.getElementById('hostBtn').onclick = async () => {
     // hosting requires FAF login (when configured)
     if (fafAuth.enabled && !isFafVerified() && !siteAdmin()) {
@@ -2411,7 +2557,7 @@ document.addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;          // leave browser/OS combos alone
   if (typingInField(e.target)) return;                      // never steal keys from a text field
   const modalOpen = !!document.getElementById('modalRoot').innerHTML;
-  if (e.key === 'Escape' && modalOpen) { e.preventDefault(); closeModal(); return; }
+  if (e.key === 'Escape' && modalOpen) { e.preventDefault(); closeTopModal(); return; }
   if (modalOpen) return;                                    // don't act behind an open dialog
 
   // these toggles only mean anything inside a tournament

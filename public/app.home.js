@@ -23,13 +23,72 @@ function maybeAutoStreamerMode() {
   } catch (e) {}
 }
 
-// Home page: whether the completed archive is expanded, and how many rows are shown per year.
-// Module level so a re-render (poll, delete, publish) doesn't collapse it under the user.
-let completedOpen = false;
-let completedShown = {};
-
 // Images pasted into the host form before the tournament exists. Uploaded on create.
 let _pendingCreateImages = [];
+
+// ---------- home page ----------
+// The list (or the calendar, app.calendar.js) is drawn from one fetched list, filtered here.
+// Module level so a re-render (poll, delete, publish, a filter click) keeps what the user set.
+let completedShown = {};
+let _homeList = [];
+let _homeFilter = { cat: '', sizes: [], q: '', series: '' };
+
+// Which sections are open, remembered per browser. Completed starts closed: years of archive.
+const HOME_SECTION_DEFAULTS = { mine: true, mydrafts: true, drafts: true, ongoing: true, upcoming: true, completed: false };
+function homeSectionOpen(key) {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem('faf_home_sections') || '{}') || {}; } catch (e) { saved = {}; }
+  return saved[key] !== undefined ? !!saved[key] : HOME_SECTION_DEFAULTS[key] !== false;
+}
+function setHomeSectionOpen(key, open) {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem('faf_home_sections') || '{}') || {}; } catch (e) { saved = {}; }
+  saved[key] = open ? 1 : 0;
+  try { localStorage.setItem('faf_home_sections', JSON.stringify(saved)); } catch (e) {}
+}
+function homeView() {
+  try { return localStorage.getItem('faf_home_view') === 'calendar' ? 'calendar' : 'list'; } catch (e) { return 'list'; }
+}
+function setHomeView(v) { try { localStorage.setItem('faf_home_view', v); } catch (e) {} }
+
+// "1v1".."4v4" and "FFA" as filter keys
+function homeSizeKey(t) { return t.competition === 'ffa' ? 'ffa' : String(t.teamSize || 1); }
+function homeSizeLabel(k) { return k === 'ffa' ? 'FFA' : k + 'v' + k; }
+function homeFilterActive() {
+  const f = _homeFilter;
+  return !!(f.cat || f.sizes.length || f.q || f.series);
+}
+function applyHomeFilter(list) {
+  const f = _homeFilter;
+  const q = f.q.trim().toLowerCase();
+  return list.filter(t => {
+    if (f.cat && t.category !== f.cat) return false;
+    if (f.sizes.length && f.sizes.indexOf(homeSizeKey(t)) < 0) return false;
+    if (f.series && t.seriesId !== f.series) return false;
+    if (q && String(t.name || '').toLowerCase().indexOf(q) < 0 && String(t.seriesName || '').toLowerCase().indexOf(q) < 0) return false;
+    return true;
+  });
+}
+
+// The viewer's part in a tournament, as small tags after Community/Official.
+function homeRoleTags(t) {
+  const r = t.me || {};
+  return (r.org ? '<span class="rolebox to" title="You are an organizer of this tournament">TO</span>' : '')
+    + (r.player ? '<span class="rolebox player" title="You are signed up">PLAYER</span>' : '')
+    + (r.caster ? '<span class="rolebox caster" title="You are a caster here">CASTER</span>' : '');
+}
+
+// short "in 1 day, 17 h, 5 min" countdown for card badges
+function homeEta(iso) {
+  const ms = new Date(iso).getTime() - Date.now();
+  if (!(ms > 0)) return null;
+  const d = Math.floor(ms / 86400000), h = Math.floor(ms % 86400000 / 3600000), mn = Math.floor(ms % 3600000 / 60000);
+  const parts = [];
+  if (d) parts.push(d + ' day' + (d === 1 ? '' : 's'));
+  if (h || d) parts.push(h + ' h');
+  parts.push(mn + ' min');
+  return parts.join(', ');
+}
 
 async function renderHome() {
   setTitle(null);
@@ -39,55 +98,203 @@ async function renderHome() {
   try {
     const r = await fetch('/api/tournaments', siteAdmin() ? { headers: { 'x-site-admin': siteAdmin() } } : undefined);
     list = await r.json();
-    if (!r.ok) list = [];
+    if (!r.ok || !Array.isArray(list)) list = [];
   } catch (e) {}
+  _homeList = list;
+  drawHome();
+}
 
+function drawHome() {
+  const list = _homeList;
   const loginPanel = me() ? '' : `
     <div class="panel section">
       <h2>Log <span class="h2-strong">In</span></h2>
       <p class="muted small" style="margin-bottom:10px">Log in with your FAF account to sign up and take part.</p>
       <button class="btn faf" id="homeLgFaf" style="max-width:280px">Log in with FAF</button>
     </div>`;
-
-  // Unpublished tournaments are only returned to people who may see them (their organizers and
-  // site admins), so anything with published===0 here belongs in the viewer's own drafts list.
-  const drafts = list.filter(t => t.published === 0)
-    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-  const live = list.filter(t => t.published !== 0);
-
-  const completed = live.filter(t => t.status === 'finished' || t.abandoned)
-    .sort((a, b) => tourneyDateMs(b) - tourneyDateMs(a)); // most recent first
-  // Upcoming is sorted by how soon it starts, soonest first, so the next thing to sign up for is
-  // at the top. Anything with no date set sorts to the bottom rather than jumping the queue.
-  const upcoming = live.filter(t => t.status === 'signup' && !t.abandoned).sort((a, b) => {
-    const am = tourneyDateMs(a), bm = tourneyDateMs(b);
-    if (!am && !bm) return (b.createdAt || 0) - (a.createdAt || 0);
-    if (!am) return 1;
-    if (!bm) return -1;
-    return am - bm;
-  });
-  const groups = [
-    ['Ongoing', live.filter(t => ['draft', 'drafted', 'running'].indexOf(t.status) >= 0 && !t.abandoned), 'No tournaments running.'],
-    ['Upcoming / Open', upcoming, 'Nothing upcoming right now.'],
-    ['Completed', completed, 'No finished tournaments yet.']
-  ];
-  // drafts get their own section, shown first and only when the viewer actually has one
-  if (drafts.length) groups.unshift(['My drafts', drafts, '']);
-
-  // short "in 1 day, 17 hrs, 5 mnts" countdown for card badges
-  const eta = (iso) => {
-    const ms = new Date(iso).getTime() - Date.now();
-    if (!(ms > 0)) return null;
-    const d = Math.floor(ms / 86400000), h = Math.floor(ms % 86400000 / 3600000), mn = Math.floor(ms % 3600000 / 60000);
-    const parts = [];
-    if (d) parts.push(d + ' day' + (d === 1 ? '' : 's'));
-    if (h || d) parts.push(h + ' h');
-    parts.push(mn + ' min');
-    return parts.join(', ');
+  app.innerHTML = '<div class="page page-wide">' + loginPanel + homeBarHTML(list) + '<div id="homeBody"></div></div>';
+  const hlFaf = document.getElementById('homeLgFaf');
+  if (hlFaf) hlFaf.onclick = () => {
+    const returnTo = location.pathname + location.search;
+    location.href = '/auth/faf/login?returnTo=' + encodeURIComponent(returnTo);
   };
+  wireHomeBar(list);
+  paintHomeBody();
+}
 
-  // Completed is collapsed by default and split by year, then paged. With years of archived and
-  // imported events an open list would be thousands of rows nobody can scroll through.
+// List / Calendar switch and the filters. Filtering repaints only the body below, so the name
+// box keeps its focus while you type.
+function homeBarHTML(list) {
+  const f = _homeFilter;
+  const view = homeView();
+  const sizeKeys = ['1', '2', '3', '4'];
+  for (const t of list) { const k = homeSizeKey(t); if (sizeKeys.indexOf(k) < 0) sizeKeys.push(k); }
+  sizeKeys.sort((a, b) => (a === 'ffa') - (b === 'ffa') || (+a) - (+b));
+  const series = {};
+  for (const t of list) if (t.seriesId && t.seriesName) series[t.seriesId] = t.seriesName;
+  const seriesIds = Object.keys(series).sort((a, b) => series[a].localeCompare(series[b]));
+  if (f.series && !series[f.series]) f.series = '';
+  return `<div class="home-bar">
+    <div class="hb-views" role="group" aria-label="View">
+      <button type="button" class="hb-view${view === 'list' ? ' on' : ''}" data-hview="list">☰ List</button>
+      <button type="button" class="hb-view${view === 'calendar' ? ' on' : ''}" data-hview="calendar">\u{1F4C5} Calendar</button>
+    </div>
+    <div class="hb-filters">
+      <div class="hb-seg" role="group" aria-label="Category">
+        ${[['', 'All'], ['community', 'Community'], ['official', 'Official']].map(c => `<button type="button" class="hb-chip${f.cat === c[0] ? ' on' : ''}" data-hcat="${c[0]}">${c[1]}</button>`).join('')}
+      </div>
+      <div class="hb-seg" role="group" aria-label="Team size">
+        ${sizeKeys.map(k => `<button type="button" class="hb-chip${f.sizes.indexOf(k) >= 0 ? ' on' : ''}" data-hsize="${esc(k)}" aria-pressed="${f.sizes.indexOf(k) >= 0 ? 'true' : 'false'}">${esc(homeSizeLabel(k))}</button>`).join('')}
+      </div>
+      <input type="text" id="hfName" class="hb-search" placeholder="Search by name" value="${esc(f.q)}" autocomplete="off">
+      ${seriesIds.length ? `<select id="hfSeries" class="hb-series" aria-label="Tournament series">
+        <option value="">All series</option>
+        ${seriesIds.map(id => `<option value="${esc(id)}"${f.series === id ? ' selected' : ''}>${esc(series[id])}</option>`).join('')}
+      </select>` : ''}
+      <button type="button" class="hb-reset" id="hfReset"${homeFilterActive() ? '' : ' hidden'}>Reset filters</button>
+    </div>
+  </div>`;
+}
+
+function wireHomeBar(list) {
+  const bar = app.querySelector('.home-bar');
+  if (!bar) return;
+  const repaint = () => {
+    const rs = document.getElementById('hfReset');
+    if (rs) rs.hidden = !homeFilterActive();
+    paintHomeBody();
+  };
+  bar.querySelectorAll('[data-hview]').forEach(b => b.onclick = () => {
+    setHomeView(b.dataset.hview);
+    bar.querySelectorAll('[data-hview]').forEach(x => x.classList.toggle('on', x === b));
+    paintHomeBody();
+  });
+  bar.querySelectorAll('[data-hcat]').forEach(b => b.onclick = () => {
+    _homeFilter.cat = b.dataset.hcat;
+    bar.querySelectorAll('[data-hcat]').forEach(x => x.classList.toggle('on', x === b));
+    repaint();
+  });
+  bar.querySelectorAll('[data-hsize]').forEach(b => b.onclick = () => {
+    const k = b.dataset.hsize;
+    const i = _homeFilter.sizes.indexOf(k);
+    if (i >= 0) _homeFilter.sizes.splice(i, 1); else _homeFilter.sizes.push(k);
+    b.classList.toggle('on', i < 0);
+    b.setAttribute('aria-pressed', i < 0 ? 'true' : 'false');
+    repaint();
+  });
+  const nm = document.getElementById('hfName');
+  if (nm) nm.oninput = () => { _homeFilter.q = nm.value; repaint(); };
+  const se = document.getElementById('hfSeries');
+  if (se) se.onchange = () => { _homeFilter.series = se.value; repaint(); };
+  const rs = document.getElementById('hfReset');
+  if (rs) rs.onclick = () => { _homeFilter = { cat: '', sizes: [], q: '', series: '' }; drawHome(); };
+}
+
+function paintHomeBody() {
+  const body = document.getElementById('homeBody');
+  if (!body) return;
+  const shown = applyHomeFilter(_homeList);
+  if (homeView() === 'calendar' && typeof drawHomeCalendar === 'function') drawHomeCalendar(body, shown);
+  else drawHomeList(body, shown);
+}
+
+// One card builder, used for every section and each year of the completed archive.
+function homeCard(t) {
+  const div = document.createElement('div');
+  div.className = 'tlist-item';
+  const kind = t.competition === 'ffa' ? 'FFA' :
+    (t.teamSize + 'v' + t.teamSize + ' ' + ({ single: 'SE', double: 'DE', swiss: 'Swiss' }[t.bracketType] || ''));
+  let ratingLine = '';
+  if (t.minRating != null || t.maxRating != null) {
+    ratingLine = t.minRating != null && t.maxRating != null ? 'Rating ' + t.minRating + '–' + t.maxRating
+      : t.minRating != null ? 'Rating ' + t.minRating + '+' : 'Rating up to ' + t.maxRating;
+  }
+  if (t.maxTeamRating != null) ratingLine += (ratingLine ? ' · ' : '') + 'Team cap ' + t.maxTeamRating;
+  const unit = t.competition === 'ffa' ? 'players' : (t.teamSize === 1 ? 'players' : 'teams');
+  let teamsLine = '';
+  if (t.minTeams && t.maxTeams) teamsLine = t.minTeams + '–' + t.maxTeams + ' ' + unit;
+  else if (t.minTeams) teamsLine = 'min ' + t.minTeams + ' ' + unit;
+  else if (t.maxTeams) teamsLine = 'max ' + t.maxTeams + ' ' + unit;
+  const signupEta = (t.status === 'signup' && !t.abandoned && t.signupOpensAt) ? homeEta(t.signupOpensAt) : null;
+  const eventEta = (!t.abandoned && ['signup', 'draft', 'drafted'].indexOf(t.status) >= 0 && t.eventDate) ? homeEta(t.eventDate) : null;
+  // Once signups are actually open (status signup, not waiting to open) and a close time is
+  // set, show how long until they close - without hiding the "signups open" status.
+  const closeEta = (t.status === 'signup' && !t.abandoned && !signupEta && t.signupClosesAt) ? homeEta(t.signupClosesAt) : null;
+  const countdown = signupEta
+    ? '<span class="countchip">Signups start in: ' + esc(signupEta) + '</span>'
+    : (eventEta ? '<span class="countchip">Event starts in: ' + esc(eventEta) + '</span>' : '');
+  const closeChip = closeEta ? '<span class="countchip countchip-close">Signups close in: ' + esc(closeEta) + '</span>' : '';
+  const pill = '<span class="pill ' + statusPillClass(t) + '">' + esc(statusPillLabel(t)) + '</span>';
+  // a multi-day event's badge lists every day with its own start time on hover
+  const daysTip = eventDaysLabel(t)
+    ? 'This event runs on ' + eventDaysLabel(t) + ':\n' + dayStartList(t).map(s => 'Day ' + s.n + ': ' + (s.iso ? fmtWeekdayDateTime(s.iso) : dayLabelShort(s.day))).join('\n')
+    : '';
+  div.innerHTML = `
+    <div>
+      <div class="tname"><a href="/t/${t.id}">${esc(t.name)}</a>${t.category ? ' <span class="catbox ' + (t.category === 'official' ? 'official' : 'community') + '">' + (t.category === 'official' ? 'OFFICIAL' : 'COMMUNITY') + '</span>' : ''}${homeRoleTags(t)}</div>
+      <div class="tlist-meta">${esc(kind)}${t.imported ? '' : ' · ' + t.players + ' signed up'}${tourneyDate(t) ? ' · <span class="tdate">' + esc(fmtDateTime(tourneyDate(t))) + '</span>' : ''}${daysTip ? ' <span class="tdays" title="' + esc(daysTip) + '">' + esc(eventDaysCountLabel(t)) + '</span>' : ''}${t.seriesName ? ' · <span class="tseries">' + esc(t.seriesName) + '</span>' : ''}${ratingLine ? ' · ' + esc(ratingLine) : ''}${teamsLine ? ' · ' + esc(teamsLine) : ''}${t.prize ? ' · <span class="tprize">' + esc(formatPrize(t.prize)) + '</span>' : ''}</div>
+    </div>
+    <span style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end">
+      ${t.published === 0 ? (t.canManage === 0
+        ? '<span class="idbadge late" title="Someone else’s draft. You can see it as a tournament director, but you have no organizer rights on it.">draft · view only</span>'
+        : '<span class="idbadge late" title="Draft - not listed publicly until you publish it">draft</span>') : ''}
+      ${closeChip}
+      ${closeChip ? pill : (countdown || pill)}
+      ${siteAdmin() ? '<button class="btn danger small" data-del="' + t.id + '">Delete</button>' : ''}
+    </span>`;
+  const delBtn = div.querySelector('[data-del]');
+  if (delBtn) delBtn.onclick = () => {
+    modal(`<h3>Delete tournament</h3><p>Remove <strong>${esc(t.name)}</strong> permanently? This cannot be undone.</p>
+      <div class="actions"><button class="btn ghost" id="dCancel">Cancel</button><button class="btn danger" id="dGo">Delete</button></div>`, root => {
+      root.querySelector('#dCancel').onclick = closeModal;
+      root.querySelector('#dGo').onclick = async () => {
+        try { await api('/api/t/' + t.id + '/delete', { admin: siteAdmin() }); closeModal(); toast('Deleted'); renderHome(); }
+        catch (e) { toast(e.message, true); }
+      };
+    });
+  };
+  return div;
+}
+
+// Sorted soonest first; no date sinks to the bottom rather than jumping the queue.
+function homeBySoonest(a, b) {
+  const am = tourneyDateMs(a), bm = tourneyDateMs(b);
+  if (!am && !bm) return (b.createdAt || 0) - (a.createdAt || 0);
+  if (!am) return 1;
+  if (!bm) return -1;
+  return am - bm;
+}
+
+function drawHomeList(body, list) {
+  const all = _homeList;
+  const filtered = homeFilterActive();
+  const isDraft = t => t.published === 0;
+  const isDone = t => t.status === 'finished' || !!t.abandoned;
+  const isRunning = t => ['draft', 'drafted', 'running'].indexOf(t.status) >= 0 && !t.abandoned;
+  const mineRole = t => !!(t.me && (t.me.org || t.me.player || t.me.caster));
+  // My drafts are the ones the viewer is a NAMED organizer of. Everything else a director or a
+  // site admin can see goes under Drafts, which they can fold away.
+  const myDraft = t => isDraft(t) && !!(t.me && t.me.org);
+  const otherDraft = t => isDraft(t) && !(t.me && t.me.org);
+  const live = list.filter(t => !isDraft(t));
+  const completed = live.filter(isDone).sort((a, b) => tourneyDateMs(b) - tourneyDateMs(a));
+  const sections = [
+    { key: 'mine', title: 'My tournaments', items: live.filter(t => mineRole(t) && !isDone(t)).sort((a, b) => (isRunning(b) - isRunning(a)) || homeBySoonest(a, b)),
+      optional: !all.some(t => !isDraft(t) && mineRole(t) && !isDone(t)),
+      note: 'Where you organize, play or cast. Finished ones are under Completed.' },
+    { key: 'mydrafts', title: 'My drafts', items: list.filter(myDraft).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)),
+      optional: !all.some(myDraft),
+      note: 'Not published yet - only you, your co-organizers and site admins can see these. Publish one from its page, or schedule a publish date there.' },
+    { key: 'drafts', title: 'Drafts', items: list.filter(otherDraft).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)),
+      optional: !all.some(otherDraft),
+      note: 'Other organizers’ drafts. You see them as a tournament director or site admin; fold this away when you don’t need it.' },
+    { key: 'ongoing', title: 'Ongoing', items: live.filter(isRunning), empty: 'No tournaments running.' },
+    { key: 'upcoming', title: 'Upcoming / Open', items: live.filter(t => t.status === 'signup' && !t.abandoned).sort(homeBySoonest), empty: 'Nothing upcoming right now.' },
+    { key: 'completed', title: 'Completed', items: completed, empty: 'No finished tournaments yet.' }
+  ].filter(s => !s.optional);
+
+  // Completed is split by year, then paged: years of archive and imported events would otherwise
+  // be thousands of rows nobody can scroll through.
   const COMPLETED_PAGE = 50;
   const yearOf = (t) => { const ms = tourneyDateMs(t); return ms ? new Date(ms).getUTCFullYear() : 0; };
   const completedYears = [];
@@ -98,106 +305,36 @@ async function renderHome() {
       if (!byYear.has(y)) byYear.set(y, []);
       byYear.get(y).push(t);
     }
-    // newest year first; undated events last under their own heading
-    for (const y of Array.from(byYear.keys()).sort((a, b) => (b || -1) - (a || -1))) {
-      completedYears.push({ year: y, items: byYear.get(y) });
-    }
+    for (const y of Array.from(byYear.keys()).sort((a, b) => (b || -1) - (a || -1))) completedYears.push({ year: y, items: byYear.get(y) });
   }
 
-  app.innerHTML = '<div class="page page-wide">' + loginPanel + groups.map((g, i) => {
-    if (g[0] === 'Completed') {
-      return `<div class="panel section">
-        <h2 class="collapsy" id="cmpToggle" role="button" tabindex="0" aria-expanded="${completedOpen ? 'true' : 'false'}">
-          <span class="collapsy-caret">${completedOpen ? '\u25BE' : '\u25B8'}</span> ${esc(g[0])} <span class="h2-strong">(${g[1].length})</span>
-          <span class="muted small" style="font-weight:400">${completedOpen ? '' : ' \u2014 click to show'}</span>
-        </h2>
-        <div id="cmpBody" style="${completedOpen ? '' : 'display:none'}">
-          ${g[1].length ? '' : '<div class="empty">' + esc(g[2]) + '</div>'}
-          ${completedYears.map((yg, yi) => `<div class="cmp-year">
-            <h3 class="cmp-year-head">${yg.year ? yg.year : 'No date set'} <span class="muted small">(${yg.items.length})</span></h3>
-            <div id="tlistC${yi}"></div>
-            <div class="cmp-more" id="cmpMore${yi}"></div>
-          </div>`).join('')}
-        </div>
-      </div>`;
-    }
-    return `<div class="panel section${g[0] === 'My drafts' ? ' draft-panel' : ''}">
-      <h2>${esc(g[0])} <span class="h2-strong">(${g[1].length})</span></h2>
-      ${g[0] === 'My drafts' ? '<p class="muted small" style="margin:-4px 0 10px">Not published yet \u2014 only you (and site admins) can see these. Publish one from its Admin tab, or schedule a publish date there.</p>' : ''}
-      <div id="tlist${i}">${g[1].length ? '' : '<div class="empty">' + esc(g[2]) + '</div>'}</div>
+  body.innerHTML = sections.map(s => {
+    const open = homeSectionOpen(s.key);
+    const emptyText = s.items.length ? '' : (filtered ? 'Nothing here matches the filters.' : (s.empty || ''));
+    const inner = s.key === 'completed'
+      ? (emptyText ? '<div class="empty">' + esc(emptyText) + '</div>' : '') + completedYears.map((yg, yi) => `<div class="cmp-year">
+          <h3 class="cmp-year-head">${yg.year ? yg.year : 'No date set'} <span class="muted small">(${yg.items.length})</span></h3>
+          <div id="tlistC${yi}"></div>
+          <div class="cmp-more" id="cmpMore${yi}"></div>
+        </div>`).join('')
+      : '<div class="tlist" data-hlist="' + s.key + '">' + (emptyText ? '<div class="empty">' + esc(emptyText) + '</div>' : '') + '</div>';
+    return `<div class="panel section home-sec${s.key === 'mydrafts' || s.key === 'drafts' ? ' draft-panel' : ''}" data-sec="${s.key}">
+      <h2 class="collapsy" data-sectoggle="${s.key}" role="button" tabindex="0" aria-expanded="${open ? 'true' : 'false'}">
+        <span class="collapsy-caret">${open ? '▾' : '▸'}</span> ${esc(s.title)} <span class="h2-strong">(${s.items.length})</span>
+      </h2>
+      <div class="sec-body" data-secbody="${s.key}"${open ? '' : ' hidden'}>
+        ${s.note ? '<p class="muted small sec-note">' + esc(s.note) + '</p>' : ''}
+        ${inner}
+      </div>
     </div>`;
-  }).join('') + '</div>';
+  }).join('');
 
-  const hlFaf = document.getElementById('homeLgFaf');
-  if (hlFaf) hlFaf.onclick = () => {
-    const returnTo = location.pathname + location.search;
-    location.href = '/auth/faf/login?returnTo=' + encodeURIComponent(returnTo);
-  };
-
-  // One card builder, used for the flat sections and for each year of the completed archive.
-  const buildCard = (t) => {
-      const div = document.createElement('div');
-      div.className = 'tlist-item';
-      const kind = t.competition === 'ffa' ? 'FFA' :
-        (t.teamSize + 'v' + t.teamSize + ' ' + ({ single: 'SE', double: 'DE', swiss: 'Swiss' }[t.bracketType] || ''));
-      let ratingLine = '';
-      if (t.minRating != null || t.maxRating != null) {
-        ratingLine = t.minRating != null && t.maxRating != null ? 'Rating ' + t.minRating + '\u2013' + t.maxRating
-          : t.minRating != null ? 'Rating ' + t.minRating + '+' : 'Rating up to ' + t.maxRating;
-      }
-      if (t.maxTeamRating != null) ratingLine += (ratingLine ? ' \u00b7 ' : '') + 'Team cap ' + t.maxTeamRating;
-      const unit = t.competition === 'ffa' ? 'players' : (t.teamSize === 1 ? 'players' : 'teams');
-      let teamsLine = '';
-      if (t.minTeams && t.maxTeams) teamsLine = t.minTeams + '\u2013' + t.maxTeams + ' ' + unit;
-      else if (t.minTeams) teamsLine = 'min ' + t.minTeams + ' ' + unit;
-      else if (t.maxTeams) teamsLine = 'max ' + t.maxTeams + ' ' + unit;
-      const signupEta = (t.status === 'signup' && !t.abandoned && t.signupOpensAt) ? eta(t.signupOpensAt) : null;
-      const eventEta = (!t.abandoned && ['signup', 'draft', 'drafted'].indexOf(t.status) >= 0 && t.eventDate) ? eta(t.eventDate) : null;
-      // Once signups are actually open (status signup, not waiting to open) and a close time is
-      // set, show how long until they close — without hiding the "signups open" status.
-      const closeEta = (t.status === 'signup' && !t.abandoned && !signupEta && t.signupClosesAt) ? eta(t.signupClosesAt) : null;
-      const countdown = signupEta
-        ? '<span class="countchip">Signups start in: ' + esc(signupEta) + '</span>'
-        : (eventEta ? '<span class="countchip">Event starts in: ' + esc(eventEta) + '</span>' : '');
-      const closeChip = closeEta ? '<span class="countchip countchip-close">Signups close in: ' + esc(closeEta) + '</span>' : '';
-      const pill = '<span class="pill ' + statusPillClass(t) + '">' + esc(statusPillLabel(t)) + '</span>';
-      div.innerHTML = `
-        <div>
-          <div class="tname"><a href="/t/${t.id}">${esc(t.name)}</a>${t.category ? ' <span class="catbox ' + (t.category === 'official' ? 'official' : 'community') + '">' + (t.category === 'official' ? 'OFFICIAL' : 'COMMUNITY') + '</span>' : ''}</div>
-          <div class="tlist-meta">${esc(kind)}${t.imported ? '' : ' \u00b7 ' + t.players + ' signed up'}${tourneyDate(t) ? ' \u00b7 <span class="tdate">' + esc(fmtDateTime(tourneyDate(t))) + '</span>' : ''}${eventDaysLabel(t) ? ' <span class="tdays" title="This event runs on ' + esc(eventDaysLabel(t)) + '">' + esc(eventDaysCountLabel(t)) + '</span>' : ''}${ratingLine ? ' \u00b7 ' + esc(ratingLine) : ''}${teamsLine ? ' \u00b7 ' + esc(teamsLine) : ''}${t.prize ? ' \u00b7 <span class="tprize">' + esc(formatPrize(t.prize)) + '</span>' : ''}</div>
-        </div>
-        <span style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end">
-          ${t.published === 0 ? (t.canManage === 0
-            ? '<span class="idbadge late" title="Someone else\u2019s draft. You can see it as a tournament director, but you have no organizer rights on it.">draft \u00b7 view only</span>'
-            : '<span class="idbadge late" title="Draft — not listed publicly until you publish it">draft</span>') : ''}
-          ${closeChip}
-          ${closeChip ? pill : (countdown || pill)}
-          ${siteAdmin() ? '<button class="btn danger small" data-del="' + t.id + '">Delete</button>' : ''}
-        </span>`;
-      const delBtn = div.querySelector('[data-del]');
-      if (delBtn) delBtn.onclick = () => {
-        modal(`<h3>Delete tournament</h3><p>Remove <strong>${esc(t.name)}</strong> permanently? This cannot be undone.</p>
-          <div class="actions"><button class="btn ghost" id="dCancel">Cancel</button><button class="btn danger" id="dGo">Delete</button></div>`, root => {
-          root.querySelector('#dCancel').onclick = closeModal;
-          root.querySelector('#dGo').onclick = async () => {
-            try { await api('/api/t/' + t.id + '/delete', { admin: siteAdmin() }); closeModal(); toast('Deleted'); renderHome(); }
-            catch (e) { toast(e.message, true); }
-          };
-        });
-      };
-    return div;
-  };
-
-  // flat sections (drafts / ongoing / upcoming)
-  groups.forEach((g, i) => {
-    if (g[0] === 'Completed') return;
-    const tl = document.getElementById('tlist' + i);
-    if (!tl) return;
-    for (const t of g[1]) tl.appendChild(buildCard(t));
-  });
-
-  // completed: one paged list per year, rendered lazily so a huge archive costs nothing until
-  // the section is opened and nothing beyond the first page until "show more" is pressed.
+  for (const s of sections) {
+    if (s.key === 'completed') continue;
+    const host = body.querySelector('[data-hlist="' + s.key + '"]');
+    if (host) for (const t of s.items) host.appendChild(homeCard(t));
+  }
+  // Completed: one paged list per year, filled only once the section is open.
   const paintYear = (yi) => {
     const yg = completedYears[yi];
     const tl = document.getElementById('tlistC' + yi);
@@ -205,7 +342,7 @@ async function renderHome() {
     if (!yg || !tl) return;
     const shown = completedShown[yi] || COMPLETED_PAGE;
     tl.innerHTML = '';
-    for (const t of yg.items.slice(0, shown)) tl.appendChild(buildCard(t));
+    for (const t of yg.items.slice(0, shown)) tl.appendChild(homeCard(t));
     if (more) {
       const left = yg.items.length - shown;
       more.innerHTML = left > 0
@@ -216,22 +353,23 @@ async function renderHome() {
     }
   };
   const paintCompleted = () => { completedYears.forEach((_, yi) => paintYear(yi)); };
-  if (completedOpen) paintCompleted();
+  if (homeSectionOpen('completed')) paintCompleted();
 
-  const cmpToggle = document.getElementById('cmpToggle');
-  if (cmpToggle) {
+  body.querySelectorAll('[data-sectoggle]').forEach(h => {
+    const key = h.dataset.sectoggle;
     const flip = () => {
-      completedOpen = !completedOpen;
-      const body = document.getElementById('cmpBody');
-      const caret = cmpToggle.querySelector('.collapsy-caret');
-      if (body) body.style.display = completedOpen ? '' : 'none';
-      if (caret) caret.textContent = completedOpen ? '\u25BE' : '\u25B8';
-      cmpToggle.setAttribute('aria-expanded', completedOpen ? 'true' : 'false');
-      if (completedOpen) paintCompleted();
+      const open = !homeSectionOpen(key);
+      setHomeSectionOpen(key, open);
+      const sb = body.querySelector('[data-secbody="' + key + '"]');
+      if (sb) sb.hidden = !open;
+      const caret = h.querySelector('.collapsy-caret');
+      if (caret) caret.textContent = open ? '▾' : '▸';
+      h.setAttribute('aria-expanded', open ? 'true' : 'false');
+      if (open && key === 'completed') paintCompleted();
     };
-    cmpToggle.onclick = flip;
-    cmpToggle.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); flip(); } };
-  }
+    h.onclick = flip;
+    h.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); flip(); } };
+  });
 }
 
 async function renderHost() {
@@ -260,6 +398,7 @@ async function renderHost() {
         <label>Event date &amp; time (UTC) <span class="muted" style="font-weight:400">(optional)</span></label>
         <div style="display:flex;gap:8px"><input type="date" id="cDate" style="flex:1"><input type="time" id="cTime" style="width:130px"></div>
         <div id="cDayPick" class="dp-host"></div>
+        <div id="cDayTimes"></div>
         <label>Signups open at (UTC) <span class="muted" style="font-weight:400">(optional \u2014 before this, only organizers can add players)</span></label>
         <div style="display:flex;gap:8px"><input type="date" id="cSuDate" style="flex:1"><input type="time" id="cSuTime" style="width:130px"></div>
         <label>Signups close at (UTC) <span class="muted" style="font-weight:400">(optional \u2014 after this, signups auto-close; team forming &amp; captain picks still work. Leave empty to close manually)</span></label>
@@ -958,17 +1097,22 @@ async function renderHost() {
 
   // Multi-day picker, two-way bound to the native date input above it: typing a date there
   // makes that the single selected day, and picking days here writes the earliest back.
-  let _cDayPick = null;
+  let _cDayPick = null, _cDayTimes = null;
   {
     const dateEl = document.getElementById('cDate');
+    const timeEl = document.getElementById('cTime');
     const host = document.getElementById('cDayPick');
+    const dtHost = document.getElementById('cDayTimes');
+    // per-day start times appear under the picker as soon as a second day is picked
+    if (dtHost) _cDayTimes = mountDayTimes(dtHost, { days: [], mainTime: () => (timeEl ? timeEl.value : '') });
     if (dateEl && host) {
       _cDayPick = mountDayPicker(host, {
         days: dateEl.value ? [dateEl.value] : [],
-        onChange: (days) => { if (days.length) dateEl.value = days[0]; }
+        onChange: (days) => { if (days.length) dateEl.value = days[0]; if (_cDayTimes) _cDayTimes.setDays(days); }
       });
-      dateEl.addEventListener('change', () => _cDayPick.setSingle(dateEl.value));
+      dateEl.addEventListener('change', () => { _cDayPick.setSingle(dateEl.value); if (_cDayTimes) _cDayTimes.setDays(dateEl.value ? [dateEl.value] : []); });
     }
+    if (timeEl && _cDayTimes) timeEl.addEventListener('change', () => _cDayTimes.refresh());
   }
 
   document.getElementById('cGo').onclick = async () => {
@@ -1039,6 +1183,8 @@ async function renderHost() {
         veto: { enabled: document.getElementById('cVeto').checked, mode: document.getElementById('cVetoMode').value, abMode: document.getElementById('cVetoAb').value },
         eventDate: combineDateTimeUTC(document.getElementById('cDate'), document.getElementById('cTime')),
         eventDays: _cDayPick ? _cDayPick.get() : [],
+        dayTimesMode: _cDayTimes ? _cDayTimes.get().mode : null,
+        dayTimes: _cDayTimes ? _cDayTimes.get().times : {},
         signupOpensAt: combineDateTimeUTC(document.getElementById('cSuDate'), document.getElementById('cSuTime')),
         signupClosesAt: combineDateTimeUTC(document.getElementById('cScDate'), document.getElementById('cScTime')),
         checkInDeadline: combineDateTimeUTC(document.getElementById('cCiDate'), document.getElementById('cCiTime')),
@@ -1170,9 +1316,6 @@ async function renderTournament() {
   maybeAutoStreamerMode();
   lastSnapshot = JSON.stringify(T);
   drawTournament();
-  // A chat pinned before a reload comes back only now, with T loaded, so a match that finished
-  // in the meantime is dropped instead of being restored as a dead panel.
-  if (typeof restorePinnedChat === 'function') restorePinnedChat();
   maybePromptOrganizerClaim();
   maybePromptLateSignup();
   stopPoll();
@@ -1193,9 +1336,9 @@ async function pollOnce() {
     if (snap === lastSnapshot) return;                           // nothing changed
     T = fresh;
     lastSnapshot = snap;
-    // Fresh data may mean the pinned match just finished. Check before the early return below,
-    // which would otherwise leave the rail open on the chat tab until the next tab switch.
-    if (typeof syncPinnedChat === 'function') syncPinnedChat();
+    // Fresh data may open or close chats in the dock (a match became ready, a result was
+    // confirmed, someone pinged). Before the early return below, which skips the redraw.
+    if (typeof dockSync === 'function') dockSync();
     // The chat tab manages its own live updates and remembers the open room; a full redraw here
     // would rebuild the room list and yank the user back to Global. Keep data fresh, don't repaint.
     if (currentTab === 'chat') return;
@@ -1426,6 +1569,7 @@ function drawTournament() {
       ${admin && !T.published ? `<div class="panel" style="border-color:var(--amber);margin-top:12px">
         <strong>Draft — not public yet.</strong>
         <p class="muted small" style="margin:6px 0 10px">Only people with the link below can see this. Publish it to list it on the home page and open it up.</p>
+        ${eventDayList(T).length && !T.dayTimesMode ? '<p class="warn small" style="margin:0 0 10px">Before publishing: this event runs on ' + eventDayList(T).length + ' days. Answer <strong>Different start times per day?</strong> under Tournament details on the Admin tab.</p>' : ''}
         <div class="copybox"><input type="text" readonly value="${location.origin}/t/${T.id}"><button class="btn small" data-copy="${location.origin}/t/${T.id}">Copy share link</button></div>
         ${T.publishAt ? `<div class="pub-sched"><span>\u23F1 Scheduled to publish automatically on <strong>${esc(fmtDateTime(T.publishAt))}</strong></span>
           <button class="btn ghost small" id="pubCancel">Cancel schedule</button></div>` : ''}
@@ -1506,9 +1650,9 @@ function drawTournament() {
   else if (currentTab === 'standings') drawStandings(body);
   else if (currentTab === 'admin') drawAdmin(body);
 
-  // The redraw has just rebuilt every pin button on the page; repaint them from the pin state,
-  // and drop the rail if this redraw is the one that finished the pinned match.
-  if (typeof syncPinnedChat === 'function') syncPinnedChat();
+  // The chat dock follows the data and the open tab (it hides on the Chat tab), and the redraw
+  // has just rebuilt every "keep open on the right" button: repaint them all.
+  if (typeof dockSync === 'function') dockSync();
 }
 
 // ----- overview -----
@@ -1527,10 +1671,15 @@ function gameInfoPanel() {
   topCells.push(['Format', esc(typeLine(T)) + '\n' + esc(planSummary(T))]);
   // Multi-day events: spell the days out. Advertising a two-weekend event as one 9-day block
   // reads as "we play midweek too" and puts entrants off, which is why this exists.
+  // Each day with its own start (lib/schedule.js on the server), in the viewer's time zone, so
+  // nobody has to dig the times out of the description.
   if (eventDaysLabel(T)) {
+    const gaps = dayRuns(eventDayList(T)).length > 1;
+    const rows = dayStartList(T).map(s => '<span class="sched-row"><span class="sched-day">Day ' + s.n + '</span> '
+      + esc(s.iso ? fmtWeekdayDateTime(s.iso) : dayLabelShort(s.day)) + '</span>');
     topCells.push(['Schedule', '<strong>' + esc(eventDaysLabel(T)) + '</strong>\n'
-      + esc(eventDaysCountLabel(T)) + ' \u2014 no play on the days in between'
-      + (T.eventDate ? '\nStarts ' + esc(fmtDateTime(T.eventDate)) : '')]);
+      + esc(eventDaysCountLabel(T)) + (gaps ? ' - no play on the days in between' : '')
+      + '\n' + rows.join('\n')]);
   }
   // A declared early stop belongs in Game Setup, next to the format, because it changes what the
   // bracket MEANS - half the matches drawn on it will never be played.

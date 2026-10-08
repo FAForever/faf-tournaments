@@ -522,6 +522,7 @@ async function drawAdmin(el) {
       ${T.imported ? '' : `<label style="margin-top:12px">Event date &amp; time <span class="muted small">(pick more than one day below for an event that spans a weekend, or two)</span></label>
       <div style="display:flex;gap:8px"><input type="date" id="td_date" value="${esc(dv.date)}" style="flex:1"><input type="time" id="td_time" value="${esc(dv.time)}" style="width:130px"></div>
       <div id="td_dayPick" class="dp-host"></div>
+      <div id="td_dayTimes"></div>
       <label style="margin-top:12px">Signups open at <span class="muted small">(before this, only organizers can add players)</span></label>
       <div style="display:flex;gap:8px"><input type="date" id="td_sudate" value="${esc(su.date)}" style="flex:1"><input type="time" id="td_sutime" value="${esc(su.time)}" style="width:130px"></div>
       <label style="margin-top:12px">Signups close at <span class="muted small">(auto-closes signups; team forming &amp; picks still work. Empty = manual)</span></label>
@@ -1077,17 +1078,21 @@ async function drawAdmin(el) {
   wirePlayoffSetup();
 
   // Multi-day picker, two-way bound to the native date input beside it (see mountDayPicker).
-  let _tdDayPick = null;
+  let _tdDayPick = null, _tdDayTimes = null;
   {
     const dateEl = document.getElementById('td_date');
+    const timeEl = document.getElementById('td_time');
     const host = document.getElementById('td_dayPick');
+    const dtHost = document.getElementById('td_dayTimes');
     if (dateEl && host) {
       const existing = (T.eventDays && T.eventDays.length) ? T.eventDays.slice() : (dateEl.value ? [dateEl.value] : []);
+      if (dtHost) _tdDayTimes = mountDayTimes(dtHost, { days: existing, mode: T.dayTimesMode, times: T.dayTimes || {}, mainTime: () => (timeEl ? timeEl.value : '') });
       _tdDayPick = mountDayPicker(host, {
         days: existing,
-        onChange: (days) => { if (days.length) dateEl.value = days[0]; }
+        onChange: (days) => { if (days.length) dateEl.value = days[0]; if (_tdDayTimes) _tdDayTimes.setDays(days); }
       });
-      dateEl.addEventListener('change', () => _tdDayPick.setSingle(dateEl.value));
+      dateEl.addEventListener('change', () => { _tdDayPick.setSingle(dateEl.value); if (_tdDayTimes) _tdDayTimes.setDays(dateEl.value ? [dateEl.value] : []); });
+      if (timeEl && _tdDayTimes) timeEl.addEventListener('change', () => _tdDayTimes.refresh());
     }
   }
 
@@ -1118,6 +1123,7 @@ async function drawAdmin(el) {
       if (dd) {
         info.eventDate = combineDateTimeUTC(dd, document.getElementById('td_time'));
         info.eventDays = _tdDayPick ? _tdDayPick.get() : [];
+        if (_tdDayTimes) { const dt = _tdDayTimes.get(); info.dayTimesMode = dt.mode; info.dayTimes = dt.times; }
         info.signupOpensAt = combineDateTimeUTC(document.getElementById('td_sudate'), document.getElementById('td_sutime'));
         info.signupClosesAt = combineDateTimeUTC(document.getElementById('td_scdate'), document.getElementById('td_sctime'));
         info.checkInDeadline = combineDateTimeUTC(document.getElementById('td_cidate'), document.getElementById('td_citime'));
@@ -1800,16 +1806,10 @@ async function chatRooms() {
   return r;
 }
 
-// ---------- pinned chat ----------
-// One chat can be pinned to a rail on the right of the screen. It lives outside #app so a
-// tournament redraw, a tab switch or a popup never disturbs it, and it survives everything
-// except the four things that should genuinely end it (see syncPinnedChat).
-let _pinnedChat = null;   // { tid, room, label }
-
-function pinStoreKey() { const id = tourneyId(); return id ? 'faf_pinchat_' + id : null; }
-
+// ---------- chat rooms: finished or not ----------
+// (The single pinned chat that used to live here is now the chat dock, public/app.dock.js.)
 // Is this room one of the "Completed matches" chats? Those are read-only history in practice:
-// pinning one would be a dead end, since the rail closes itself the moment a match finishes.
+// docking one would be a dead end, since the dock closes it the moment a match finishes.
 // A room whose match has vanished entirely (bracket regenerated, tournament reset) counts too.
 function chatRoomIsDone(room) {
   if (!room || room.indexOf('match:') !== 0) return false;   // global / captains / staff never complete
@@ -1820,130 +1820,6 @@ function chatRoomIsDone(room) {
 }
 function chatRoomPinnable(room) { return !!room && !!tourneyId() && !chatRoomIsDone(room); }
 
-// `prev` is the record being cleared. Keying off it rather than off tourneyId() matters when
-// the pin is dropped BECAUSE the viewer has navigated to a different tournament: keying off the
-// current page would clear the wrong tournament's stored pin.
-function savePinned(prev) {
-  const rec = _pinnedChat || prev;
-  const tid = rec ? rec.tid : tourneyId();
-  if (!tid) return;
-  const key = 'faf_pinchat_' + tid;
-  try {
-    if (_pinnedChat) sessionStorage.setItem(key, JSON.stringify(_pinnedChat));
-    else sessionStorage.removeItem(key);
-  } catch (e) {}
-}
-
-// The rail is fixed to the viewport, so it has to start below the sticky top bar. offsetHeight
-// (not getBoundingClientRect) because body carries a `zoom` from the UI-scale setting and both
-// elements live in that same scaled coordinate space.
-function positionPinRail() {
-  const bar = document.querySelector('.topbar');
-  // A zero reading means we were called before layout settled — fall back rather than tucking
-  // the rail up underneath the bar.
-  const h = (bar && bar.offsetHeight) ? bar.offsetHeight : 56;
-  document.documentElement.style.setProperty('--pin-top', h + 'px');
-}
-
-function pinChat(room, label) {
-  if (!room) return;
-  if (!chatRoomPinnable(room)) { toast('That match is finished — its chat can’t be pinned.', true); return; }
-  if (_pinnedChat && _pinnedChat.room === room) return;      // already there: don't remount and lose scroll
-  _pinnedChat = { tid: tourneyId(), room, label: label || room };
-  savePinned();
-  renderPinRail();          // replaces whatever was pinned before
-  refreshPinButtons();
-}
-
-function unpinChat(note) {
-  if (!_pinnedChat) return;
-  const prev = _pinnedChat;
-  _pinnedChat = null;
-  savePinned(prev);
-  const el = document.getElementById('pinRail');
-  if (el) { destroyChatIn(el); el.remove(); }
-  document.body.classList.remove('chat-pinned');
-  refreshPinButtons();
-  if (note) toast(note);
-}
-
-function renderPinRail() {
-  if (!_pinnedChat) return;
-  let el = document.getElementById('pinRail');
-  if (!el) {
-    el = document.createElement('aside');
-    el.id = 'pinRail';
-    el.className = 'pin-rail';
-    document.body.appendChild(el);
-  }
-  destroyChatIn(el);
-  el.innerHTML = '<div class="pin-rail-body"></div>';
-  document.body.classList.add('chat-pinned');
-  positionPinRail();
-  mountChat(el.querySelector('.pin-rail-body'), _pinnedChat.room, _pinnedChat.label, { pinned: true });
-}
-
-// Restore a pin after a reload. Called once the tournament data is in, so chatRoomIsDone can
-// actually judge the room; a stored pin for a match that finished meanwhile is simply dropped.
-function restorePinnedChat() {
-  const key = pinStoreKey();
-  if (!key) return;
-  let saved = null;
-  try { saved = JSON.parse(sessionStorage.getItem(key) || 'null'); } catch (e) { saved = null; }
-  if (!saved || !saved.room) return;
-  if (saved.tid !== tourneyId() || !chatRoomPinnable(saved.room)) {
-    try { sessionStorage.removeItem(key); } catch (e) {}
-    return;
-  }
-  if (_pinnedChat && _pinnedChat.room === saved.room) return;
-  _pinnedChat = saved;
-  renderPinRail();
-  refreshPinButtons();
-}
-
-// The single guard that keeps the rail honest. Runs on every redraw, on every tournament poll
-// and on the rail's own 3.5s tick, so no route into a stale pin is left open:
-//   - navigated off the tournament (or onto a different one) -> close
-//   - the match finished, or no longer exists                -> close, and say why
-//   - a room the viewer may no longer pin                    -> the buttons for it disappear
-function syncPinnedChat() {
-  if (_pinnedChat) {
-    positionPinRail();          // the top bar wraps to two rows on narrow screens
-    const tid = tourneyId();
-    if (!tid || tid !== _pinnedChat.tid) unpinChat();
-    else if (T && T.id === tid && chatRoomIsDone(_pinnedChat.room)) {
-      unpinChat('Pinned chat closed — that match is complete.');
-    }
-  }
-  refreshPinButtons();
-}
-
-// Repaint every pin control on screen from the one source of truth. Cheap, and it means no
-// caller has to remember which buttons it just rendered.
-function refreshPinButtons() {
-  const pinnedRoom = _pinnedChat ? _pinnedChat.room : null;
-  document.querySelectorAll('[data-pinbtn]').forEach(b => {
-    const room = b.dataset.pinbtn;
-    // a match that finished while this panel was open loses the button entirely
-    if (!chatRoomPinnable(room)) { b.style.display = 'none'; return; }
-    b.style.display = '';
-    const on = room === pinnedRoom;
-    b.classList.toggle('on', on);
-    b.textContent = on ? '\u{1F4CC} Pinned on the right' : '\u{1F4CC} Pin this chat on the right';
-    b.title = on ? 'Click to unpin it' : 'Keep this chat open in a panel on the right of the screen';
-  });
-  document.querySelectorAll('[data-pinroom]').forEach(b => {
-    const room = b.dataset.pinroom;
-    if (!chatRoomPinnable(room)) { b.style.display = 'none'; return; }
-    b.style.display = '';
-    const on = room === pinnedRoom;
-    b.classList.toggle('on', on);
-    b.title = on ? 'Unpin this chat' : 'Pin this chat on the right';
-    b.setAttribute('aria-pressed', on ? 'true' : 'false');
-  });
-}
-
-window.addEventListener('resize', positionPinRail);
 
 // Escape text, then visually highlight @mentions (word-initial @ followed by a name run).
 // Purely cosmetic — matches loosely so "@Deli" or "@deli7961" both light up.
@@ -1985,32 +1861,31 @@ function renderChatMessages(container, msgs) {
   if (nearBottom) container.scrollTop = container.scrollHeight;
 }
 
-// Build a chat panel into `host` for the given room. Reusable by the tab, the match popup and
-// the pinned rail. Everything inside is addressed by CLASS, not id: two panels can be on screen
-// at once and duplicate ids would have them fighting over the same nodes.
-// opts: { pinned }      this panel IS the rail — offer a close X instead of a pin button
-//       { closeOnPin }  pinning from here should dismiss the popup the panel sits in
+// Build a chat panel into `host` for the given room. Reusable by the Chat tab and the chat dock
+// (public/app.dock.js). Everything inside is addressed by CLASS, not id: two panels can be on
+// screen at once and duplicate ids would have them fighting over the same nodes.
+// opts: { docked }  this panel lives in the dock: the dock's tab bar closes it, so the header
+//                   only offers "open in the Chat tab"; it survives redraws and tab switches
 async function mountChat(host, room, label, opts) {
   opts = opts || {};
   destroyChatIn(host);
   const inst = {
-    host, room, label, pinned: !!opts.pinned,
+    host, room, label, pinned: !!opts.docked, docked: !!opts.docked,
     since: 0, msgs: [], replyTo: null, timer: null, dead: false,
     pollNow: () => {}
   };
   _chatInstances.add(inst);
 
-  const headRight = inst.pinned
+  const headRight = inst.docked
     ? `<span class="ch-actions">
          <button type="button" class="ch-icon" data-chatexpand title="Open this chat in the Chat tab">⤢</button>
-         <button type="button" class="ch-icon ch-close" data-chatunpin title="Unpin and close this chat">✕</button>
        </span>`
     : (chatRoomPinnable(room)
-        ? `<span class="ch-actions"><button type="button" class="chat-pin-btn" data-pinbtn="${esc(room)}">\u{1F4CC} Pin this chat on the right</button></span>`
+        ? `<span class="ch-actions"><button type="button" class="chat-pin-btn" data-pinbtn="${esc(room)}">\u{1F4CC} Keep open on the right</button></span>`
         : '');
 
-  host.innerHTML = `<div class="chat-panel${inst.pinned ? ' chat-panel-pinned' : ''}">
-    <div class="chat-head">${inst.pinned ? '<span class="ch-pin-mark" title="Pinned chat">\u{1F4CC}</span>' : ''}<span class="ch-label" title="${esc(label)}">${esc(label)}</span>${headRight}</div>
+  host.innerHTML = `<div class="chat-panel${inst.docked ? ' chat-panel-pinned chat-panel-docked' : ''}">
+    <div class="chat-head"><span class="ch-label" title="${esc(label)}">${esc(label)}</span>${headRight}</div>
     <div class="chat-log js-chatlog"><div class="empty">Loading…</div></div>
     <div class="chat-replybar js-replybar" style="display:none">
       <span class="crb-label">Replying to</span> <span class="crb-who js-replywho"></span>
@@ -2020,7 +1895,7 @@ async function mountChat(host, room, label, opts) {
     <div class="chat-input">
       <div class="chat-inwrap"><input type="text" class="js-chattext" maxlength="500" placeholder="${viewerIsOrganizer() ? 'Message… (@everyone to ping all entrants, @name to mention, !roll for 1–100)' : 'Message… (!roll for 1–100, !organizer to ping the organizers, @name to mention)'}" autocomplete="off"><div class="chat-mentions js-mentions" style="display:none"></div></div>
       <button class="btn primary small js-chatsend">Send</button>
-      ${viewerIsOrganizer() ? '' : '<button class="btn ghost small js-chatping" title="Flags this chat for the organizers so they know you need help">🔔 Ping organizer</button>'}
+      ${viewerIsOrganizer() ? '' : '<button class="btn ghost small js-chatping" title="Flags this chat for the organizers so they know you need help">\u{1F514} Ping organizer</button>'}
     </div>
     <div class="muted small js-chatnote" style="margin-top:4px"></div>
   </div>`;
@@ -2028,16 +1903,13 @@ async function mountChat(host, room, label, opts) {
   const inp = host.querySelector('.js-chattext');
   const note = host.querySelector('.js-chatnote');
 
-  // ---- pin / unpin controls in the header ----
+  // ---- "keep open on the right" (adds it to the chat dock, or takes it out again) ----
   const pinBtn = host.querySelector('[data-pinbtn]');
   if (pinBtn) pinBtn.onclick = (e) => {
     e.preventDefault();
-    if (_pinnedChat && _pinnedChat.room === room) { unpinChat(); return; }
-    pinChat(room, label);
-    if (opts.closeOnPin && _pinnedChat && _pinnedChat.room === room) { destroyChat(inst); closeModal(); }
+    dockToggle(room, label);
+    if (opts.closeOnPin) { destroyChat(inst); closeModal(); }
   };
-  const unpinBtn = host.querySelector('[data-chatunpin]');
-  if (unpinBtn) unpinBtn.onclick = (e) => { e.preventDefault(); unpinChat(); };
   const expandBtn = host.querySelector('[data-chatexpand]');
   if (expandBtn) expandBtn.onclick = (e) => {
     e.preventDefault();
@@ -2087,8 +1959,8 @@ async function mountChat(host, room, label, opts) {
       // dead panel bolted to the screen. Anything else is a network blip: say so, keep the
       // panel up and let the next poll recover it.
       if (/no access/i.test(e.message || '')) {
-        if (inst.pinned) unpinChat('Pinned chat closed — you no longer have access to it.');
-        else destroyChat(inst);
+        destroyChat(inst);
+        if (inst.docked) { dockRemove(room, { keep: true, note: 'Chat closed - you no longer have access to it.' }); dockRender(); }
       }
     }
   };
@@ -2241,9 +2113,6 @@ async function mountChat(host, room, label, opts) {
   inst.timer = setInterval(() => {
     if (inst.dead) { clearInterval(inst.timer); return; }
     if (!document.body.contains(host)) { destroyChat(inst); return; }   // panel is gone
-    // The rail is the only panel that outlives a redraw, so it is also the one that has to keep
-    // checking whether it still has any business being on screen.
-    if (inst.pinned) syncPinnedChat();
     if (document.hidden) return;                       // tab in the background
     load(true);
   }, 3500);
@@ -2288,7 +2157,7 @@ async function drawChatTab(el) {
     else if (r.unread) badges.push('<span class="unread-dot">' + (r.unread > 9 ? '9+' : r.unread) + '</span>');
     if (r.ping && viewerIsOrganizer()) badges.push('🔔');                  // organizer attention
     const cnt = r.count ? ' <span class="muted small">(' + r.count + ')</span>' : '';
-    const pin = r.done ? '' : `<button type="button" class="chat-pin-mini" data-pinroom="${esc(r.id)}" data-pinlabel="${esc(r.label)}" title="Pin this chat on the right">\u{1F4CC}</button>`;
+    const pin = r.done ? '' : `<button type="button" class="chat-pin-mini" data-pinroom="${esc(r.id)}" data-pinlabel="${esc(r.label)}" title="Keep this chat open on the right">\u{1F4CC}</button>`;
     return `<div class="chat-room-row">
       <button class="chat-room ${r.mention ? 'mentioned' : ''} ${r.ping && viewerIsOrganizer() ? 'pinged' : ''}" data-room="${esc(r.id)}" data-label="${esc(r.label)}">${badges.length ? '<span class="chat-room-badges">' + badges.join(' ') + '</span> ' : ''}${esc(r.label)}${cnt}</button>
       ${pin}
@@ -2311,7 +2180,9 @@ async function drawChatTab(el) {
       ${orgLine}
       ${data.muted ? '<div class="warn small" style="margin-bottom:8px">You are muted.</div>' : ''}
       <div class="chat-roomlist">${listHtml}</div>
-      <p class="muted small chat-pin-hint">\u{1F4CC} keeps a chat open on the right while you browse the bracket, matches and vetoes. One at a time.</p>
+      <p class="muted small chat-pin-hint">${viewerIsOrganizer()
+        ? 'A chat where someone pings the organizers opens on the right by itself while you browse the bracket, matches and vetoes. \u{1F4CC} keeps any other chat there too.'
+        : 'Your match chats open on the right by themselves while you browse the bracket, matches and vetoes (and Global while the tournament runs). A match chat closes there once its result is confirmed. \u{1F4CC} keeps any other chat there too.'}</p>
     </div>
     <div class="chat-host" id="chatHost"></div>
   </div>`;
@@ -2325,8 +2196,7 @@ async function drawChatTab(el) {
   el.querySelectorAll('.chat-room').forEach(b => b.onclick = () => pick(b));
   el.querySelectorAll('[data-pinroom]').forEach(b => b.onclick = (e) => {
     e.preventDefault(); e.stopPropagation();
-    if (_pinnedChat && _pinnedChat.room === b.dataset.pinroom) unpinChat();
-    else pinChat(b.dataset.pinroom, b.dataset.pinlabel);
+    dockToggle(b.dataset.pinroom, b.dataset.pinlabel);
   });
   const cToggle = el.querySelector('#chatCompletedToggle');
   if (cToggle) cToggle.onclick = () => {
@@ -2344,16 +2214,21 @@ async function drawChatTab(el) {
   refreshPinButtons();
 }
 
+// A match's chat link opens that chat in the dock on the right (public/app.dock.js), on top of
+// whatever tab you are on. A finished match's chat is history: it opens on the Chat tab instead.
 function openMatchChat(m) {
   const label = mLabelFull(m) + ' - ' + teamName(m.team1) + ' vs ' + teamName(m.team2);
   const room = 'match:' + m.id;
-  modal(`<h3>Match chat</h3><div id="mcHost" class="chat-compact"></div>
-    <div class="actions"><button class="btn ghost" id="mcClose">Close</button></div>`, root => {
-    const mcHost = root.querySelector('#mcHost');
-    root.querySelector('#mcClose').onclick = () => { destroyChatIn(mcHost); closeModal(); };
-    // Pinning from the popup puts the chat on the right, so the popup has done its job.
-    mountChat(mcHost, room, label, { closeOnPin: true });
-  }, { mid: true });
+  if (document.getElementById('modalRoot').innerHTML) closeModal();
+  if (chatRoomIsDone(room)) {
+    _chatActiveRoom = room;
+    _chatCompletedOpen = true;
+    currentTab = 'chat';
+    syncTabURL();
+    drawTournament();
+    return;
+  }
+  dockOpen(room, label);
 }
 
 // ---------- routing ----------
@@ -2376,9 +2251,9 @@ function setTitle(name) {
 }
 
 function route() {
-  // A pinned chat belongs to one tournament. Leaving it (home, series, another event) closes
-  // the rail before the new page draws, so it can never hang around over unrelated content.
-  syncPinnedChat();
+  // The chat dock belongs to one tournament. Leaving it (home, series, another event) closes it
+  // before the new page draws, so it can never hang around over unrelated content.
+  if (typeof dockSync === 'function') dockSync();
   if (location.pathname === '/series') renderSeriesIndex();
   else if (location.pathname.startsWith('/series/')) renderSeries(location.pathname.slice(8));
   else if (location.pathname === '/host') renderHost();

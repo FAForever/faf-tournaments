@@ -1306,8 +1306,8 @@ function drawVetoes(el) {
     wireFactionVeto(bodyEl);
     const vchat = cardEl.querySelector('[data-vchat]');
     if (vchat) vchat.onclick = (e) => { e.preventDefault(); openMatchChat(m); };
-    // map thumbnails open the full preview. Only wired on the tab, not inside the match-details
-    // popup, where opening another modal would replace the popup the user is reading.
+    // map thumbnails open the full preview. Inside a popup the preview opens on top of it and
+    // closing it goes back there (showMapInfo stacks), so the next map is one click away.
     cardEl.querySelectorAll('[data-map-info]').forEach(t => t.onclick = () => showMapInfo(t.dataset.mapInfo));
     cardEl.querySelectorAll('[data-teamid]').forEach(nameEl => {
       nameEl.onclick = (e) => { e.preventDefault(); e.stopPropagation(); showTeamPopup(nameEl.dataset.teamid); };
