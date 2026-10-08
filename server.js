@@ -31,6 +31,8 @@ const { PRESETS, presetById, presetsFor } = require('./lib/presets');
 const PICKS = require('./lib/picks');
 // Predictions (pick'em): stages, the bracket graph, validation and scoring.
 const PRED = require('./lib/predict');
+// Per-day start times of a multi-day event, and moving an event by whole days.
+const SCHED = require('./lib/schedule');
 const { swissPairRound, swissAfterReport, swissStandings,
         swissCuts, swissCutRounds, swissRecord, swissAdvanced, swissPlanRound1, swissShufflePlan,
         stageTwoCfg, stageTwoField, stageTwoBuild, swissStageDone, swissFinishIfDone,
@@ -221,6 +223,11 @@ function saveDB() {
   }, 150);
 }
 
+// A failed save used to be one log line nobody reads, while the site kept running from memory and
+// lost everything since its start on the next restart or deploy. The last failure is now kept:
+// /healthz says so in its text (still 200, so a liveness probe never restarts the pod and throws
+// the unsaved data away), and site admins and directors see a red banner on every page.
+let saveFailure = null;   // { code, message, at } while saving fails, null once a save works
 function writeDB() {
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -230,8 +237,26 @@ function writeDB() {
     const tmp = DB_FILE + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(db));
     fs.renameSync(tmp, DB_FILE);
+    saveFailure = null;
   } catch (e) {
+    saveFailure = { code: e.code || 'ERROR', message: e.message, at: Date.now() };
     console.error('save failed:', e.message);
+  }
+}
+// The same check before anything is saved, so a data folder the server cannot write to shows up
+// the moment it starts rather than with the first change somebody makes.
+function probeDataDirs() {
+  for (const dir of [DATA_DIR, MAP_IMG_DIR, DESC_IMG_DIR, ARTICLE_IMG_DIR]) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      const probe = path.join(dir, '.write-test');
+      fs.writeFileSync(probe, 'ok');
+      fs.unlinkSync(probe);
+    } catch (e) {
+      saveFailure = { code: e.code || 'ERROR', message: 'cannot write to ' + dir + ': ' + e.message, at: Date.now() };
+      console.error('DATA FOLDER NOT WRITABLE - nothing will be saved:', saveFailure.message);
+      return;
+    }
   }
 }
 
@@ -1445,6 +1470,18 @@ function canSeeDraft(t, ctx) {
 }
 // Should this tournament appear in a listing for this viewer at all?
 function listVisible(t, ctx) { return t.published !== false || canSeeDraft(t, ctx); }
+// The viewer's own part in a tournament, for the home page tags and "My tournaments": a NAMED
+// organizer (a director's rights over every official event do not make it theirs), a player
+// whose signup counts (a pending request does not), or a caster. Null when none applies.
+function viewerRolesIn(t, ctx) {
+  const fid = ctx && ctx.fid;
+  if (!fid || !t) return null;
+  const r = {};
+  if (Array.isArray(t.organizerFafIds) && t.organizerFafIds.indexOf(fid) >= 0) r.org = 1;
+  if ((t.players || []).some(p => p.fafId === fid && !p.pending)) r.player = 1;
+  if (Array.isArray(t.casterFafIds) && t.casterFafIds.indexOf(fid) >= 0) r.caster = 1;
+  return Object.keys(r).length ? r : null;
+}
 
 function isOrganizer(t, req) {
   const sess = currentSession(req);
@@ -1937,6 +1974,7 @@ function chatRoomsFor(t, req, token) {
       last: msgs.length ? msgs[msgs.length - 1].at : 0,
       unread: unread,
       ping: (t.chatPings && t.chatPings[id]) ? 1 : 0,   // organizer attention flag
+      pingAt: (t.chatPings && t.chatPings[id] && t.chatPings[id].at) || 0,
       mention: myPings[id] ? 1 : 0,                     // this viewer was @mentioned here
       done: done ? 1 : 0                                // match finished (for grouping)
     });
@@ -2035,6 +2073,8 @@ function publicView(t) {
     status: t.status, createdAt: t.createdAt,
     eventDate: t.eventDate || null,
     eventDays: (t.eventDays && t.eventDays.length) ? t.eventDays.slice() : null,
+    dayTimesMode: t.dayTimesMode || null,
+    dayTimes: (t.dayTimes && Object.keys(t.dayTimes).length) ? Object.assign({}, t.dayTimes) : null,
     challongeDate: t.challongeDate || null,
     rounds: t.rounds || 0,
     maps: t.maps || {},
@@ -2665,7 +2705,9 @@ async function handleAuth(req, res, url) {
       // siteAdmin is the EFFECTIVE flag (false while stood down) so every existing client check
       // stays correct without being touched. siteAdminAccount + adminStandDown exist only so the
       // toggle itself can be drawn while the powers are off.
-      user: sess ? { fafId: sess.fafId, fafName: sess.fafName, discord: prof.discord || '', editor: db.editorAllowed[sess.fafId] ? 1 : 0, importer: db.importerAllowed[sess.fafId] ? 1 : 0, director: (db.directors && db.directors[sess.fafId]) ? 1 : 0, siteAdmin: isSiteAdmin(req) ? 1 : 0, siteAdminAccount: isSiteAdminAccount(req) ? 1 : 0, adminStandDown: siteAdminStoodDown(req) ? 1 : 0, allowed: (db.hostAllowed[sess.fafId] || (db.directors && db.directors[sess.fafId]) || (db.siteAdmins && db.siteAdmins[sess.fafId])) ? 1 : 0 } : null
+      user: sess ? { fafId: sess.fafId, fafName: sess.fafName, discord: prof.discord || '', editor: db.editorAllowed[sess.fafId] ? 1 : 0, importer: db.importerAllowed[sess.fafId] ? 1 : 0, director: (db.directors && db.directors[sess.fafId]) ? 1 : 0, siteAdmin: isSiteAdmin(req) ? 1 : 0, siteAdminAccount: isSiteAdminAccount(req) ? 1 : 0, adminStandDown: siteAdminStoodDown(req) ? 1 : 0, allowed: (db.hostAllowed[sess.fafId] || (db.directors && db.directors[sess.fafId]) || (db.siteAdmins && db.siteAdmins[sess.fafId])) ? 1 : 0,
+        // the server cannot save (see writeDB): the people who can get it fixed must see it
+        saveFailing: (saveFailure && (isSiteAdmin(req) || (db.directors && db.directors[sess.fafId]))) ? { code: saveFailure.code, at: saveFailure.at } : undefined } : null
     });
   }
 
@@ -2885,6 +2927,9 @@ async function handleAPI(req, res, url) {
       veto: cleanVeto(b.veto),
       eventDate: cleanDate(b.eventDate),
       eventDays: cleanEventDays(b.eventDays) || null,
+      // multi-day: does every day start at the event time, or does each have its own (lib/schedule)
+      dayTimesMode: SCHED.cleanDayTimesMode(b.dayTimesMode),
+      dayTimes: SCHED.cleanDayTimes(b.dayTimes, cleanEventDays(b.eventDays)),
       signupOpensAt: cleanDate(b.signupOpensAt),
       signupClosesAt: cleanDate(b.signupClosesAt),
       // Check-in deadline is stored as epoch ms (unlike the ISO date fields around it).
@@ -3650,7 +3695,15 @@ async function handleAPI(req, res, url) {
         maxRating: t.maxRating != null ? t.maxRating : null,
         maxTeamRating: t.maxTeamRating != null ? t.maxTeamRating : null,
         ratingCap: t.ratingCap != null ? t.ratingCap : null,
-        prize: (t.prize && t.prize.currency && t.prize.amount != null) ? t.prize : null
+        prize: (t.prize && t.prize.currency && t.prize.amount != null) ? t.prize : null,
+        // the home page filters by series and the calendar shows each day's own start time
+        seriesId: (t.seriesId && db.series[t.seriesId]) ? t.seriesId : null,
+        seriesName: (t.seriesId && db.series[t.seriesId]) ? db.series[t.seriesId].name : null,
+        dayTimesMode: t.dayTimesMode || null,
+        dayTimes: (t.dayTimes && Object.keys(t.dayTimes).length) ? Object.assign({}, t.dayTimes) : null,
+        // what the viewer is here: organizer (named, not via a director's blanket rights), player
+        // or caster. Absent for everyone else, which is most rows for most viewers.
+        me: viewerRolesIn(t, dctx) || undefined
       }));
     return json(res, 200, list);
   }
@@ -3883,13 +3936,28 @@ async function handleAPI(req, res, url) {
       // without fetching the room list. Total is derived for the CHAT tab.
       view.unreadByRoom = {};
       view.myUnreadCount = 0;
+      const myRooms = (sess && sess.fafId) || organizer ? chatRoomsFor(t, req, tok) : [];
       if (sess && sess.fafId) {
-        for (const r of chatRoomsFor(t, req, tok)) {
+        for (const r of myRooms) {
           if (!r.unread) continue;
           view.unreadByRoom[r.id] = r.unread;
           view.myUnreadCount += r.unread;
         }
       }
+      // The chat dock on the right (public/app.dock.js) opens chats by itself, so it needs to know
+      // which rooms are this viewer's and what is happening in them. A player gets every room
+      // they are in (a handful). Organizers and casters can read every match room, so they get the
+      // shared rooms plus only the match rooms that want them: an organizer ping or an @mention.
+      // An organizer who also plays in their own event still gets their own match (`mine`).
+      const myTeamsHere = (organizer || streamer) ? viewerTeamIds(t, req) : [];
+      const ownMatch = (r) => {
+        if (!myTeamsHere.length || r.id.indexOf('match:') !== 0) return false;
+        const mm = matchById(t, r.id.slice(6));
+        return !!(mm && (myTeamsHere.indexOf(mm.team1) >= 0 || myTeamsHere.indexOf(mm.team2) >= 0));
+      };
+      view.chatDock = myRooms
+        .filter(r => !(organizer || streamer) || r.id.indexOf('match:') !== 0 || (organizer && r.ping) || r.mention || ownMatch(r))
+        .map(r => ({ id: r.id, label: r.label, done: r.done, unread: r.unread, last: r.last, mention: r.mention, ping: organizer ? r.ping : 0, pingAt: organizer ? r.pingAt : 0, mine: (organizer || streamer) && ownMatch(r) ? 1 : undefined }));
       // Discord handles are contact info: visible to organizers and fellow signed-up players,
       // never to the anonymous public. Copy the player objects so the db is never mutated.
       const canSeeContacts = organizer || !!signedUpId;
@@ -4370,6 +4438,12 @@ async function handleAPI(req, res, url) {
 
     if (sub === 'publish') {
       if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
+      // A multi-day event must say whether each day has its own start time before anyone sees it
+      // (lib/schedule). Checked for publishing now and for scheduling it alike.
+      if (!b.cancelSchedule && t.published === false) {
+        const prob = SCHED.scheduleProblem(t);
+        if (prob) return bad(res, prob);
+      }
       // publishAt: schedule instead of publishing now. Empty/absent clears any schedule and
       // publishes immediately (the existing behaviour).
       if (b.publishAt !== undefined && b.publishAt) {
@@ -4399,6 +4473,40 @@ async function handleAPI(req, res, url) {
       saveDB();
       audit(req, 'tournament_published', { tournamentId: t.id, tournamentName: t.name, token: b.admin });
       return json(res, 200, { ok: true, published: 1 });
+    }
+
+    // Move the event by whole days: the home page calendar's drag and drop. The whole timeline
+    // moves with it (event days, per-day times, signup window, check-in; see lib/schedule.js), and
+    // only before the tournament starts. `days` shifts a dated event; `date` gives an undated one
+    // its day (or moves a dated one so it starts on that day).
+    if (sub === 'move_date') {
+      if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
+      if (t.imported) return bad(res, 'An imported tournament keeps its original date');
+      if (t.abandoned) return bad(res, 'This tournament is marked as abandoned');
+      if (t.status !== 'signup') return bad(res, 'This tournament has already started, so its date can no longer be moved');
+      let n = 0;
+      if (b.date !== undefined && b.date !== null && b.date !== '') {
+        const ymd = String(b.date).slice(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd) || isNaN(Date.parse(ymd + 'T00:00:00Z'))) return bad(res, 'Invalid date');
+        if (!t.eventDate) {
+          t.eventDate = ymd;
+          t.eventDays = null;
+          tlog(t, req, b.admin, 'set the event date to ' + ymd);
+          saveDB();
+          return json(res, 200, { ok: true, eventDate: t.eventDate, eventDays: null });
+        }
+        n = SCHED.daysBetween(String(t.eventDate).slice(0, 10), ymd);
+      } else {
+        n = Number(b.days);
+        if (!Number.isInteger(n)) return bad(res, 'Say how many days to move it by');
+      }
+      if (!t.eventDate) return bad(res, 'This tournament has no date yet');
+      if (Math.abs(n) > 3660) return bad(res, 'That is more than ten years away');
+      if (!n) return json(res, 200, { ok: true, unchanged: 1, eventDate: t.eventDate, eventDays: t.eventDays || null });
+      const mv = SCHED.shiftSchedule(t, n);
+      tlog(t, req, b.admin, 'moved the event ' + Math.abs(n) + ' day' + (Math.abs(n) === 1 ? '' : 's') + ' ' + (n > 0 ? 'later' : 'earlier') + ' (' + mv.from + ' to ' + mv.to + ')');
+      saveDB();
+      return json(res, 200, { ok: true, days: n, eventDate: t.eventDate, eventDays: t.eventDays || null });
     }
 
     if (sub === 'signup') {
@@ -6050,7 +6158,28 @@ async function handleAPI(req, res, url) {
 
     if (sub === 'edit_info') {
       if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
+      // Per-day start times are checked against the NEW schedule before anything is written, so
+      // a refused save changes nothing and a published event can never be left with a day that
+      // has no start time. Drafts may be saved half-done: the publish button is what insists.
+      let nextSched = null;
+      if (b.eventDate !== undefined || b.eventDays !== undefined || b.dayTimesMode !== undefined || b.dayTimes !== undefined) {
+        const probe = { eventDate: b.eventDate !== undefined ? cleanDate(b.eventDate) : t.eventDate, eventDays: t.eventDays };
+        if (b.eventDays !== undefined) applyEventDays(probe, b.eventDays);
+        const mode = b.dayTimesMode !== undefined ? SCHED.cleanDayTimesMode(b.dayTimesMode) : (t.dayTimesMode || null);
+        nextSched = {
+          eventDate: probe.eventDate, eventDays: probe.eventDays, dayTimesMode: mode,
+          dayTimes: SCHED.cleanDayTimes(b.dayTimes !== undefined ? b.dayTimes : t.dayTimes, probe.eventDays)
+        };
+        if (t.published !== false && mode === 'perday') {
+          const prob = SCHED.scheduleProblem(nextSched);
+          if (prob) return bad(res, prob.replace(' before publishing', ''));
+        }
+      }
       const touched = ['description', 'rewards', 'prizeCurrency', 'prizeAmount', 'sponsors', 'streams', 'minRating', 'maxRating', 'maxTeamRating', 'ratingCap', 'lobbyOptions', 'mods', 'signupMode', 'playerReporting', 'checkInDeadline', 'veto'].filter(k => b[k] !== undefined);
+      if (nextSched && (nextSched.dayTimesMode !== (t.dayTimesMode || null) || JSON.stringify(nextSched.dayTimes || null) !== JSON.stringify(t.dayTimes || null))) {
+        touched.push(nextSched.dayTimesMode === 'perday' ? 'start time per day'
+          : (nextSched.dayTimesMode === 'same' ? 'same start time every day' : 'start times per day (unanswered)'));
+      }
       if (touched.length) tlog(t, req, b.admin, 'updated settings: ' + touched.join(', '));
       if (b.description !== undefined) t.description = cleanName(b.description, 20000);
       if (b.rewards !== undefined) t.rewards = cleanName(b.rewards, 2000);
@@ -6088,6 +6217,7 @@ async function handleAPI(req, res, url) {
       if (b.signupMode !== undefined && ['open', 'invite', 'request'].indexOf(b.signupMode) >= 0) t.signupMode = b.signupMode;
       if (b.playerReporting !== undefined) t.playerReporting = !!b.playerReporting;
       if (b.name !== undefined) { const nm = cleanName(b.name, 60); if (nm) t.name = nm; }
+      if (nextSched) { t.dayTimesMode = nextSched.dayTimesMode; t.dayTimes = nextSched.dayTimes; }
       if (b.eventDate !== undefined) t.eventDate = cleanDate(b.eventDate);
       if (b.eventDays !== undefined) applyEventDays(t, b.eventDays);
       if (b.signupOpensAt !== undefined) t.signupOpensAt = cleanDate(b.signupOpensAt);
@@ -7562,12 +7692,16 @@ function serveStatic(req, res, url) {
   });
 }
 
+probeDataDirs();
 loadDB();
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   // Liveness probe for the cluster. Says the process is up and answering, nothing more.
-  if (url.pathname === '/healthz') { res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('ok'); }
+  if (url.pathname === '/healthz') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    return res.end(saveFailure ? 'ok (saving fails: ' + saveFailure.code + ')' : 'ok');
+  }
   try {
     // Resolve an Authorization: Bearer session once, before anything reads currentSession().
     // Only costs a FAF round trip when a token is present and uncached.
@@ -7624,11 +7758,15 @@ server.listen(PORT, () => console.log('FAF Tourney running on port ' + PORT));
 
 // A deploy stops the old container with SIGTERM (Ctrl+C sends SIGINT). Without a handler Node
 // dies on the spot and a save still waiting out its 150ms debounce is lost, so write it now.
+function flushSave() { if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; writeDB(); } }
 function shutdown(signal) {
   console.log(signal + ' received, saving and shutting down');
-  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; writeDB(); }
+  flushSave();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 5000).unref();
 }
+// A request still in flight when the signal came can schedule one more save after the flush
+// above; write it on the way out instead of losing a change that was already answered.
+process.on('exit', flushSave);
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));

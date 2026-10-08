@@ -1205,7 +1205,9 @@ tr.mt-mine:hover > td { background: rgba(217,164,74,0.12); }
 /* home: collapsible completed archive, split by year */
 h2.collapsy { cursor: pointer; user-select: none; }
 h2.collapsy:hover { color: var(--amber); }
-.collapsy-caret { display: inline-block; width: 12px; color: var(--muted); font-size: 11px; }
+/* a folding heading's caret takes the place of the theme's triangle, rather than sitting next to it */
+h2.collapsy::before { display: none; }
+.collapsy-caret { display: inline-block; width: 12px; color: var(--amber); font-size: 12px; }
 .cmp-year { margin-top: 14px; }
 .cmp-year:first-child { margin-top: 4px; }
 .cmp-year-head {
@@ -1215,16 +1217,16 @@ h2.collapsy:hover { color: var(--amber); }
 .cmp-more { margin-top: 8px; }
 
 /* ---------------------------------------------------------------------------
-   Pinned chat
-   One chat can be pinned to a rail on the right, so it stays readable while the
-   user works through the bracket, matches and vetoes. The rail is fixed to the
-   viewport and the page is PADDED out of its way rather than covered: an overlay
-   would sit on top of match boxes and swallow their clicks. On the bracket that
-   just makes the (already horizontally scrollable) bracket narrower.
+   Chat dock (public/app.dock.js)
+   The viewer's chats as tabs on the right, so they stay readable while the user
+   works through the bracket, matches and vetoes. Fixed to the viewport, and the
+   page is PADDED out of its way rather than covered: an overlay would sit on top
+   of match boxes and swallow their clicks. Minimized it is one button in the
+   corner; narrow screens get a bottom sheet instead of a rail.
    --------------------------------------------------------------------------- */
 :root { --pin-w: clamp(300px, 25vw, 370px); --pin-top: 56px; --pin-h: min(58vh, 440px); }
 
-.pin-rail {
+.chat-dock {
   position: fixed; right: 0; top: var(--pin-top); bottom: 0;
   width: var(--pin-w);
   z-index: 18;                       /* under the sticky top bar (20) and any modal (50) */
@@ -1233,24 +1235,64 @@ h2.collapsy:hover { color: var(--amber); }
   border-left: 1px solid var(--line-solid);
   box-shadow: -14px 0 34px #00000073;
 }
-.pin-rail::before {                  /* the amber edge every panel in this theme carries */
+.chat-dock::before {                 /* the amber edge every panel in this theme carries */
   content: ''; position: absolute; left: -1px; top: 0; bottom: 0; width: 2px;
   background: linear-gradient(180deg, var(--amber), transparent 55%); opacity: .5;
 }
-.pin-rail-body { flex: 1; min-height: 0; display: flex; }
-/* the panel fills the rail: the log takes the slack, the composer stays pinned to the bottom */
+.cd-launch { display: none; }
+.cd-head { flex: none; display: flex; align-items: flex-end; gap: 6px; padding: 6px 6px 0 8px; border-bottom: 1px solid var(--line-solid); }
+.cd-tabs { flex: 1; min-width: 0; display: flex; gap: 3px; overflow-x: auto; scrollbar-width: thin; }
+.cd-tab {
+  flex: 0 1 auto; max-width: 160px; min-width: 0;
+  display: flex; align-items: center; gap: 5px;
+  padding: 6px 5px 6px 9px; margin-bottom: -1px;
+  border: 1px solid var(--line-solid); border-bottom-color: transparent; border-radius: 5px 5px 0 0;
+  background: #111923; color: var(--muted); font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+.cd-tab:hover { color: var(--text); }
+.cd-tab.on { background: var(--panel2); color: var(--amber); border-color: #ffb44766; border-bottom-color: var(--panel2); }
+.cd-tab:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.cd-tab-label { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.cd-x { flex: none; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 11px; line-height: 1; padding: 2px 3px; border-radius: 3px; }
+.cd-x:hover { color: var(--red); background: #e2564a1c; }
+.cd-badge {
+  flex: none; font-family: var(--mono); font-size: 10px; font-weight: 600; line-height: 1;
+  padding: 2px 5px; border-radius: 8px; background: var(--blue); color: #0c1219;
+}
+.cd-badge.mention { background: var(--red); color: #fff; }
+.cd-badge.ping { background: none; padding: 0; font-size: 12px; }
+.cd-min {
+  flex: none; align-self: center; margin-bottom: 5px;
+  background: none; border: 1px solid var(--line-solid); border-radius: 4px; cursor: pointer;
+  color: var(--muted); font-size: 11px; padding: 3px 8px;
+}
+.cd-min:hover { color: var(--amber); border-color: var(--amber); }
+.cd-body { flex: 1; min-height: 0; display: flex; }
+/* minimized: just a button in the corner, with what is waiting */
+.chat-dock.collapsed { top: auto; left: auto; right: 16px; bottom: 16px; width: auto; height: auto; background: none; border: none; box-shadow: none; }
+.chat-dock.collapsed::before, .chat-dock.collapsed .cd-head, .chat-dock.collapsed .cd-body { display: none; }
+.chat-dock.collapsed .cd-launch {
+  display: inline-flex; align-items: center; gap: 7px;
+  background: var(--panel2); color: var(--amber); border: 1px solid #ffb44788; border-radius: 20px;
+  padding: 9px 16px; font-family: var(--display); letter-spacing: 1px; font-size: 13px; cursor: pointer;
+  box-shadow: 0 10px 28px #000a;
+}
+.chat-dock.collapsed .cd-launch:hover { border-color: var(--amber); background: #1f2c3a; }
+/* the panel fills the dock: the log takes the slack, the composer stays at the bottom */
 .chat-panel.chat-panel-pinned { flex: 1; min-height: 0; height: 100%; border: none; border-radius: 0; background: transparent; }
 .chat-panel-pinned .chat-log { height: auto; flex: 1 1 auto; min-height: 0; }
 .chat-panel-pinned .chat-input { flex-wrap: wrap; }
 .chat-panel-pinned .chat-input .btn { flex: 0 0 auto; }
+/* in the narrow dock the message box gets the whole row, the buttons go under it */
+.chat-panel-pinned .chat-inwrap { flex: 1 1 100%; }
+.chat-panel-docked .chat-head { font-size: 11px; padding: 6px 10px; }
 
-body.chat-pinned main { padding-right: calc(var(--pin-w) + 10px); }
-body.chat-pinned #toast { transform: translateX(calc(-50% - (var(--pin-w) / 2))); }
+body.chat-docked main { padding-right: calc(var(--pin-w) + 10px); }
+body.chat-docked #toast { transform: translateX(calc(-50% - (var(--pin-w) / 2))); }
 
-/* chat panel header: label on the left, pin/close controls on the right */
+/* chat panel header: label on the left, controls on the right */
 .chat-head { display: flex; align-items: center; gap: 8px; }
 .chat-head .ch-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chat-head .ch-pin-mark { flex: none; font-size: 12px; filter: saturate(.8); }
 .chat-head .ch-actions { flex: none; display: flex; align-items: center; gap: 6px; }
 .ch-icon {
   background: none; border: 1px solid transparent; border-radius: 4px; cursor: pointer;
@@ -1258,9 +1300,8 @@ body.chat-pinned #toast { transform: translateX(calc(-50% - (var(--pin-w) / 2)))
   transition: color .15s, border-color .15s, background .15s;
 }
 .ch-icon:hover { color: var(--amber); border-color: #ffb44755; background: var(--amber-dim); }
-.ch-icon.ch-close:hover { color: var(--red); border-color: #e2564a66; background: #e2564a1c; }
 
-/* "Pin this chat on the right" — quiet until you want it, amber once it is on */
+/* "Keep open on the right" - quiet until you want it, amber once it is on */
 .chat-pin-btn {
   background: transparent; border: 1px solid var(--line-solid); border-radius: 4px;
   color: var(--muted); cursor: pointer; white-space: nowrap;
@@ -1284,17 +1325,17 @@ body.chat-pinned #toast { transform: translateX(calc(-50% - (var(--pin-w) / 2)))
 .chat-pin-mini.on { opacity: 1; border-color: var(--amber); background: var(--amber-dim); box-shadow: 0 0 10px #ffb44722; }
 .chat-pin-hint { margin: 10px 0 0; line-height: 1.45; }
 
-/* Narrow screens have no room for a rail — dock the pinned chat to the bottom instead. */
+/* Narrow screens have no room for a rail - the dock becomes a bottom sheet. */
 @media (max-width: 980px) {
-  .pin-rail {
+  .chat-dock:not(.collapsed) {
     top: auto; left: 0; right: 0; width: auto; height: var(--pin-h);
     border-left: none; border-top: 1px solid var(--line-solid);
     box-shadow: 0 -14px 34px #00000073;
   }
-  .pin-rail::before { left: 0; right: 0; top: -1px; bottom: auto; width: auto; height: 2px;
+  .chat-dock:not(.collapsed)::before { left: 0; right: 0; top: -1px; bottom: auto; width: auto; height: 2px;
     background: linear-gradient(90deg, var(--amber), transparent 55%); }
-  body.chat-pinned main { padding-right: 0; padding-bottom: calc(var(--pin-h) + 24px); }
-  body.chat-pinned #toast { transform: translateX(-50%); bottom: calc(var(--pin-h) + 16px); }
+  body.chat-docked main { padding-right: 0; padding-bottom: calc(var(--pin-h) + 24px); }
+  body.chat-docked #toast { transform: translateX(-50%); bottom: calc(var(--pin-h) + 16px); }
   .chat-pin-btn { font-size: 10px; padding: 4px 7px; }
 }
 
@@ -1580,3 +1621,159 @@ tr.row-out > td { opacity: .55; }
   .pred-recrow .pred-mark { grid-column: 4; grid-row: 1; }
   .pred-recrow .pred-rec { grid-column: 1 / -1; grid-row: 2; }
 }
+
+/* ---------------------------------------------------------------------------
+   Popups on top of popups, and the picture viewer (app.js modal({stack}) and
+   showImageViewer). A map opened from the veto popup or the match details sits
+   on top of it and closes back to it; the enlarged picture opens on the page.
+   --------------------------------------------------------------------------- */
+.modal-bg.modal-stacked { background: rgba(5, 9, 14, .55); }
+.modal-bg.img-viewer-layer { padding: 0; background: rgba(3, 6, 10, .94); }
+.img-viewer { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; cursor: zoom-out; }
+/* the box fills the window and the picture is fitted inside it, so a small preview is shown
+   enlarged rather than at its own (smaller) size */
+.img-viewer-img { width: 96vw; height: 86vh; object-fit: contain; }
+.img-viewer-close {
+  position: fixed; top: 14px; right: 16px; width: 38px; height: 38px; border-radius: 50%;
+  border: 1px solid #ffffff33; background: #0c1219cc; color: var(--text); font-size: 15px; cursor: pointer;
+}
+.img-viewer-close:hover { border-color: var(--amber); color: var(--amber); }
+.img-viewer-cap {
+  position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); max-width: 90vw;
+  font-family: var(--display); letter-spacing: 1px; color: var(--text);
+  background: #0c1219cc; border: 1px solid var(--line-solid); border-radius: 4px; padding: 4px 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.map-lightbox-img { cursor: zoom-in; }
+
+/* ---------------------------------------------------------------------------
+   Per-day start times (host form and Admin tab) and the Schedule on the Overview
+   --------------------------------------------------------------------------- */
+.daytimes {
+  margin-top: 10px; max-width: 560px;
+  border: 1px solid var(--line-solid); border-left: 3px solid var(--amber); border-radius: 4px;
+  background: #ffb4470a; padding: 10px 12px;
+}
+.dt-q { font-size: 13px; font-weight: 600; }
+.dt-opts { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+label.dt-opt {
+  display: flex; align-items: center; gap: 8px; margin: 0; cursor: pointer;
+  font-family: var(--body); font-size: 13px; text-transform: none; letter-spacing: 0; color: var(--text);
+}
+.dt-opt input { width: auto; margin: 0; accent-color: var(--amber); }
+.dt-rows { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.dt-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
+.dt-day { min-width: 140px; font-family: var(--mono); font-size: 12px; }
+.dt-first { color: var(--text); }
+.sched-day { display: inline-block; min-width: 46px; font-family: var(--mono); font-size: 11px; color: var(--amber); }
+
+/* ---------------------------------------------------------------------------
+   Home page: list/calendar switch, filters, sections, role tags
+   --------------------------------------------------------------------------- */
+.home-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin: 0 0 14px; }
+.hb-views { display: inline-flex; border: 1px solid var(--line-solid); border-radius: 5px; overflow: hidden; flex: none; }
+.hb-view {
+  background: var(--panel); border: none; color: var(--muted); cursor: pointer;
+  padding: 7px 14px; font-family: var(--display); font-size: 12px; letter-spacing: 1px; text-transform: uppercase;
+}
+.hb-view + .hb-view { border-left: 1px solid var(--line-solid); }
+.hb-view:hover { color: var(--text); }
+.hb-view.on { background: var(--amber-dim); color: var(--amber); }
+.hb-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; flex: 1; min-width: 0; }
+.hb-seg { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.hb-chip {
+  background: var(--panel); border: 1px solid var(--line-solid); border-radius: 14px; cursor: pointer;
+  color: var(--muted); padding: 4px 11px; font-size: 12px; font-family: var(--body);
+}
+.hb-chip:hover { color: var(--text); border-color: #3a5470; }
+.hb-chip.on { color: var(--amber); border-color: var(--amber); background: var(--amber-dim); }
+input[type=text].hb-search { width: 200px; max-width: 100%; padding: 6px 10px; font-size: 13px; }
+select.hb-series { width: auto; max-width: 240px; padding: 6px 8px; font-size: 13px; }
+.hb-reset { background: none; border: none; color: var(--blue); cursor: pointer; font-size: 12px; text-decoration: underline; padding: 2px 4px; }
+.hb-reset[hidden] { display: none; }
+.home-sec .sec-body[hidden] { display: none; }
+.sec-note { margin: -4px 0 10px; }
+.rolebox {
+  display: inline-block; font-family: var(--mono); font-size: 10px; letter-spacing: 1px;
+  border-radius: 3px; padding: 2px 7px; margin-left: 6px; vertical-align: middle;
+}
+.rolebox.to { color: #ff8f85; border: 1px solid #8a3a33; background: #3a1a17; }
+.rolebox.player { color: #8cc4ff; border: 1px solid #2f4a63; background: #16222e; }
+.rolebox.caster { color: #d2adff; border: 1px solid #5a3f7a; background: #241a33; }
+.tseries { color: var(--blue); }
+@media (max-width: 640px) {
+  .home-bar { flex-direction: column; align-items: stretch; }
+  .hb-views { align-self: flex-start; }
+  input[type=text].hb-search { width: 100%; }
+  select.hb-series { max-width: 100%; }
+}
+
+/* ---------------------------------------------------------------------------
+   Home page: calendar (public/app.calendar.js)
+   --------------------------------------------------------------------------- */
+.cal-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.cal-title { margin: 0 6px; min-width: 150px; text-align: center; }
+.cal-spacer { flex: 1; }
+label.cal-toggle {
+  display: inline-flex; align-items: center; gap: 6px; margin: 0; cursor: pointer;
+  font-family: var(--body); font-size: 13px; text-transform: none; letter-spacing: 0; color: var(--text);
+}
+.cal-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: 0 0 10px; }
+.cal-key { display: inline-flex; align-items: center; gap: 5px; }
+.cal-key::before { content: ''; width: 14px; height: 10px; border-radius: 2px; border: 1px solid var(--line-solid); border-left-width: 3px; background: #1b2735; }
+.cal-key.official::before { border-left-color: var(--green); }
+.cal-key.community::before { border-left-color: var(--blue); }
+.cal-key.is-draft::before { border-style: dashed; border-color: #ffb44799; background: transparent; }
+.cal-key.is-mine::before { box-shadow: inset 0 0 0 1px #ff8f85; }
+.cal-hint { color: var(--amber); }
+.cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+.cal-dows { margin-bottom: 4px; }
+.cal-dow { font-family: var(--display); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); text-align: center; }
+.cal-cell {
+  min-height: 92px; min-width: 0; display: flex; flex-direction: column; gap: 3px;
+  background: var(--panel2); border: 1px solid var(--line-solid); border-radius: 4px; padding: 4px;
+}
+.cal-cell.wknd { background: #1a2633; }
+.cal-cell.out { opacity: .42; }
+.cal-cell.today { border-color: var(--amber); box-shadow: inset 0 0 0 1px #ffb44755; }
+.cal-cell.today .cal-daynum { color: var(--amber); font-weight: 700; }
+.cal-dragging .cal-cell { transition: background .1s; }
+.cal-cell.drop-on { background: var(--amber-dim); outline: 2px dashed var(--amber); outline-offset: -2px; opacity: 1; }
+.cal-daynum { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.cal-chip {
+  display: flex; align-items: center; gap: 4px; min-width: 0;
+  font-size: 11px; line-height: 1.3; color: var(--text); text-decoration: none;
+  background: #1f2c3b; border: 1px solid #2c3f55; border-left: 3px solid var(--blue); border-radius: 3px; padding: 2px 5px;
+}
+.cal-chip:hover { border-color: var(--amber); color: var(--text); }
+.cal-chip.official { border-left-color: var(--green); }
+.cal-chip.is-draft { background: transparent; border-style: dashed; border-color: #ffb44799; border-left-style: solid; color: #d9c7a4; }
+.cal-chip.is-mine { box-shadow: inset 0 0 0 1px #ff8f8577; }
+.cal-chip.is-abandoned .cal-name { text-decoration: line-through; opacity: .7; }
+.cal-chip[draggable="true"] { cursor: grab; }
+.cal-chip.dragging { opacity: .35; }
+.cal-time { flex: none; font-family: var(--mono); font-size: 10px; color: var(--muted); }
+.cal-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cal-n, .cal-role { flex: none; font-family: var(--mono); font-size: 9px; color: var(--amber); }
+.cal-role { color: #ff8f85; }
+.cal-undated { margin-top: 12px; border-top: 1px solid var(--line-solid); padding-top: 10px; }
+.cal-undated-title { font-family: var(--display); font-size: 12px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+.cal-undated-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.cal-undated-list .cal-chip { max-width: 260px; }
+.cal-agenda { display: none; }
+.cal-ag-day { padding: 8px 0; border-bottom: 1px solid var(--line-solid); display: flex; flex-direction: column; gap: 4px; }
+.cal-ag-day.today .cal-ag-date { color: var(--amber); }
+.cal-ag-date { font-family: var(--display); font-size: 12px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); }
+.cal-ag-day .cal-chip { font-size: 13px; padding: 5px 8px; }
+@media (max-width: 720px) {
+  .cal-grid-wrap { display: none; }
+  .cal-agenda { display: block; }
+  .cal-hint { display: none; }
+}
+
+/* the server cannot save (site admins and directors only, see drawTopbar) */
+.save-warn {
+  background: #3a1a17; border-bottom: 1px solid var(--red); color: #ffc2bb;
+  padding: 9px 16px; font-size: 13px; text-align: center; line-height: 1.45;
+}
+.save-warn strong { color: #fff; }
