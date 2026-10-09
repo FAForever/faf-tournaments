@@ -34,7 +34,7 @@ let _homeList = [];
 let _homeFilter = { cat: '', sizes: [], q: '', series: '' };
 
 // Which sections are open, remembered per browser. Completed starts closed: years of archive.
-const HOME_SECTION_DEFAULTS = { mine: true, mydrafts: true, drafts: true, ongoing: true, upcoming: true, completed: false };
+const HOME_SECTION_DEFAULTS = { approvals: true, mine: true, mydrafts: true, drafts: true, ongoing: true, upcoming: true, completed: false };
 function homeSectionOpen(key) {
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem('faf_home_sections') || '{}') || {}; } catch (e) { saved = {}; }
@@ -237,7 +237,7 @@ function homeCard(t) {
     <span style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end">
       ${t.published === 0 ? (t.canManage === 0
         ? '<span class="idbadge late" title="Someone else’s draft. You can see it as a tournament director, but you have no organizer rights on it.">draft · view only</span>'
-        : '<span class="idbadge late" title="Draft - not listed publicly until you publish it">draft</span>') : ''}
+        : '<span class="idbadge late" title="Draft - not listed publicly until you publish it">draft</span>') + pubChipHTML(t) : ''}
       ${closeChip}
       ${closeChip ? pill : (countdown || pill)}
       ${siteAdmin() ? '<button class="btn danger small" data-del="' + t.id + '">Delete</button>' : ''}
@@ -278,13 +278,20 @@ function drawHomeList(body, list) {
   const otherDraft = t => isDraft(t) && !(t.me && t.me.org);
   const live = list.filter(t => !isDraft(t));
   const completed = live.filter(isDone).sort((a, b) => tourneyDateMs(b) - tourneyDateMs(a));
+  // Drafts a second account must approve before they go public, that this viewer may decide on.
+  const toApprove = t => isDraft(t) && !!(t.pub && t.pub.can);
   const sections = [
+    { key: 'approvals', title: 'Waiting for your approval', items: list.filter(toApprove).sort((a, b) => (a.pub.at || 0) - (b.pub.at || 0)),
+      optional: !all.some(toApprove),
+      note: 'Organizers requested to publish these. Open one, read what players will see, then approve or reject it on its page. You can never approve what you requested or wrote yourself.' },
     { key: 'mine', title: 'My tournaments', items: live.filter(t => mineRole(t) && !isDone(t)).sort((a, b) => (isRunning(b) - isRunning(a)) || homeBySoonest(a, b)),
       optional: !all.some(t => !isDraft(t) && mineRole(t) && !isDone(t)),
       note: 'Where you organize, play or cast. Finished ones are under Completed.' },
     { key: 'mydrafts', title: 'My drafts', items: list.filter(myDraft).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)),
       optional: !all.some(myDraft),
-      note: 'Not published yet - only you, your co-organizers and site admins can see these. Publish one from its page, or schedule a publish date there.' },
+      note: approvalsOn()
+        ? 'Not published yet - only you, your co-organizers, tournament directors and site admins can see these. Request publishing on its page: a tournament director who did not write it has to approve it.'
+        : 'Not published yet - only you, your co-organizers and site admins can see these. Publish one from its page, or schedule a publish date there.' },
     { key: 'drafts', title: 'Drafts', items: list.filter(otherDraft).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)),
       optional: !all.some(otherDraft),
       note: 'Other organizers’ drafts. You see them as a tournament director or site admin; fold this away when you don’t need it.' },
@@ -318,7 +325,7 @@ function drawHomeList(body, list) {
           <div class="cmp-more" id="cmpMore${yi}"></div>
         </div>`).join('')
       : '<div class="tlist" data-hlist="' + s.key + '">' + (emptyText ? '<div class="empty">' + esc(emptyText) + '</div>' : '') + '</div>';
-    return `<div class="panel section home-sec${s.key === 'mydrafts' || s.key === 'drafts' ? ' draft-panel' : ''}" data-sec="${s.key}">
+    return `<div class="panel section home-sec${s.key === 'mydrafts' || s.key === 'drafts' || s.key === 'approvals' ? ' draft-panel' : ''}" data-sec="${s.key}">
       <h2 class="collapsy" data-sectoggle="${s.key}" role="button" tabindex="0" aria-expanded="${open ? 'true' : 'false'}">
         <span class="collapsy-caret">${open ? '▾' : '▸'}</span> ${esc(s.title)} <span class="h2-strong">(${s.items.length})</span>
       </h2>
@@ -1307,6 +1314,7 @@ function maybePromptLateSignup() {
 async function renderTournament() {
   captureTokensFromURL();
   loadRevealed();
+  if (typeof _pubSeen !== 'undefined') _pubSeen = null;   // a fresh visit: the approver starts reading anew
   try { await loadTournament(); }
   catch (e) {
     app.innerHTML = '<div class="page"><div class="panel"><div class="empty">Tournament not found.</div><a href="/">← Back</a></div></div>';
@@ -1566,24 +1574,7 @@ function drawTournament() {
           return `<button class="tab ${tb === currentTab ? 'active' : ''}" data-tab="${tb}">${esc(tabLabel(tb))}${badgeHtml}</button>`;
         }).join('')}
       </div>
-      ${admin && !T.published ? `<div class="panel" style="border-color:var(--amber);margin-top:12px">
-        <strong>Draft — not public yet.</strong>
-        <p class="muted small" style="margin:6px 0 10px">Only people with the link below can see this. Publish it to list it on the home page and open it up.</p>
-        ${eventDayList(T).length && !T.dayTimesMode ? '<p class="warn small" style="margin:0 0 10px">Before publishing: this event runs on ' + eventDayList(T).length + ' days. Answer <strong>Different start times per day?</strong> under Tournament details (<a href="#" data-adminjump="info" data-adminfocus="td_dayTimes">Admin tab \u2192 Info</a>).</p>' : ''}
-        <div class="copybox"><input type="text" readonly value="${location.origin}/t/${T.id}"><button class="btn small" data-copy="${location.origin}/t/${T.id}">Copy share link</button></div>
-        ${T.publishAt ? `<div class="pub-sched"><span>\u23F1 Scheduled to publish automatically on <strong>${esc(fmtDateTime(T.publishAt))}</strong></span>
-          <button class="btn ghost small" id="pubCancel">Cancel schedule</button></div>` : ''}
-        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-          <button class="btn primary" id="pubBtn">Publish now</button>
-          <div>
-            <label class="muted small" style="display:block">Or schedule (UTC)</label>
-            <div style="display:flex;gap:6px">
-              <input type="date" id="pubDate"><input type="time" id="pubTime">
-              <button class="btn ghost" id="pubSchedBtn">Schedule</button>
-            </div>
-          </div>
-        </div>
-      </div>` : ''}
+      ${!T.published && (admin || (T.pub && T.pub.approver)) ? draftBannerHTML(admin) : ''}
     </div>
     <div id="tabBody" class="${isBracketTab(currentTab) && T.competition !== 'ffa' && T.bracketType !== 'swiss' ? 'widepage' : 'page'}"></div>`;
 
@@ -1618,6 +1609,7 @@ function drawTournament() {
     try { await api('/api/t/' + T.id + '/publish', { cancelSchedule: 1, admin: adminToken() }); toast('Schedule cancelled'); await refresh(); }
     catch (e) { toast(e.message, true); }
   };
+  wireDraftBanner();   // requesting, withdrawing, approving, rejecting (decision 51)
   app.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => navigator.clipboard.writeText(b.dataset.copy).then(() => toast('Copied')));
   app.querySelectorAll('[data-serieslink]').forEach(a => a.onclick = (e) => { e.preventDefault(); nav(a.getAttribute('href')); });
 
@@ -1909,15 +1901,15 @@ function drawOverview(el) {
   if (T.imported) {
     html += `<div class="panel section" style="border-left:3px solid var(--blue)">
       <div class="mono small" style="color:var(--blue);letter-spacing:1px">IMPORTED FROM CHALLONGE</div>
-      <div class="muted small" style="margin-top:6px">This is an archived tournament imported for display. ${T.sourceUrl ? '<a href="' + esc(T.sourceUrl) + '" target="_blank" rel="noopener">View on Challonge \u2197</a>' : ''}</div>
+      <div class="muted small" style="margin-top:6px">This is an archived tournament imported for display. ${T.sourceUrl && linkOk(T.sourceUrl) ? '<a href="' + esc(T.sourceUrl) + '" target="_blank" rel="noopener">View on Challonge \u2197</a>' : ''}</div>
     </div>`;
   }
 
   if ((T.streams || []).length) {
     html += `<div class="panel section stream-panel"><h2>Livestream${T.streams.length === 1 ? '' : 's'}</h2>
       ${T.streams.map(st => {
-        const safe = /^https?:\/\/[^\s"'<>]+$/.test(st.url);
-        return `<div class="stream-line">\uD83D\uDCFA ${safe ? '<a href="' + esc(st.url) + '" target="_blank" rel="noopener">' + esc(st.url.replace(/^https?:\/\//, '')) + '</a>' : esc(st.url)}${st.info ? ' <span class="muted small">\u2014 ' + esc(st.info) + '</span>' : ''}</div>`;
+        const safe = /^https?:\/\/[^\s"'<>]+$/.test(st.url) && linkOk(st.url);   // decision 51: allowed sites only
+        return `<div class="stream-line">\uD83D\uDCFA ${safe ? '<a href="' + esc(st.url) + '" target="_blank" rel="noopener">' + esc(st.url.replace(/^https?:\/\//, '')) + '</a>' : blockedLinkHTML(esc(st.url.replace(/^https?:\/\//, '')), st.url, 'Livestream')}${st.info ? ' <span class="muted small">\u2014 ' + esc(st.info) + '</span>' : ''}</div>`;
       }).join('')}</div>`;
   }
 

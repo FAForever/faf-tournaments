@@ -33,6 +33,7 @@ const PICKS = require('./lib/picks');
 const PRED = require('./lib/predict');
 // Per-day start times of a multi-day event, and moving an event by whole days.
 const SCHED = require('./lib/schedule');
+const LINKS = require('./lib/links');
 const { swissPairRound, swissAfterReport, swissStandings,
         swissCuts, swissCutRounds, swissRecord, swissAdvanced, swissPlanRound1, swissShufflePlan,
         stageTwoCfg, stageTwoField, stageTwoBuild, swissStageDone, swissFinishIfDone,
@@ -1378,6 +1379,133 @@ function tourneyMs(t) {
   const ms = v ? new Date(v).getTime() : NaN;
   return isNaN(ms) ? (t.createdAt || 0) : ms;
 }
+// ---------- allowed link sites (decision 51) ----------
+// The sites user-written text may link to or load pictures from. Absent = the defaults (FAF and
+// Discord) until a director or site admin edits the list on the console.
+function linkSites() {
+  return Array.isArray(db.linkSites) ? db.linkSites : LINKS.DEFAULT_SITES.slice();
+}
+// The refusal for a save whose text (markdown) or URLs point anywhere else; null when it is fine.
+function linkRefusal(texts, urls) {
+  const sites = linkSites();
+  const bad = LINKS.blockedHosts(texts || [], sites);
+  for (const u of (urls || [])) {
+    const h = LINKS.hostOf(u);
+    if (h && !LINKS.siteAllowed(h, sites) && bad.indexOf(h) < 0) bad.push(h);
+  }
+  return bad.length ? LINKS.refusal(bad, sites) : null;
+}
+
+// ---------- publishing needs a second account (decision 51) ----------
+// With FAF login on, nobody publishes their own tournament: an organizer REQUESTS it, and a
+// tournament director or site admin who neither requested it nor wrote any of it approves it, or
+// rejects it with a reason. A single stolen account can therefore not put anything in front of
+// the public. Without FAF login there are no accounts to tell apart, so the legacy one-click
+// publish stays (that mode runs on organizer links and has no identities at all).
+const APPROVALS_ON = FAF_OAUTH_ON;
+// What the public will read, condensed: an approval is for exactly this. A change after the
+// request (or after a scheduled approval) makes it stale, so nobody approves one version and
+// publishes another.
+function contentFp(t) {
+  const pick = {
+    name: t.name || '', category: t.category || '', description: t.description || '', rewards: t.rewards || '',
+    sponsors: t.sponsors || '', lobbyOptions: t.lobbyOptions || '', mods: t.mods || '',
+    streams: (t.streams || []).map(x => [x.url || '', x.info || '']), prize: t.prize || null,
+    images: (t.descImages || []).slice(),
+    news: (t.news || []).map(n => [n.id, n.body || '']),
+    maps: (t.mapDb || []).map(m => [m.id, m.name || '', m.description || '', m.image || '']),
+    pools: (t.mapPools || []).map(p => [p.id, p.name || '']),
+    divisions: t.divisionNames || null,
+    predictPrize: (t.predict && t.predict.prize) || ''
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(pick)).digest('hex').slice(0, 24);
+}
+// Every account that changed what the public will read while this was a draft. The creator is
+// the first. None of them may approve it: "a second account" means one that did not write it.
+function noteContentEditor(t, req) {
+  const sess = currentSession(req);
+  if (!sess || !sess.fafId) return;
+  t.contentEditors = t.contentEditors || {};
+  t.contentEditors[sess.fafId] = { name: sess.fafName || ('FAF ' + sess.fafId), at: Date.now() };
+}
+function isApprover(req) { return isSiteAdmin(req) || isDirector(req); }
+// Somebody made a director or site admin in the last 3 days cannot approve yet. Otherwise one
+// stolen director account could appoint a second account of its own and approve its own
+// tournaments with it. The appointment is in the Logs meanwhile, for everyone else to see.
+const APPROVER_WAIT_MS = 3 * 86400000;
+// Since when this viewer holds a role that approves (the older one if both), or null.
+function approverSince(req) {
+  const sess = currentSession(req);
+  if (!sess || !sess.fafId) return null;
+  const at = [];
+  if (isDirector(req)) at.push(Number(db.directors[sess.fafId].at) || 0);
+  if (isSiteAdmin(req) && db.siteAdmins[sess.fafId]) at.push(Number(db.siteAdmins[sess.fafId].at) || 0);
+  return at.length ? Math.min.apply(null, at) : null;
+}
+// When a new director or site admin may start approving (ISO), or null when they already may.
+function approverFrom(req) {
+  const since = approverSince(req);
+  return (since && Date.now() - since < APPROVER_WAIT_MS) ? new Date(since + APPROVER_WAIT_MS).toISOString() : null;
+}
+// Why this viewer may NOT approve the pending request, or null when they may.
+function approveBlocker(t, req) {
+  const sess = currentSession(req);
+  if (!sess || !sess.fafId) return 'login';
+  if (!isApprover(req)) return 'role';
+  const r = t.publishReq;
+  if (!r) return 'none';
+  if (String(r.by) === String(sess.fafId)) return 'requested';
+  if (t.contentEditors && t.contentEditors[sess.fafId]) return 'edited';
+  if (approverFrom(req)) return 'new';
+  return null;
+}
+// A draft's publishing state for the home page: asked (requested; and whether this viewer may
+// approve it), changed since it was requested, approved for a time, or rejected. Undefined when none of these.
+function draftPubState(t, req) {
+  const r = t.publishReq;
+  if (r) {
+    const stale = r.fp !== contentFp(t);
+    return { s: stale ? 'stale' : 'asked', can: (!stale && !approveBlocker(t, req)) ? 1 : 0, at: r.at, by: r.byName };
+  }
+  if (t.publishApproval && t.publishAt) return { s: t.publishApproval.fp !== contentFp(t) ? 'stale' : 'approved', at: t.publishAt };
+  if (t.publishRejected) return { s: 'rejected', by: t.publishRejected.byName };
+  return undefined;
+}
+// The console's Approvals tab: every draft somebody requested to publish, plus the latest decisions.
+function publishingQueue(req) {
+  const sess = currentSession(req);
+  const pending = [], decided = [];
+  for (const t of Object.values(db.tournaments)) {
+    if (t.archived) continue;
+    const base = { id: t.id, name: t.name, category: t.category || null };
+    if (t.published === false && t.publishReq) {
+      const r = t.publishReq;
+      const stale = r.fp !== contentFp(t);
+      const why = approveBlocker(t, req);
+      pending.push(Object.assign(base, { by: r.byName, at: r.at, publishAt: r.publishAt || null, stale: stale ? 1 : 0,
+        can: (!stale && !why) ? 1 : 0, why: why || null, from: why === 'new' ? approverFrom(req) : null, imported: t.imported ? 1 : 0,
+        writers: Object.values(t.contentEditors || {}).map(e => e.name) }));
+    }
+    if (t.publishApproval) {
+      const ap = t.publishApproval;
+      decided.push(Object.assign({}, base, { result: 'approved', by: ap.byName, at: ap.at, reqBy: ap.reqByName, publishAt: ap.publishAt || null, published: t.published !== false ? 1 : 0 }));
+    }
+    if (t.publishRejected) {
+      const rj = t.publishRejected;
+      decided.push(Object.assign({}, base, { result: 'rejected', by: rj.byName, at: rj.at, reqBy: rj.reqByName || '', reason: rj.reason }));
+    }
+  }
+  pending.sort((a, b) => a.at - b.at);
+  decided.sort((a, b) => b.at - a.at);
+  return { pending, decided: decided.slice(0, 30), me: (sess && sess.fafId) || null };
+}
+// Drafts waiting for a decision that this viewer could make right now.
+function approvableFor(req) {
+  if (!APPROVALS_ON || !isApprover(req)) return [];
+  return Object.values(db.tournaments).filter(t => !t.archived && t.published === false && t.publishReq
+    && !approveBlocker(t, req) && t.publishReq.fp === contentFp(t));
+}
+
 // Scheduled publishing: a draft can carry publishAt (UTC ISO). There is no background timer in
 // this app, so we sweep lazily whenever tournaments are listed or opened — that covers every way
 // a tournament can become visible. Returns true if anything changed (caller saves).
@@ -1391,6 +1519,10 @@ function sweepScheduledPublishes() {
     if (t.published !== false || !t.publishAt) continue;
     const at = new Date(t.publishAt).getTime();
     if (!isNaN(at) && now >= at) {
+      // With approvals, only a schedule a second account approved fires, and only for the content
+      // that was approved. A schedule set before approvals existed waits for a request.
+      const ap = t.publishApproval;
+      if (APPROVALS_ON && (!ap || ap.publishAt !== t.publishAt || ap.fp !== contentFp(t))) continue;
       t.published = true;
       t.publishedAt = new Date(now).toISOString();
       t.publishAt = null;
@@ -1398,7 +1530,7 @@ function sweepScheduledPublishes() {
       audit(null, 'tournament_published', {
         tournamentId: t.id, tournamentName: t.name,
         actor: { kind: 'system', fafId: null, name: 'Scheduled' },
-        detail: 'auto-published on schedule'
+        detail: APPROVALS_ON ? 'on schedule, approved by ' + ap.byName + ' (requested by ' + ap.reqByName + ')' : 'auto-published on schedule'
       });
     }
   }
@@ -2702,6 +2834,9 @@ async function handleAuth(req, res, url) {
     const prof = sess ? (db.profiles[sess.fafId] || {}) : {};
     return json(res, 200, {
       enabled: FAF_OAUTH_ON,
+      // publishing needs a second account (decision 51) and the sites text may link to
+      approvals: APPROVALS_ON ? 1 : 0,
+      linkSites: linkSites(),
       // siteAdmin is the EFFECTIVE flag (false while stood down) so every existing client check
       // stays correct without being touched. siteAdminAccount + adminStandDown exist only so the
       // toggle itself can be drawn while the powers are off.
@@ -2817,6 +2952,21 @@ async function handleAuth(req, res, url) {
 
 // ---------- API ----------
 
+// Every POST to a draft tournament: if what the public will read changed, the account that did it
+// is noted as one of its writers (see noteContentEditor). Done around the whole handler so no
+// endpoint that changes content - present or future - can forget it.
+async function handleAPIWatched(req, res, url) {
+  const m = (APPROVALS_ON && req.method === 'POST') ? /^\/api\/t\/([^/]+)\/[^/]+$/.exec(url.pathname) : null;
+  const t0 = m ? db.tournaments[decodeURIComponent(m[1])] : null;
+  const before = (t0 && t0.published === false) ? contentFp(t0) : null;
+  const out = await handleAPI(req, res, url);
+  if (before !== null) {
+    const t = db.tournaments[t0.id];
+    if (t && t.published === false && contentFp(t) !== before) { noteContentEditor(t, req); saveDB(); }
+  }
+  return out;
+}
+
 async function handleAPI(req, res, url) {
   const parts = url.pathname.split('/').filter(Boolean);
   const method = req.method;
@@ -2839,6 +2989,12 @@ async function handleAPI(req, res, url) {
     }
     const name = cleanName(b.name, 60);
     if (!name) return bad(res, 'Name required');
+    // Links only to allowed sites (decision 51), in every text and every livestream row.
+    {
+      const refusedLinks = linkRefusal([b.description, b.rewards, b.sponsors, b.lobbyOptions, b.mods],
+        Array.isArray(b.streams) ? b.streams.map(x => String((x && x.url) || '').trim()) : []);
+      if (refusedLinks) return bad(res, refusedLinks);
+    }
     // A named preset (LotS, Invitational) is restricted to global tournament directors. This
     // check is the restriction - the create form only hides the option, which stops nobody who
     // can open a browser console. The preset id is recorded on the tournament so the format it
@@ -2945,6 +3101,7 @@ async function handleAPI(req, res, url) {
       createdByName: (hostSess && hostSess.fafName) || '',
       players: [], teams: [], matches: [], rounds: 0, draft: null, subs: []
     };
+    if (APPROVALS_ON) noteContentEditor(t, req);   // the creator wrote it, so cannot approve it
     db.tournaments[t.id] = t;
     saveDB();
     audit(req, 'tournament_created', { tournamentId: t.id, tournamentName: t.name, token: b.admin });
@@ -3150,7 +3307,9 @@ async function handleAPI(req, res, url) {
                            // the whole Requests tab: hosting, article editors, Challonge importers
                            'decide', 'revoke', 'grant',
                            'editor_decide', 'editor_revoke', 'editor_grant',
-                           'importer_decide', 'importer_revoke', 'importer_grant'];
+                           'importer_decide', 'importer_revoke', 'importer_grant',
+                           // the sites user text may link to (decision 51)
+                           'link_add', 'link_remove'];
     if (director && DIRECTOR_ACTS.indexOf(act) < 0) return json(res, 403, { error: 'Directors can\u2019t do that \u2014 site admin only' });
     if (editor && act === 'data') {
       return json(res, 200, { role: 'editor', articles: (db.articles || []).slice().sort((a, c) => (a.order || 0) - (c.order || 0) || (a.createdAt || 0) - (c.createdAt || 0)).map(a => Object.assign({}, a, { archived: a.archived ? 1 : 0 })) });
@@ -3185,6 +3344,8 @@ async function handleAPI(req, res, url) {
           editorAllowed,
           importerRequests: (db.importerRequests || []).slice().reverse(),
           importerAllowed,
+          publishing: publishingQueue(req),
+          linkSites: linkSites(), linkSitesDefault: LINKS.DEFAULT_SITES,
           me: (currentSession(req) || {}).fafId || null
           // deliberately NOT siteAdmins - see the DIRECTOR_ACTS note above
         });
@@ -3206,8 +3367,30 @@ async function handleAPI(req, res, url) {
         directors: Object.keys(db.directors || {}).map(fid => ({ fafId: fid, name: db.directors[fid].name || fid, at: db.directors[fid].at || 0, by: db.directors[fid].by || '' })).sort((x, y) => y.at - x.at),
         siteAdmins: Object.keys(db.siteAdmins || {}).map(fid => ({ fafId: fid, name: db.siteAdmins[fid].name || fid, at: db.siteAdmins[fid].at || 0, by: db.siteAdmins[fid].by || '', standDown: db.siteAdmins[fid].standDown ? 1 : 0 })).sort((x, y) => y.at - x.at),
         me: (currentSession(req) || {}).fafId || null,
-        bans: bansList
+        bans: bansList,
+        publishing: publishingQueue(req),
+        linkSites: linkSites(), linkSitesDefault: LINKS.DEFAULT_SITES
       });
+    }
+
+    // The sites user text may link to (decision 51). Directors and site admins, logged.
+    if (act === 'link_add' || act === 'link_remove') {
+      const site = LINKS.cleanSite(b.site);
+      if (!site) return bad(res, 'Enter a website, like twitch.tv');
+      const list = linkSites().slice();
+      const at = list.indexOf(site);
+      if (act === 'link_add') {
+        if (at >= 0) return bad(res, site + ' is already allowed');
+        list.push(site);
+        list.sort();
+      } else {
+        if (at < 0) return bad(res, site + ' is not on the list');
+        list.splice(at, 1);
+      }
+      db.linkSites = list;
+      saveDB();
+      audit(req, act === 'link_add' ? 'link_site_added' : 'link_site_removed', { detail: site });
+      return json(res, 200, { ok: true, sites: list });
     }
 
     if (act === 'decide') {
@@ -3242,6 +3425,7 @@ async function handleAPI(req, res, url) {
       const title = cleanName(b.title, 120);
       if (!title) return bad(res, 'Title required');
       const body2 = String(b.body || '').slice(0, 20000);
+      { const refusedLinks = linkRefusal([body2]); if (refusedLinks) return bad(res, refusedLinks); }
       // Optional parent for sub-pages. A parent must be a real top-level article (no
       // grandchildren) and an article can't be its own parent.
       let parentId = b.parentId ? String(b.parentId) : null;
@@ -3494,9 +3678,18 @@ async function handleAPI(req, res, url) {
           return bad(res, 'That Challonge tournament has already been imported.');
         }
       }
+      // An import is a new public page too: with approvals it arrives as a draft the importer has
+      // already requested to publish, and a director who did not import it approves it (decision 51).
+      const imSess = currentSession(req);
+      if (APPROVALS_ON && imSess && imSess.fafId) {
+        conv.published = false;
+        noteContentEditor(conv, req);
+        conv.publishReq = { by: imSess.fafId, byName: imSess.fafName || ('FAF ' + imSess.fafId), at: Date.now(), fp: contentFp(conv), publishAt: null };
+      }
       db.tournaments[conv.id] = conv;
       saveDB();
-      return json(res, 200, { ok: true, id: conv.id, name: conv.name });
+      if (conv.publishReq) audit(req, 'tournament_publish_requested', { tournamentId: conv.id, tournamentName: conv.name, detail: 'imported from Challonge' });
+      return json(res, 200, { ok: true, id: conv.id, name: conv.name, needsApproval: conv.publishReq ? 1 : 0 });
     } catch (e) {
       return bad(res, e.message || 'Import failed');
     }
@@ -3600,6 +3793,7 @@ async function handleAPI(req, res, url) {
     if (act === 'create') {
       const name = cleanName(b.name, 80);
       if (!name) return bad(res, 'Enter a series name');
+      { const refusedLinks = linkRefusal([b.description]); if (refusedLinks) return bad(res, refusedLinks); }
       if (Object.values(db.series).some(s2 => s2.name.toLowerCase() === name.toLowerCase())) return bad(res, 'A series with that name already exists');
       const id = uid(8);
       db.series[id] = {
@@ -3646,6 +3840,7 @@ async function handleAPI(req, res, url) {
       const s2 = db.series[String(b.id || '')];
       if (!s2) return bad(res, 'Series not found');
       if (!canManage(s2)) return json(res, 403, { error: 'Only an organizer of a tournament in this series (or its creator, a director, or a site admin) can edit it' });
+      { const refusedLinks = linkRefusal([b.description]); if (refusedLinks) return bad(res, refusedLinks); }
       if (b.name !== undefined) { const n = cleanName(b.name, 80); if (!n) return bad(res, 'Enter a series name'); s2.name = n; }
       if (b.description !== undefined) s2.description = cleanName(b.description, 4000) || '';
       if (b.color !== undefined) { const c = cleanSeriesColor(b.color); if (c) s2.color = c; }
@@ -3703,7 +3898,9 @@ async function handleAPI(req, res, url) {
         dayTimes: (t.dayTimes && Object.keys(t.dayTimes).length) ? Object.assign({}, t.dayTimes) : null,
         // what the viewer is here: organizer (named, not via a director's blanket rights), player
         // or caster. Absent for everyone else, which is most rows for most viewers.
-        me: viewerRolesIn(t, dctx) || undefined
+        me: viewerRolesIn(t, dctx) || undefined,
+        // a draft's publishing state (decision 51): only drafts the viewer can see reach here
+        pub: (APPROVALS_ON && t.published === false) ? draftPubState(t, req) : undefined
       }));
     return json(res, 200, list);
   }
@@ -3865,7 +4062,31 @@ async function handleAPI(req, res, url) {
         };
       }
     }
-    return json(res, 200, { pending: out, alert });
+    // Drafts waiting for a publishing decision this viewer can make (decision 51). Silenced the
+    // same way as the access requests: dismissed until a NEW one arrives.
+    let approvals = null;
+    if (sess && sess.fafId && APPROVALS_ON && isApprover(req)) {
+      const pend = approvableFor(req);
+      const seenP = ((db.profiles[sess.fafId] || {}).seenPublish) || {};
+      const fresh = pend.filter(t => !seenP[t.id + ':' + t.publishReq.at]);
+      if (fresh.length) {
+        const n = pend.length;
+        approvals = { dismissible: 1, n,
+          text: n + ' tournament' + (n === 1 ? ' is' : 's are') + ' waiting for your approval to be published' +
+            (fresh.length < n ? ' (' + fresh.length + ' new)' : '') };
+      }
+    }
+    // An organizer whose publish request was rejected hears about it wherever they are, for 3 days
+    // (the draft's own banner keeps saying it until they request again).
+    if (sess && sess.fafId && APPROVALS_ON) {
+      for (const t of Object.values(db.tournaments)) {
+        if (t.archived || t.published !== false || !t.publishRejected) continue;
+        if (Date.now() - (Number(t.publishRejected.at) || 0) > 3 * 86400000) continue;
+        if (!Array.isArray(t.organizerFafIds) || t.organizerFafIds.indexOf(sess.fafId) < 0) continue;
+        out.push({ tId: t.id, tName: t.name, type: 'pubrej', tab: 'overview', text: 'Publishing was rejected by ' + t.publishRejected.byName + ': ' + t.publishRejected.reason });
+      }
+    }
+    return json(res, 200, { pending: out, alert, approvals });
   }
 
   // Silence the access-request alert until a NEW request arrives. Only ids that are still
@@ -3874,9 +4095,18 @@ async function handleAPI(req, res, url) {
     const sess = currentSession(req);
     if (!sess || !sess.fafId) return json(res, 401, { error: 'Log in with FAF first' });
     if (!isSiteAdmin(req) && !isDirector(req)) return json(res, 403, { error: 'Site admin or tournament director only' });
+    db.profiles[sess.fafId] = db.profiles[sess.fafId] || {};
+    const b = await readBody(req);
+    // the publishing alert (decision 51) has its own memory, keyed by request
+    if (b && b.kind === 'approvals') {
+      const seenP = {};
+      for (const t of approvableFor(req)) seenP[t.id + ':' + t.publishReq.at] = 1;
+      db.profiles[sess.fafId].seenPublish = seenP;
+      saveDB();
+      return json(res, 200, { ok: true, dismissed: Object.keys(seenP).length });
+    }
     const seen = {};
     for (const r of pendingAccessRequests()) seen[r.id] = 1;
-    db.profiles[sess.fafId] = db.profiles[sess.fafId] || {};
     db.profiles[sess.fafId].seenRequests = seen;
     saveDB();
     return json(res, 200, { ok: true, dismissed: Object.keys(seen).length });
@@ -3978,6 +4208,30 @@ async function handleAPI(req, res, url) {
         if (mineM && mineM.teamId) memberTeamId = mineM.teamId;
       }
       view.tlog = organizer ? (t.log || []).slice(-300).reverse() : undefined;
+      // Publishing with a second account (decision 51): where this draft stands, for its
+      // organizers and for the people who may approve it. Nobody else sees who requested or wrote.
+      const approver = isApprover(req);
+      if (APPROVALS_ON && t.published === false && (organizer || approver)) {
+        const fp = contentFp(t);
+        const r = t.publishReq, ap = t.publishApproval, rj = t.publishRejected;
+        const why = r ? approveBlocker(t, req) : null;
+        view.pub = {
+          req: r ? { byName: r.byName, at: r.at, publishAt: r.publishAt || null, stale: r.fp !== fp ? 1 : 0, mine: (sess && String(r.by) === String(sess.fafId)) ? 1 : 0 } : null,
+          approved: (ap && t.publishAt) ? { byName: ap.byName, at: ap.at, reqByName: ap.reqByName, publishAt: t.publishAt, stale: ap.fp !== fp ? 1 : 0 } : null,
+          rejected: rj ? { byName: rj.byName, at: rj.at, reason: rj.reason } : null,
+          oldSchedule: (!ap && t.publishAt) ? t.publishAt : null,
+          approver: approver ? 1 : 0,
+          canApprove: (r && !why && r.fp === fp) ? 1 : 0,
+          why: why || null,
+          from: why === 'new' ? approverFrom(req) : null,
+          writers: Object.values(t.contentEditors || {}).map(e => e.name),
+          fp: approver ? fp : undefined
+        };
+      }
+      if (APPROVALS_ON && t.published !== false && organizer && t.publishApproval) {
+        const ap = t.publishApproval;
+        view.pubRecord = { byName: ap.byName, at: ap.at, reqByName: ap.reqByName, reqAt: ap.reqAt };
+      }
       view.chatMutes = organizer ? Object.keys(t.chatMutes || {}).map(fid => ({ fafId: fid, name: (t.chatMutes[fid].name || fid), at: t.chatMutes[fid].at || 0 })) : undefined;
       view.chatMutedMe = (sess && chatMuted(t, sess.fafId)) ? 1 : 0;
       // Who is banned from this tournament is organizer business, not a public list.
@@ -4075,8 +4329,9 @@ async function handleAPI(req, res, url) {
       return json(res, 200, view);
     }
 
-    // imported tournaments are display-only: only GET and site-admin delete are allowed
-    if (t.imported && method === 'POST' && sub !== 'delete' && sub !== 'edit_date') {
+    // imported tournaments are display-only: only GET and site-admin delete are allowed, plus the
+    // publishing steps (with approvals an import arrives as a draft, decision 51)
+    if (t.imported && method === 'POST' && sub !== 'delete' && sub !== 'edit_date' && !/^publish_(request|withdraw|approve|reject)$/.test(sub)) {
       return bad(res, 'Imported tournaments are read-only.');
     }
 
@@ -4436,8 +4691,103 @@ async function handleAPI(req, res, url) {
       return json(res, 200, { ok: true, seriesId: sid });
     }
 
+    // ---- publishing with a second account (decision 51; APPROVALS_ON = FAF login) ----
+    // An organizer requests; a director or site admin who did not request it and did not write any of it
+    // approves (now, or the requested time) or rejects with a reason. Everything lands in the
+    // tournament's Log and the site audit log, with both names.
+    if (sub === 'publish_request') {
+      if (!APPROVALS_ON) return bad(res, 'Approvals need FAF login - publish directly');
+      if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
+      const sess = currentSession(req);
+      if (!sess || !sess.fafId) return json(res, 401, { error: 'Log in with FAF first' });
+      if (t.published !== false) return bad(res, 'This tournament is already published');
+      const prob = SCHED.scheduleProblem(t);
+      if (prob) return bad(res, prob);
+      // A time in the future is kept with the request; an old schedule (set before approvals
+      // existed) carries over when none is given. A time already passed means "as soon as approved".
+      let publishAt = null;
+      const asked = b.publishAt ? cleanDate(b.publishAt) : (!t.publishApproval && t.publishAt ? t.publishAt : null);
+      if (b.publishAt && (!asked || isNaN(new Date(asked).getTime()))) return bad(res, 'Invalid publish date');
+      if (asked && new Date(asked).getTime() > Date.now()) publishAt = asked;
+      const again = !!(t.publishReq || t.publishApproval);
+      t.publishReq = { by: sess.fafId, byName: sess.fafName || ('FAF ' + sess.fafId), at: Date.now(), fp: contentFp(t), publishAt };
+      delete t.publishRejected;
+      delete t.publishApproval;      // a new request replaces an approved schedule
+      t.publishAt = null;            // schedules only exist once approved
+      saveDB();
+      audit(req, 'tournament_publish_requested', { tournamentId: t.id, tournamentName: t.name,
+        detail: (publishAt ? 'to publish on ' + publishAt : 'to publish as soon as it is approved') + (again ? ' (requested again)' : '') });
+      return json(res, 200, { ok: true, publishAt });
+    }
+    if (sub === 'publish_withdraw') {
+      if (!APPROVALS_ON) return bad(res, 'Approvals need FAF login');
+      if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
+      if (t.published !== false) return bad(res, 'This tournament is already published');
+      const approvedAt = (t.publishApproval && t.publishAt) ? t.publishAt : null;
+      // a schedule set before approvals existed never fires now, but it can still be dropped
+      const oldAt = (!t.publishApproval && !t.publishReq && t.publishAt) ? t.publishAt : null;
+      if (!t.publishReq && !approvedAt && !oldAt) return bad(res, 'There is no request to withdraw');
+      delete t.publishReq;
+      delete t.publishApproval;
+      t.publishAt = null;
+      saveDB();
+      audit(req, 'tournament_publish_withdrawn', { tournamentId: t.id, tournamentName: t.name,
+        detail: approvedAt ? 'the approved publish on ' + approvedAt + ' is cancelled'
+          : oldAt ? 'the old schedule for ' + oldAt + ' is cancelled' : 'the request is withdrawn' });
+      return json(res, 200, { ok: true });
+    }
+    if (sub === 'publish_approve' || sub === 'publish_reject') {
+      if (!APPROVALS_ON) return bad(res, 'Approvals need FAF login');
+      const sess = currentSession(req);
+      if (!sess || !sess.fafId) return json(res, 401, { error: 'Log in with FAF first' });
+      if (!isApprover(req)) return json(res, 403, { error: 'Only a tournament director or a site admin can approve publishing' });
+      if (t.published !== false) return bad(res, 'This tournament is already published');
+      const r = t.publishReq;
+      if (!r) return bad(res, 'Nobody has requested publishing this tournament');
+      const why = approveBlocker(t, req);
+      if (why === 'requested') return json(res, 403, { error: sub === 'publish_reject'
+        ? 'You requested this yourself - withdraw the request instead'
+        : 'You requested this yourself, so another tournament director has to approve it' });
+      if (sub === 'publish_reject') {
+        const reason = cleanName(b.reason, 300);
+        if (!reason) return bad(res, 'Say why, so the organizers know what to fix');
+        t.publishRejected = { by: sess.fafId, byName: sess.fafName || ('FAF ' + sess.fafId), at: Date.now(), reason, reqByName: r.byName };
+        delete t.publishReq;
+        saveDB();
+        audit(req, 'tournament_publish_rejected', { tournamentId: t.id, tournamentName: t.name, detail: reason + ' (requested by ' + r.byName + ')' });
+        return json(res, 200, { ok: true });
+      }
+      if (why === 'edited') return json(res, 403, { error: 'You changed this tournament yourself, so another tournament director has to approve it' });
+      if (why === 'new') return json(res, 403, { error: 'You got this role less than 3 days ago, so you can approve publishing from ' + approverFrom(req) + '. Until then another tournament director has to.' });
+      if (why) return json(res, 403, { error: 'You cannot approve this' });
+      const fp = contentFp(t);
+      if (r.fp !== fp) return bad(res, 'This tournament changed after ' + r.byName + ' requested publishing. An organizer has to request it again, so what you approve is what was requested.');
+      if (String(b.fp || '') !== fp) return bad(res, 'This tournament changed while you were looking at it. Reload it and check it again before approving.');
+      const prob = SCHED.scheduleProblem(t);
+      if (prob) return bad(res, prob);
+      const later = r.publishAt && new Date(r.publishAt).getTime() > Date.now() ? r.publishAt : null;
+      t.publishApproval = { by: sess.fafId, byName: sess.fafName || ('FAF ' + sess.fafId), at: Date.now(),
+        reqBy: r.by, reqByName: r.byName, reqAt: r.at, fp, publishAt: later };
+      delete t.publishReq;
+      delete t.publishRejected;
+      if (later) {
+        t.publishAt = later;
+        saveDB();
+        audit(req, 'tournament_publish_approved', { tournamentId: t.id, tournamentName: t.name, detail: 'publishes on ' + later + ' (requested by ' + r.byName + ')' });
+        return json(res, 200, { ok: true, publishAt: later });
+      }
+      t.published = true;
+      t.publishedAt = new Date().toISOString();
+      t.publishAt = null;
+      saveDB();
+      audit(req, 'tournament_publish_approved', { tournamentId: t.id, tournamentName: t.name, detail: 'published now (requested by ' + r.byName + ')' });
+      return json(res, 200, { ok: true, published: 1 });
+    }
+
     if (sub === 'publish') {
       if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
+      // With FAF login on, one account never publishes on its own (see publish_request above).
+      if (APPROVALS_ON) return json(res, 403, { error: 'Publishing needs a second account: request it, and a tournament director who did not write it approves it' });
       // A multi-day event must say whether each day has its own start time before anyone sees it
       // (lib/schedule). Checked for publishing now and for scheduling it alike.
       if (!b.cancelSchedule && t.published === false) {
@@ -5957,6 +6307,7 @@ async function handleAPI(req, res, url) {
       if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
       const body = cleanName(b.body, 1000);
       if (!body) return bad(res, 'Write something first');
+      { const refusedLinks = linkRefusal([body]); if (refusedLinks) return bad(res, refusedLinks); }
       t.news = t.news || [];
       const item = { id: 'nw' + uid(6), at: Date.now(), by: actorOf(req, b.admin).name || 'Organizer', body, important: b.important ? 1 : 0 };
       t.news.push(item);
@@ -5971,6 +6322,7 @@ async function handleAPI(req, res, url) {
       if (!item) return bad(res, 'Post not found');
       const body = cleanName(b.body, 1000);
       if (!body) return bad(res, 'Write something first');
+      { const refusedLinks = linkRefusal([body]); if (refusedLinks) return bad(res, refusedLinks); }
       item.body = body;
       if (b.important !== undefined) item.important = b.important ? 1 : 0;
       item.editedAt = Date.now();
@@ -6158,6 +6510,11 @@ async function handleAPI(req, res, url) {
 
     if (sub === 'edit_info') {
       if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
+      {
+        const refusedLinks = linkRefusal([b.description, b.rewards, b.sponsors, b.lobbyOptions, b.mods],
+          Array.isArray(b.streams) ? b.streams.map(x => String((x && x.url) || '').trim()) : []);
+        if (refusedLinks) return bad(res, refusedLinks);
+      }
       // Per-day start times are checked against the NEW schedule before anything is written, so
       // a refused save changes nothing and a published event can never be left with a day that
       // has no start time. Drafts may be saved half-done: the publish button is what insists.
@@ -7706,7 +8063,7 @@ const server = http.createServer(async (req, res) => {
     // Resolve an Authorization: Bearer session once, before anything reads currentSession().
     // Only costs a FAF round trip when a token is present and uncached.
     if (req.headers.authorization) await attachSession(req);
-    if (url.pathname.startsWith('/api/')) return await handleAPI(req, res, url);
+    if (url.pathname.startsWith('/api/')) return await handleAPIWatched(req, res, url);
     if (url.pathname.startsWith('/auth/')) return await handleAuth(req, res, url);
     if (url.pathname.startsWith('/map-images/')) return serveMapImage(req, res, url);
     if (url.pathname.startsWith('/desc-images/')) return serveDescImage(req, res, url);

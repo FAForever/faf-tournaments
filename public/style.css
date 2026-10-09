@@ -831,6 +831,26 @@ tr.pickrow.on td:nth-child(2) { color: var(--green); font-weight: 600; }
 
 /* scheduled-publish banner row */
 .pub-sched { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; padding: 8px 10px; border: 1px solid #FFB44755; background: #FFB4470f; border-radius: 4px; font-size: 13px; }
+
+/* Publishing with a second account (decision 51): the draft banner's state line, its buttons, the
+   approver's box, and the chips on draft cards. */
+.pub-state { margin-top: 10px; padding: 8px 10px; border-radius: 4px; font-size: 13px; border: 1px solid var(--line-solid); }
+.pub-state.pub-wait { border-color: #FFB44755; background: #FFB4470f; }
+.pub-state.pub-ok { border-color: #2f6b45; background: #12331f; }
+.pub-state.pub-warn { border-color: #FFB447aa; background: #FFB4471f; }
+.pub-state.pub-no { border-color: #e5484d88; background: #e5484d14; }
+.pub-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; margin-top: 10px; }
+.approve-box { border-color: #5c9ee888; }
+.approve-head { color: var(--blue); letter-spacing: 1px; }
+.pub-reject { margin-top: 10px; }
+.pub-reject textarea { width: 100%; margin: 0 0 6px; }
+.idbadge.pubchip { text-transform: uppercase; letter-spacing: .5px; }
+.idbadge.pubchip.pub-wait { color: var(--amber); border: 1px solid #6b5220; background: #2a2110; }
+.idbadge.pubchip.pub-ok { color: var(--green); border: 1px solid #2f6b45; background: #12331f; }
+.idbadge.pubchip.pub-warn { color: #ffcf8a; border: 1px solid #8a6a2a; background: #3a2c10; }
+.idbadge.pubchip.pub-no { color: #ff8a8d; border: 1px solid #7a2d30; background: #2d1214; }
+/* A link to a site that is not on the allowed list: its text, not clickable (decision 51). */
+.link-off { border-bottom: 1px dotted var(--muted); cursor: help; }
 /* home page: the viewer's own unpublished drafts */
 .draft-panel { border-color: #FFB44755; }
 
