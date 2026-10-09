@@ -1074,7 +1074,7 @@ function assignPool(pool) {
     modal(`<h3>Assign "${esc(pool.name)}"</h3>
       <p class="muted small">${T.competition === 'ffa'
         ? 'FFA rounds don\'t use map vetoes.'
-        : 'Not enough signups yet to work out how many rounds there will be. Add players (or set a team cap on the Admin tab) and this will fill in.'}</p>
+        : 'Not enough signups yet to work out how many rounds there will be. Add players (or set a team limit under <a href="#" data-adminjump="signups" data-adminfocus="su_max">Admin tab \u2192 Signups</a>) and this will fill in.'}</p>
       <div class="actions"><button class="btn ghost" id="paClose">Close</button></div>`, root => {
       root.querySelector('#paClose').onclick = closeModal;
     });
@@ -2586,7 +2586,7 @@ function playoffActionsHTML(onBracket) {
   return `<div class="playoff-actions">
     ${undo ? '<button class="btn ghost small" data-poundo="1">Undo the last pick</button>' : ''}
     <button class="btn ghost small" data-poredo="1">Redo the playoffs</button>
-    ${onBracket ? '<span class="muted small">Organizers only, until the first playoff match starts. Who picks is set on the Admin tab.</span>' : ''}
+    ${onBracket ? '<span class="muted small">Organizers only, until the first playoff match starts. Who picks is set under <a href="#" data-adminjump="format" data-adminfocus="playoffPanel">Admin tab \u2192 Format</a>.</span>' : ''}
   </div>`;
 }
 async function playoffRedo(pick, minutes, tiebreak) {

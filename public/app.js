@@ -224,8 +224,12 @@ function captureTokensFromURL() {
   if (q.get('late')) pendingLateSignup = { id, token: q.get('late') };
   const tab = q.get('tab');
   if (tab && VALID_TABS.indexOf(tab) >= 0) currentTab = tab;
-  if (q.get('admin') || q.get('late') || q.get('tab')) {
-    history.replaceState(null, '', '/t/' + id + (currentTab !== 'overview' ? '?tab=' + currentTab : ''));
+  // ?tab=admin&sub=signups opens the Admin tab on that sub-tab
+  const sub = q.get('sub');
+  const subOk = currentTab === 'admin' && !!sub && ADMIN_SUBS.indexOf(sub) >= 0;
+  if (subOk) _adminSub = { tid: id, key: sub };
+  if (q.get('admin') || q.get('late') || q.get('tab') || q.get('sub')) {
+    history.replaceState(null, '', '/t/' + id + (currentTab !== 'overview' ? '?tab=' + currentTab + (subOk && sub !== 'info' ? '&sub=' + sub : '') : ''));
   }
 }
 let pendingLateSignup = null; // { id, token } — set when a late-signup link is opened

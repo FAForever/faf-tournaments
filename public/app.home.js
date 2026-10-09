@@ -451,7 +451,7 @@ async function renderHost() {
 
         <label>Series <span class="muted small">(optional)</span></label>
         <select id="cSeries"><option value="">\u2014 not part of a series \u2014</option></select>
-        <div class="muted small" style="margin-top:4px">Group this with other editions of a recurring event. You can also set or change this later on the Admin tab.</div>
+        <div class="muted small" style="margin-top:4px">Group this with other editions of a recurring event. You can also set or change this later under Admin tab \u2192 Info.</div>
 
         <div id="teamOpts">
           <label>Team size</label>
@@ -701,7 +701,7 @@ async function renderHost() {
             <option value="upfront">All upfront — captains complete the whole veto before game 1</option>
             <option value="continuous">Continuous — reveal steps as games are played</option>
           </select>
-          <div class="muted small" style="margin-top:8px">You'll build your maps, pools and ban/pick orders on the tournament's <strong>Maps</strong> tab afterwards. Everything here is also changeable later from the Admin tab.</div>
+          <div class="muted small" style="margin-top:8px">You'll build your maps, pools and ban/pick orders on the tournament's <strong>Maps</strong> tab afterwards. Everything here is also changeable later under Admin tab \u2192 Format.</div>
         </div>
         <div style="margin-top:20px">
           <button class="btn primary" id="cGo">Create tournament</button>
@@ -748,7 +748,7 @@ async function renderHost() {
     el.textContent = (bt !== 'swiss')
       ? 'Runs on round one of the bracket.'
       : (playoffs
-        ? 'On a Swiss this runs on the PLAYOFF bracket, and it can still be changed while the Swiss is played (Admin tab). Swiss round 1 is drawn by seed, and can be rearranged by hand.'
+        ? 'On a Swiss this runs on the PLAYOFF bracket, and it can still be changed while the Swiss is played (Admin tab \u2192 Format). Swiss round 1 is drawn by seed, and can be rearranged by hand.'
         : 'Does nothing on a Swiss with no second stage. Swiss round 1 is drawn by seed, and can be rearranged by hand once the rounds start.');
     // Choosing WHO picks only means something when a Swiss stage decides the records first.
     const modeRow = document.getElementById('pickModeRow');
@@ -1216,7 +1216,7 @@ async function renderHost() {
             lobbyOptions: swap(document.getElementById('cLobby').value)
           });
         } catch (e) { failed++; }
-        if (failed) toast(failed + ' image(s) could not be attached — add them again on the Admin tab', true);
+        if (failed) toast(failed + ' image(s) could not be attached - add them again under Admin tab \u2192 Info', true);
         _pendingCreateImages = [];
       }
       history.pushState(null, '', '/t/' + r.id);
@@ -1251,7 +1251,7 @@ async function maybePromptOrganizerClaim() {
   if (viewerIsOrganizer()) return;          // already one - the link changes nothing
   modal(`<h3>Organizer links are no longer used</h3>
     <p class="muted small">This link used to make whoever opened it an organizer of <strong>${esc(T.name)}</strong>. It does nothing now.</p>
-    <p class="muted small">If you should be organizing this tournament, ask one of its organizers to add you in the <strong>Organizers</strong> panel on the Admin tab, by your FAF name.</p>
+    <p class="muted small">If you should be organizing this tournament, ask one of its organizers to add you in the <strong>Organizers</strong> panel (Admin tab \u2192 People), by your FAF name.</p>
     <div class="actions"><button class="btn primary" id="ocOk">OK</button></div>`, root => {
     root.querySelector('#ocOk').onclick = closeModal;
   });
@@ -1342,7 +1342,7 @@ async function pollOnce() {
     // The chat tab manages its own live updates and remembers the open room; a full redraw here
     // would rebuild the room list and yank the user back to Global. Keep data fresh, don't repaint.
     if (currentTab === 'chat') return;
-    drawTournament();
+    redrawInPlace();
   } catch (e) {}
 }
 
@@ -1569,7 +1569,7 @@ function drawTournament() {
       ${admin && !T.published ? `<div class="panel" style="border-color:var(--amber);margin-top:12px">
         <strong>Draft — not public yet.</strong>
         <p class="muted small" style="margin:6px 0 10px">Only people with the link below can see this. Publish it to list it on the home page and open it up.</p>
-        ${eventDayList(T).length && !T.dayTimesMode ? '<p class="warn small" style="margin:0 0 10px">Before publishing: this event runs on ' + eventDayList(T).length + ' days. Answer <strong>Different start times per day?</strong> under Tournament details on the Admin tab.</p>' : ''}
+        ${eventDayList(T).length && !T.dayTimesMode ? '<p class="warn small" style="margin:0 0 10px">Before publishing: this event runs on ' + eventDayList(T).length + ' days. Answer <strong>Different start times per day?</strong> under Tournament details (<a href="#" data-adminjump="info" data-adminfocus="td_dayTimes">Admin tab \u2192 Info</a>).</p>' : ''}
         <div class="copybox"><input type="text" readonly value="${location.origin}/t/${T.id}"><button class="btn small" data-copy="${location.origin}/t/${T.id}">Copy share link</button></div>
         ${T.publishAt ? `<div class="pub-sched"><span>\u23F1 Scheduled to publish automatically on <strong>${esc(fmtDateTime(T.publishAt))}</strong></span>
           <button class="btn ghost small" id="pubCancel">Cancel schedule</button></div>` : ''}

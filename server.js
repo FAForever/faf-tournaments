@@ -1584,7 +1584,7 @@ function banRefusalOrganizer(hit, t, who) {
   if (hit.scope === 'series') {
     return who + ' is banned from the "' + ((ser && ser.name) || 'this') + '" series' + until + '.' + reason + ' Lift the series ban first, on the series page.';
   }
-  return who + ' is banned from this tournament' + until + '.' + reason + ' Lift the ban first, on the Admin tab.';
+  return who + ' is banned from this tournament' + until + '.' + reason + ' Lift the ban first, under Admin tab \u2192 People.';
 }
 // Combined check most mutating endpoints use: site-admin token OR a logged-in authorized organizer.
 // ---------- map access is NARROWER than organizer rights ----------
@@ -5562,7 +5562,7 @@ async function handleAPI(req, res, url) {
       // Organizer links are gone: an organizer adds co-organizers by FAF name in the Organizers
       // panel. An old link still circulating must not quietly hand out a seat.
       if (FAF_OAUTH_ON) {
-        return json(res, 410, { error: 'Organizer links are no longer used. Ask one of this tournament\u2019s organizers to add you in the Organizers panel on the Admin tab.' });
+        return json(res, 410, { error: 'Organizer links are no longer used. Ask one of this tournament\u2019s organizers to add you in the Organizers panel (Admin tab \u2192 People).' });
       }
       const sess = currentSession(req);
       if (!sess) return json(res, 401, { error: 'Log in with FAF first' });
