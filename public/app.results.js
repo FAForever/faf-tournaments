@@ -489,51 +489,167 @@ function drawRenameCheck(out, r) {
   };
 }
 
-async function drawAdmin(el) {
-  el.innerHTML = '<div class="panel"><div class="empty">Loading…</div></div>';
-  let secrets = null;
-  try {
-    const at = adminToken();
-    secrets = await api('/api/t/' + T.id + '/secrets' + (at ? '?admin=' + encodeURIComponent(at) : ''));
+// The Admin tab is four sub-tabs. Every panel is rendered into one of them and the other three
+// are only hidden, so switching never loses a half-typed field, a lookup result or an open box.
+const ADMIN_SUBS = ['info', 'format', 'signups', 'people'];
+const ADMIN_SUB_LABEL = { info: 'Info', format: 'Format', signups: 'Signups', people: 'People' };
+let _adminSub = null;      // { tid, key }: the sub-tab open on this tournament's Admin tab
+let _adminFocus = null;    // id of an element to bring into view after the next Admin draw
+let _adminSecrets = null;  // { tid, data }: the late-signup link never changes, so fetch it once
+function adminSubKey() {
+  return (_adminSub && T && _adminSub.tid === T.id && ADMIN_SUBS.indexOf(_adminSub.key) >= 0) ? _adminSub.key : 'info';
+}
+// Open the Admin tab on a sub-tab, optionally at one element (links elsewhere on the page use
+// data-adminjump / data-adminfocus and land here through the click listener below).
+function openAdmin(key, focusId) {
+  if (!T) return;
+  _adminSub = { tid: T.id, key: ADMIN_SUBS.indexOf(key) >= 0 ? key : 'info' };
+  _adminFocus = focusId || null;
+  const mr = document.getElementById('modalRoot');
+  if (mr && mr.innerHTML) closeModal();   // a link inside a popup: the popup goes, the tab opens
+  if (currentTab === 'admin' && document.querySelector('#tabBody [data-apane]')) {
+    adminShowSub(_adminSub.key);
+    adminApplyFocus();
+    return;
   }
-  catch (e) { el.innerHTML = '<div class="panel"><div class="empty">' + esc(e.message) + '</div></div>'; return; }
+  if (typeof stopChatPoll === 'function') stopChatPoll();
+  currentTab = 'admin';
+  syncTabURL();
+  drawTournament();
+}
+document.addEventListener('click', (e) => {
+  const a = e.target && e.target.closest ? e.target.closest('[data-adminjump]') : null;
+  if (!a) return;
+  e.preventDefault();
+  openAdmin(a.dataset.adminjump, a.dataset.adminfocus || null);
+});
+function adminShowSub(key) {
+  if (ADMIN_SUBS.indexOf(key) < 0) key = 'info';
+  _adminSub = { tid: T.id, key };
+  document.querySelectorAll('#tabBody [data-asub]').forEach(b => {
+    const on = b.dataset.asub === key;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  document.querySelectorAll('#tabBody [data-apane]').forEach(p => { p.hidden = p.dataset.apane !== key; });
+  syncTabURL();
+  // Scrolled far down a long sub-tab: the next one starts at its top, right under the bar
+  // (which sticks to the top of the window on a desktop).
+  const top = document.getElementById('adminTop');
+  if (top && top.getBoundingClientRect) {
+    const y = top.getBoundingClientRect().top + (window.scrollY || 0);
+    if ((window.scrollY || 0) > y + 1) { try { window.scrollTo(0, Math.max(0, y)); } catch (e) {} }
+  }
+}
+// Brings an element into view and flashes it, so the eye lands where the link pointed.
+function adminBringIntoView(target, block) {
+  if (!target) return;
+  try { if (typeof target.scrollIntoView === 'function') target.scrollIntoView({ block: block || 'start', behavior: 'smooth' }); } catch (e) {}
+  target.classList.remove('admin-flash');
+  void target.offsetWidth;
+  target.classList.add('admin-flash');
+  setTimeout(() => target.classList.remove('admin-flash'), 1700);
+}
+function adminApplyFocus() {
+  if (!_adminFocus) return;
+  const id = _adminFocus;
+  _adminFocus = null;
+  adminBringIntoView(document.getElementById(id), 'center');
+}
+function adminPanelTitle(p) {
+  const h = p.querySelector('h2');
+  return h ? h.textContent.replace(/\s+/g, ' ').replace(/\s*\([^)]*\)\s*$/, '').trim() : '';
+}
+// "Jump to" links at the top of each sub-tab, one per panel actually on it.
+function adminBuildTocs(el) {
+  el.querySelectorAll('.admin-pane').forEach(pane => {
+    const toc = pane.querySelector('.admin-toc');
+    if (!toc) return;
+    const panels = Array.from(pane.querySelectorAll('.panel')).filter(p => {
+      const up = p.parentElement ? p.parentElement.closest('.panel') : null;
+      return !(up && pane.contains(up)) && adminPanelTitle(p);
+    });
+    if (panels.length < 3) { toc.remove(); return; }
+    toc.innerHTML = '<span class="muted">Jump to:</span>' + panels.map((p, i) =>
+      '<a href="#" data-ajump="' + i + '">' + esc(adminPanelTitle(p)) + '</a>').join('<span class="toc-dot">·</span>');
+    toc.querySelectorAll('[data-ajump]').forEach(a => a.onclick = (e) => {
+      e.preventDefault();
+      adminBringIntoView(panels[parseInt(a.dataset.ajump, 10)], 'start');
+    });
+  });
+}
+
+async function drawAdmin(el) {
+  let secrets = (_adminSecrets && _adminSecrets.tid === T.id) ? _adminSecrets.data : null;
+  if (!secrets) {
+    // Only the first draw waits. Every later one (the 4 s poll, the refresh after a save) draws in
+    // one go, so the page never collapses to "Loading" and the organizer keeps their place.
+    el.innerHTML = '<div class="panel"><div class="empty">Loading…</div></div>';
+    const tid = T.id;
+    try {
+      const at = adminToken();
+      secrets = await api('/api/t/' + T.id + '/secrets' + (at ? '?admin=' + encodeURIComponent(at) : ''));
+    }
+    catch (e) { el.innerHTML = '<div class="panel"><div class="empty">' + esc(e.message) + '</div></div>'; return; }
+    _adminSecrets = { tid, data: secrets };
+    // The page moved on while this loaded (another tab, another tournament): it has drawn itself.
+    if (!document.contains(el) || currentTab !== 'admin' || !T || T.id !== tid) return;
+  }
 
   const base = location.origin + '/t/' + T.id;
   const copyRow = (label, value) => `
     <label>${esc(label)}</label>
     <div class="copybox"><input type="text" readonly value="${esc(value)}"><button class="btn small" data-copy="${esc(value)}">Copy</button></div>`;
 
-  let html = `<div class="panel section"><h2>Share links</h2>
+  const panel = {};   // every panel's HTML by name; the sub-tabs are assembled from it below
+  panel.share = `<div class="panel section"><h2>Share links</h2>
     ${copyRow('Public link — share with everyone', base)}
     ${copyRow('Late-signup link — lets someone sign up after signups close (they must log in)', base + '?late=' + secrets.lateToken)}
 
   </div>`;
 
-  { // Tournament details — name, dates, team counts — editable any time
+  { // Tournament details: the name and when it is played. Editable any time.
     const dv = splitDateTimeUTC(T.eventDate || '');
-    const su = splitDateTimeUTC(T.signupOpensAt || '');
-    const sc = splitDateTimeUTC(T.signupClosesAt || '');
-    // checkInDeadline is stored as an epoch ms number, unlike the other three (ISO strings).
-    const ci = splitDateTimeUTC(T.checkInDeadline ? new Date(T.checkInDeadline).toISOString() : '');
-    html += `<div class="panel section"><h2>Tournament details</h2>
+    panel.details = `<div class="panel section"><h2>Tournament details</h2>
       <p class="muted small">Times are in <strong>UTC</strong> and display in each viewer's own time zone. All editable at any time.</p>
       <label>Tournament name</label>
       <input type="text" id="td_name" maxlength="60" value="${esc(T.name || '')}">
       ${T.imported ? '' : `<label style="margin-top:12px">Event date &amp; time <span class="muted small">(pick more than one day below for an event that spans a weekend, or two)</span></label>
       <div style="display:flex;gap:8px"><input type="date" id="td_date" value="${esc(dv.date)}" style="flex:1"><input type="time" id="td_time" value="${esc(dv.time)}" style="width:130px"></div>
       <div id="td_dayPick" class="dp-host"></div>
-      <div id="td_dayTimes"></div>
-      <label style="margin-top:12px">Signups open at <span class="muted small">(before this, only organizers can add players)</span></label>
-      <div style="display:flex;gap:8px"><input type="date" id="td_sudate" value="${esc(su.date)}" style="flex:1"><input type="time" id="td_sutime" value="${esc(su.time)}" style="width:130px"></div>
-      <label style="margin-top:12px">Signups close at <span class="muted small">(auto-closes signups; team forming &amp; picks still work. Empty = manual)</span></label>
-      <div style="display:flex;gap:8px"><input type="date" id="td_scdate" value="${esc(sc.date)}" style="flex:1"><input type="time" id="td_sctime" value="${esc(sc.time)}" style="width:130px"></div>
-      <label style="margin-top:12px">Check-in deadline <span class="muted small">(any member of a full team can check it in. Empty = no check-in; teams enter by signup order)</span></label>
-      <div style="display:flex;gap:8px"><input type="date" id="td_cidate" value="${esc(ci.date)}" style="flex:1"><input type="time" id="td_citime" value="${esc(ci.time)}" style="width:130px"></div>
-      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px">
-        <div style="flex:1;min-width:150px"><label>Min teams / entrants <span class="muted small">(display only)</span></label><input type="number" id="td_min" min="0" max="128" value="${T.minTeams || 0}"></div>
-        <div style="flex:1;min-width:150px"><label>Max teams / entrants <span class="muted small">(0 = unlimited)</span></label><input type="number" id="td_max" min="0" max="128" value="${T.maxTeams || 0}"></div>
-      </div>`}
+      <div id="td_dayTimes"></div>`}
       <div style="margin-top:14px"><button class="btn amber" id="td_save">Save details</button></div>
+    </div>`;
+  }
+
+  // Signups: who can enter and when, in one place. The mode used to sit at the bottom of the
+  // Format panel, whose save sent it to edit_format, which never stored it; the times and the
+  // team limits sat in Tournament details, and Max teams was in both. All of it is edit_info now.
+  if (!T.imported) {
+    const su = splitDateTimeUTC(T.signupOpensAt || '');
+    const sc = splitDateTimeUTC(T.signupClosesAt || '');
+    // checkInDeadline is stored as an epoch ms number, unlike the other two (ISO strings).
+    const ci = splitDateTimeUTC(T.checkInDeadline ? new Date(T.checkInDeadline).toISOString() : '');
+    const mode = T.signupMode || 'open';
+    panel.signups = `<div class="panel section"><h2>Signups</h2>
+      <p class="muted small">Times are in <strong>UTC</strong> and display in each viewer's own time zone. All editable at any time.</p>
+      <label>Who can sign up</label>
+      <select id="su_mode">
+        <option value="open"${mode === 'open' ? ' selected' : ''}>Open - anyone can sign up</option>
+        <option value="request"${mode === 'request' ? ' selected' : ''}>Request only - an organizer approves each signup</option>
+        <option value="invite"${mode === 'invite' ? ' selected' : ''}>Invite only</option>
+      </select>
+      <label style="margin-top:12px">Signups open at <span class="muted small">(before this, only organizers can add players)</span></label>
+      <div style="display:flex;gap:8px"><input type="date" id="su_opdate" value="${esc(su.date)}" style="flex:1"><input type="time" id="su_optime" value="${esc(su.time)}" style="width:130px"></div>
+      <label style="margin-top:12px">Signups close at <span class="muted small">(auto-closes signups; team forming &amp; picks still work. Empty = manual)</span></label>
+      <div style="display:flex;gap:8px"><input type="date" id="su_cldate" value="${esc(sc.date)}" style="flex:1"><input type="time" id="su_cltime" value="${esc(sc.time)}" style="width:130px"></div>
+      <label style="margin-top:12px">Check-in deadline <span class="muted small">(any member of a full team can check it in. Empty = no check-in; teams enter by signup order)</span></label>
+      <div style="display:flex;gap:8px"><input type="date" id="su_cidate" value="${esc(ci.date)}" style="flex:1"><input type="time" id="su_citime" value="${esc(ci.time)}" style="width:130px"></div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px">
+        <div style="flex:1;min-width:150px"><label>Min teams / entrants <span class="muted small">(display only)</span></label><input type="number" id="su_min" min="0" max="128" value="${T.minTeams || 0}"></div>
+        <div style="flex:1;min-width:150px"><label>Max teams / entrants <span class="muted small">(0 = unlimited)</span></label><input type="number" id="su_max" min="0" max="128" value="${T.maxTeams || 0}"></div>
+      </div>
+      <div style="margin-top:14px"><button class="btn amber" id="su_save">Save signups</button></div>
     </div>`;
   }
 
@@ -543,7 +659,7 @@ async function drawAdmin(el) {
     // Qualifiers are a niche feature, so the controls stay collapsed behind a checkbox unless
     // this tournament already uses them.
     const isParent = (T.qualifiers || []).length > 0 || _qlPanelOpen;
-    html += `<div class="panel section"><h2>Qualifiers</h2>
+    panel.qualifiers = `<div class="panel section"><h2>Qualifiers</h2>
       <label class="ql-toggle"><input type="checkbox" id="qlEnable"${isParent ? ' checked' : ''}> This tournament takes qualifiers from other tournaments</label>
       <div id="qlBody" style="display:${isParent ? '' : 'none'}">
         <p class="muted small" style="margin:8px 0 10px">When a linked qualifier finishes, the entrants who meet the rule are <strong>invited</strong> automatically \u2014 they still have to accept. Manual invites and normal signups keep working.</p>
@@ -575,7 +691,7 @@ async function drawAdmin(el) {
         </div>
       </div>
     </div>`;
-    html += `<div class="panel section"><h2>Series</h2>
+    panel.series = `<div class="panel section"><h2>Series</h2>
       <p class="muted small">Group this tournament with other editions of the same recurring event. Editions stay completely independent — this is only a link for browsing.</p>
       <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">
         <select id="tSeriesSel" style="flex:1;min-width:220px"><option value="">— not part of a series —</option></select>
@@ -586,7 +702,7 @@ async function drawAdmin(el) {
     </div>`;
     const meFid = (fafAuth.user && fafAuth.user.fafId) ? String(fafAuth.user.fafId) : '';
     const canDropLast = sa;   // only a site admin may leave a tournament with no organizers
-    html += `<div class="panel section"><h2>Organizers <span class="h2-strong">(${orgs.length})</span></h2>
+    panel.organizers = `<div class="panel section"><h2>Organizers <span class="h2-strong">(${orgs.length})</span></h2>
       <p class="muted small">Accounts with organizer rights on this tournament. <strong>Any organizer can add or remove any other organizer</strong>, or leave the team themselves - it is trust-based. Organizers are recognised by their FAF account; there is no organizer link.</p>
       <p class="muted small">Add an organizer below by FAF name or id. Players see the visible organizers on the Chat tab; hide one to keep them off that public list (default: shown).</p>
       ${orgs.length ? '' : '<div class="empty" style="margin:10px 0">No FAF account holds organizer rights here yet. Add one below by FAF name or id.</div>'}
@@ -606,7 +722,7 @@ async function drawAdmin(el) {
       </div></div>`;
 
     const casters = T.casters || [];
-    html += `<div class="panel section"><h2>Casters</h2>
+    panel.casters = `<div class="panel section"><h2>Casters</h2>
       <p class="muted small">Read access to everything on this tournament: every chat room (and they can post in them), hidden maps and pools, and all vetoes. No organizer powers at all \u2014 no Admin tab, no Log, no player changes.</p>
       <p class="muted small">Bound to a FAF account, so it works in the desktop client too. Any organizer can add or remove a caster.</p>
       ${casters.length ? '' : '<div class="empty" style="margin:10px 0">No casters yet. Add one below by FAF name or id.</div>'}
@@ -623,8 +739,8 @@ async function drawAdmin(el) {
     const p = T.plan || {};
     const fc = T.ffaCfg || {};
     const dis = locked ? ' disabled' : '';
-    html += `<div class="panel section"><h2>Format</h2>
-      ${locked ? '<p class="muted small">Team setup fields are locked while the draft/teams exist \u2014 reopen signups to change them. Bracket, match lengths and caps stay editable until the bracket starts.</p>' : '<p class="muted small">Fix wrong options here. Everything is editable until the bracket starts.</p>'}
+    panel.format = `<div class="panel section"><h2>Format</h2>
+      ${locked ? '<p class="muted small">Team setup fields are locked while the draft/teams exist - reopen signups to change them. The bracket and match lengths stay editable until the bracket starts.</p>' : '<p class="muted small">Fix wrong options here. Everything is editable until the bracket starts.</p>'}
       <label>Competition</label>
       <select id="af_comp"${dis}><option value="team"${T.competition === 'team' ? ' selected' : ''}>Team bracket</option><option value="ffa"${T.competition === 'ffa' ? ' selected' : ''}>FFA</option></select>
       <div id="af_team">
@@ -799,30 +915,33 @@ async function drawAdmin(el) {
       </div>
       <label>Seeding</label>
       <select id="af_seed"${dis}><option value="rating"${T.seeding === 'rating' ? ' selected' : ''}>By rating</option><option value="random"${T.seeding === 'random' ? ' selected' : ''}>Random</option>${T.seeding === 'manual' ? '<option value="manual" selected>Manual (set on the seeding list)</option>' : ''}</select>
-      <label>Max teams / entrants (0 = unlimited)</label>
-      <input type="number" id="af_max" min="0" max="128" value="${T.maxTeams || 0}" autocomplete="off">
-      <label>Signups</label>
-      <select id="af_signupMode">
-        <option value="open"${(T.signupMode || 'open') === 'open' ? ' selected' : ''}>Open — anyone can sign up</option>
-        <option value="request"${T.signupMode === 'request' ? ' selected' : ''}>Request only — organizer approves</option>
-        <option value="invite"${T.signupMode === 'invite' ? ' selected' : ''}>Invite only</option>
-      </select>
-      <label style="display:block;margin-top:10px"><input type="checkbox" id="af_playerReporting"${T.playerReporting ? ' checked' : ''}> Allow players to submit scores <span class="muted small">(replay IDs + opponent confirmation)</span></label>
       <div style="margin-top:16px"><button class="btn amber" id="af_save">Save format</button></div>
     </div>`;
   }
 
-  html += seedPanelHTML();
+  // Who reports results. It was a checkbox inside the Format panel, which disappears at the start
+  // and whose save never stored it; this one works at any time, mid-event included, and saves as
+  // soon as it is ticked. FFA lobbies are always reported by their players, so it is team-only.
+  if (T.status !== 'finished' && T.competition === 'team') {
+    panel.reporting = `<div class="panel section"><h2>Score reporting</h2>
+      <label style="display:flex;align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text);margin:0">
+        <input type="checkbox" id="srPlayers"${T.playerReporting ? ' checked' : ''}> Players submit their own scores <span class="muted small">(replay IDs, confirmed by the opponent)</span>
+      </label>
+      <p class="muted small" style="margin:8px 0 0">When this is off, only organizers enter results. Saved as soon as you tick or untick it.</p>
+    </div>`;
+  }
+
+  panel.seeding = seedPanelHTML();
 
   // Player names: FAF has no rename webhook, so a name recorded at signup goes stale silently
   // and the bracket keeps showing it. Check is read-only; nothing is written until a box is
   // ticked, because the old name is sometimes the one the organizer wants to keep.
-  html += `<div class="panel section"><h2>Player <span class="h2-strong">names</span></h2>
+  panel.names = `<div class="panel section"><h2>Player <span class="h2-strong">names</span></h2>
     <p class="muted small">FAF names are recorded when someone signs up. If they rename on FAF afterwards, this tournament keeps showing the old name until they next open it. Check here, then pick which ones to update.</p>
     <div style="margin:10px 0"><button class="btn ghost small" id="rnCheck">Check players for renames</button></div>
     <div id="rnOut"></div></div>`;
 
-  html += `<div class="panel section"><h2>Game setup</h2>
+  panel.setup = `<div class="panel section"><h2>Game setup</h2>
     <div class="row" style="justify-content:space-between;align-items:center">
       <label style="margin:0">Description</label>
       <span class="muted small">Paste a screenshot straight in, or <a href="#" id="aiDescImgBtn">insert an image</a>.</span>
@@ -839,7 +958,7 @@ async function drawAdmin(el) {
     <div style="margin-top:14px"><button class="btn" id="aiSave">Save setup</button></div>
   </div>`;
 
-  html += `<div class="panel section"><h2>Rewards</h2>
+  panel.rewards = `<div class="panel section"><h2>Rewards</h2>
     <p class="muted small">Shown prominently on the Overview tab. Editable at any time.</p>
     <div class="row" style="justify-content:space-between;align-items:center">
       <label style="margin:0">Rewards</label>
@@ -861,7 +980,7 @@ async function drawAdmin(el) {
     <div style="margin-top:14px"><button class="btn" id="aiRwSave">Save rewards</button></div>
   </div>`;
 
-  html += `<div class="panel section"><h2>Sponsors</h2>
+  panel.sponsors = `<div class="panel section"><h2>Sponsors</h2>
     <div class="row" style="justify-content:space-between;align-items:center">
       <p class="muted small" style="margin:0">Shown prominently on the Overview next to the rewards. Text, links, or images.</p>
       <span class="muted small">Paste a screenshot straight in, or <a href="#" id="aiSpImgBtn">insert an image</a>.</span>
@@ -872,7 +991,7 @@ async function drawAdmin(el) {
     <div style="margin-top:14px"><button class="btn" id="aiSpSave">Save sponsors</button></div>
   </div>`;
 
-  html += `<div class="panel section"><h2>Livestreams</h2>
+  panel.streams = `<div class="panel section"><h2>Livestreams</h2>
     <p class="muted small">Where this tournament is streamed \u2014 shown near the top of the Overview with clickable links. Add one row per stream; leave a row's link empty to drop it.</p>
     <div id="aiStreams">${((T.streams && T.streams.length) ? T.streams : [{ url: '', info: '' }]).map(st => `
       <div class="row stream-row" style="display:flex;gap:8px;margin-bottom:6px;flex-wrap:wrap">
@@ -885,7 +1004,7 @@ async function drawAdmin(el) {
     </div></div>`;
 
   if ((T.chatMutes || []).length) {
-    html += `<div class="panel section"><h2>Muted in chat <span class="h2-strong">(${T.chatMutes.length})</span></h2>
+    panel.mutes = `<div class="panel section"><h2>Muted in chat <span class="h2-strong">(${T.chatMutes.length})</span></h2>
       <p class="muted small">Muted accounts can read chat but not post. Mute anyone from the controls on their messages in any chat room.</p>
       <div class="pick-rows">${T.chatMutes.map(mu => `<div class="pick-row on" style="cursor:default">
         <span class="pr-name">${esc(mu.name)} <span class="muted small">FAF id ${esc(mu.fafId)}</span></span>
@@ -893,7 +1012,7 @@ async function drawAdmin(el) {
       </div>`).join('')}</div></div>`;
   }
 
-  html += `<div class="panel section"><h2>Rating requirements</h2>
+  panel.rating = `<div class="panel section"><h2>Rating requirements</h2>
     <p class="muted small">Min/Max <strong>refuse</strong> self-signups outside the range. The <strong>rating cap</strong> is different: it doesn\u2019t refuse anyone \u2014 a player above it is treated as exactly the cap value (displayed and calculated as the cap), e.g. cap 2200 makes a 2400 count as 2200. Organizer adds, replaces, moves and invited players bypass the min/max refusal but are still capped. All editable at any time; changing the cap re-applies to everyone instantly.</p>
     <div class="row" style="display:flex;gap:8px;flex-wrap:wrap">
       <div style="flex:1;min-width:140px"><label>Min player rating</label><input type="number" id="aiMinR" min="0" max="4000" value="${T.minRating != null ? T.minRating : ''}" placeholder="off"></div>
@@ -935,7 +1054,7 @@ async function drawAdmin(el) {
     const v = T.veto || { enabled: false, mode: 'upfront' };
     const pools = T.mapPools || [];
     const ready = pools.filter(p => (p.sequence || []).length && (p.sequence || []).length === (p.mapIds || []).length - 1);
-    html += `<div class="panel section"><h2>Map vetoes</h2>
+    panel.vetoes = `<div class="panel section"><h2>Map vetoes</h2>
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="vtEnabled" style="width:auto"${v.enabled ? ' checked' : ''}> Enable map vetoes</label>
       <div id="vtCfg" style="${v.enabled ? '' : 'display:none;'}margin-top:12px">
         <p class="muted small">Each match's captains ban/pick from the pool assigned to their match, following that pool's own ban/pick order. Build pools, their orders, and their round assignments on the <strong>Maps</strong> tab.</p>
@@ -975,7 +1094,7 @@ async function drawAdmin(el) {
   // Faction vetoes: 1v1 only, since each side is one player choosing their own faction.
   if (T.status !== 'finished' && T.competition === 'team' && T.teamSize === 1) {
     const fv = T.fveto || { enabled: 0, bans: 1, picks: 2 };
-    html += `<div class="panel section"><h2>Faction vetoes</h2>
+    panel.fvetoes = `<div class="panel section"><h2>Faction vetoes</h2>
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="fvEnabled" style="width:auto"${fv.enabled ? ' checked' : ''}> Enable faction vetoes</label>
       <div id="fvCfg" style="${fv.enabled ? '' : 'display:none;'}margin-top:12px">
         <p class="muted small">Runs per game of a series, in parallel with the map veto and independently of it. Each player bans factions (denying them to their opponent), then picks factions in order of preference. <strong>Nobody sees anyone else's choices \u2014 not the opponent, not you.</strong> You can see who still owes choices. Once both are done the result is shown to everyone.</p>
@@ -992,9 +1111,9 @@ async function drawAdmin(el) {
     </div>`;
   }
 
-  html += `<div class="panel section"><h2>Organizer notes</h2>
+  panel.notes = `<div class="panel section"><h2>Organizer notes</h2>
     <ul class="muted small">
-      <li>Substitutions: Players tab \u2192 "Replace" next to the player. The sub takes over their exact spot (team, seed, results). Subs come from unteamed signups \u2014 share the late-signup link from this tab if you need someone new mid-tournament.</li>
+      <li>Substitutions: Players tab \u2192 "Replace" next to the player. The sub takes over their exact spot (team, seed, results). Subs come from unteamed signups - share the late-signup link (Info, at the top) if you need someone new mid-tournament.</li>
       <li>Maps: group maps into pools on the Maps tab, then assign a pool per round via the "change" link in each round's MAP POOL header on the Bracket tab (or per match from the Vetoes tab).</li>
       <li>Schedule changes: post them on the News tab with "highlight" ticked \u2014 players get an unread badge and see the latest update on the Overview.</li>
       <li>Running scores: reporting 1-0 in a Bo3 keeps the match LIVE; it completes when a team reaches the required wins.</li>
@@ -1004,15 +1123,15 @@ async function drawAdmin(el) {
 
   if ((T.descImages || []).length) {
     const inlineRef = (T.description || '') + ' ' + (T.rewards || '');
-    html += `<div class="panel section"><h2>Attached images <span class="muted small">(${(T.descImages || []).length}/10)</span></h2>
+    panel.images = `<div class="panel section"><h2>Attached images <span class="muted small">(${(T.descImages || []).length}/10)</span></h2>
     <p class="muted small" style="margin:6px 0 10px">New images are added by pasting them straight into the Description or Rewards text above. Images referenced there are marked "in use"; unreferenced ones show in a gallery under the briefing. Removing an image deletes its file.</p>
     <div class="desc-gallery">${(T.descImages || []).map(f => { const used = inlineRef.indexOf('/desc-images/' + encodeURIComponent(f)) >= 0 || inlineRef.indexOf('/desc-images/' + f) >= 0; return `<div class="desc-thumb"><img src="/desc-images/${encodeURIComponent(f)}" alt="">${used ? '<div class="mono small" style="color:var(--green);text-align:center">in use</div>' : ''}<button class="btn danger small" data-descdel="${esc(f)}">Remove</button></div>`; }).join('')}</div></div>`;
   }
 
-  html += '<div class="panel section" id="tBanPanelHost"></div>';
+  panel.bans = '<div id="tBanPanelHost"></div>';   // banPanel draws its own panel into it
 
   if (siteAdmin()) {
-    html += `<div class="panel section"><h2>Category <span class="muted small">(site admin only)</span></h2>
+    panel.category = `<div class="panel section"><h2>Category <span class="muted small">(site admin only)</span></h2>
       <p class="muted small">Organizers pick this once at creation; only site admins can change it afterwards.</p>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <span class="catbox ${T.category === 'official' ? 'official' : 'community'}">${T.category === 'official' ? 'OFFICIAL' : 'COMMUNITY'}</span>
@@ -1022,7 +1141,7 @@ async function drawAdmin(el) {
 
   // Who picks their playoff opponent, and redoing the playoffs, while a Swiss stage runs. The
   // Format panel is gone by now, and this is exactly when that decision gets made.
-  if (T.status === 'running' && T.playoffs) html += playoffSetupPanelHTML();
+  if (T.status === 'running' && T.playoffs) panel.playoffs = playoffSetupPanelHTML();
 
   // Stop a running tournament where it stands. This is the qualifier control: a LotS qualifier
   // runs until the top 4 is settled, not until a champion exists.
@@ -1035,7 +1154,7 @@ async function drawAdmin(el) {
       : `<div class="muted small" style="margin:6px 0 0">${esc(wb.map(nm).join(', ')) || 'nobody'}</div>`;
     const declared = parseInt(T.stopAtAlive, 10) || 0;
     const toGo = declared ? Math.max(0, alive - declared) : null;
-    html += `<div class="panel section"><h2>End <span class="h2-strong">early</span></h2>
+    panel.endEarly = `<div class="panel section"><h2>End <span class="h2-strong">early</span></h2>
       ${declared
         ? '<p class="muted small" style="margin:6px 0 10px">This tournament is set to end by itself once <strong>' + declared + '</strong> are left'
           + (toGo === 0 ? ' \u2014 the next result will do it.' : ', ' + toGo + ' elimination' + (toGo === 1 ? '' : 's') + ' from now.')
@@ -1060,12 +1179,12 @@ async function drawAdmin(el) {
       </div></div>`;
   }
   if (T.earlyFinish) {
-    html += `<div class="panel section"><h2>Ended <span class="h2-strong">early</span></h2>
+    panel.ended = `<div class="panel section"><h2>Ended <span class="h2-strong">early</span></h2>
       <p class="muted small" style="margin:6px 0 10px">${T.earlyFinish.auto ? 'Stopped automatically' : 'Stopped by ' + esc(T.earlyFinish.by || 'an organizer')} with ${T.earlyFinish.alive} still standing: ${esc((T.earlyFinish.names || []).join(', '))}.${T.earlyFinish.target && T.earlyFinish.alive < T.earlyFinish.target ? ' Two results landed close together, so it went one past the target of ' + T.earlyFinish.target + '.' : ''}</p>
       <button class="btn ghost" id="undoFinishEarlyBtn">Reopen the tournament</button></div>`;
   }
 
-  html += `<div class="panel section" style="border-color:var(--danger,#e5484d)"><h2>Archive / Abandon</h2>
+  panel.danger = `<div class="panel section" style="border-color:var(--danger,#e5484d)"><h2>Archive / Abandon</h2>
     <p class="muted small" style="margin:6px 0 10px"><strong>Archive</strong> hides this tournament from everyone (reversible by a site admin). <strong>Abandoned</strong> keeps it visible under Completed with a red ABANDONED badge — the honest label when it never actually happened, e.g. too few signups. Abandoning is reversible here.</p>
     <div style="display:flex;gap:10px;flex-wrap:wrap">
       <button class="btn danger" id="archiveBtn">Archive tournament</button>
@@ -1074,7 +1193,26 @@ async function drawAdmin(el) {
         : '<button class="btn danger" id="abandonBtn">Mark as abandoned</button>'}
     </div></div>`;
 
-  el.innerHTML = html;
+  // ---- the four sub-tabs ----
+  // Info: what players read about the event. Format: how it is played, and while it runs the
+  // playoffs and the early end. Signups: who can enter and when. People: the accounts that have a
+  // role here, or a restriction.
+  const order = {
+    info: ['share', 'details', 'setup', 'rewards', 'sponsors', 'streams', 'images', 'series', 'category', 'danger'],
+    format: ['format', 'seeding', 'playoffs', 'endEarly', 'ended', 'reporting', 'vetoes', 'fvetoes', 'notes'],
+    signups: ['signups', 'rating', 'qualifiers'],
+    people: ['organizers', 'casters', 'bans', 'mutes', 'names']
+  };
+  const sub = adminSubKey();
+  // A multi-day draft cannot be published until the start-time question is answered (decision 46).
+  const dayQ = !T.published && eventDayList(T).length > 0 && !T.dayTimesMode;
+  el.innerHTML = '<div id="adminTop"></div><div class="admin-nav" id="adminNav"><div class="subtabs admin-subtabs" role="tablist">'
+    + ADMIN_SUBS.map(k => '<button class="subtab' + (k === sub ? ' active' : '') + '" data-asub="' + k + '" role="tab" aria-selected="' + (k === sub ? 'true' : 'false') + '">'
+      + ADMIN_SUB_LABEL[k] + (k === 'info' && dayQ ? '<span class="tab-badge" title="Answer the start time question before publishing">!</span>' : '') + '</button>').join('')
+    + '</div></div>'
+    + ADMIN_SUBS.map(k => '<div class="admin-pane" data-apane="' + k + '"' + (k === sub ? '' : ' hidden') + '><div class="admin-toc"></div>'
+      + order[k].map(n => panel[n] || '').join('') + '</div>').join('');
+  el.querySelectorAll('[data-asub]').forEach(b => b.onclick = () => adminShowSub(b.dataset.asub));
   wirePlayoffSetup();
 
   // Multi-day picker, two-way bound to the native date input beside it (see mountDayPicker).
@@ -1113,6 +1251,7 @@ async function drawAdmin(el) {
       });
     }
   }
+  adminBuildTocs(el);   // after the ban panel, which draws itself into its host
 
   const tdSave = document.getElementById('td_save');
   if (tdSave) tdSave.onclick = async () => {
@@ -1124,16 +1263,37 @@ async function drawAdmin(el) {
         info.eventDate = combineDateTimeUTC(dd, document.getElementById('td_time'));
         info.eventDays = _tdDayPick ? _tdDayPick.get() : [];
         if (_tdDayTimes) { const dt = _tdDayTimes.get(); info.dayTimesMode = dt.mode; info.dayTimes = dt.times; }
-        info.signupOpensAt = combineDateTimeUTC(document.getElementById('td_sudate'), document.getElementById('td_sutime'));
-        info.signupClosesAt = combineDateTimeUTC(document.getElementById('td_scdate'), document.getElementById('td_sctime'));
-        info.checkInDeadline = combineDateTimeUTC(document.getElementById('td_cidate'), document.getElementById('td_citime'));
-        info.minTeams = document.getElementById('td_min').value;
-        info.maxTeams = document.getElementById('td_max').value;
       }
       await api('/api/t/' + T.id + '/edit_info', info);
       toast('Details saved');
       await refresh();
     } catch (e) { toast(e.message, true); }
+  };
+  const suSave = document.getElementById('su_save');
+  if (suSave) suSave.onclick = async () => {
+    const g = id => document.getElementById(id);
+    try {
+      await api('/api/t/' + T.id + '/edit_info', {
+        signupMode: g('su_mode').value,
+        signupOpensAt: combineDateTimeUTC(g('su_opdate'), g('su_optime')),
+        signupClosesAt: combineDateTimeUTC(g('su_cldate'), g('su_cltime')),
+        checkInDeadline: combineDateTimeUTC(g('su_cidate'), g('su_citime')),
+        minTeams: g('su_min').value,
+        maxTeams: g('su_max').value,
+        admin: adminToken()
+      });
+      toast('Signups saved');
+      await refresh();
+    } catch (e) { toast(e.message, true); }
+  };
+  const srPlayers = document.getElementById('srPlayers');
+  if (srPlayers) srPlayers.onchange = async () => {
+    const on = srPlayers.checked;
+    try {
+      await api('/api/t/' + T.id + '/edit_info', { playerReporting: on ? 1 : 0, admin: adminToken() });
+      toast(on ? 'Players can submit their scores' : 'Only organizers enter results now');
+      await refresh();
+    } catch (e) { srPlayers.checked = !on; toast(e.message, true); }
   };
   const claimSelf = document.getElementById('orgClaimSelf');
   if (claimSelf) claimSelf.onclick = async () => {
@@ -1654,8 +1814,7 @@ async function drawAdmin(el) {
 
     g('af_save').onclick = async () => {
       const isFfa = afComp.value === 'ffa';
-      const body = { admin: adminToken(), maxTeams: g('af_max').value,
-        signupMode: g('af_signupMode').value, playerReporting: g('af_playerReporting').checked ? 1 : 0 };
+      const body = { admin: adminToken() };
       if (T.status === 'signup') {
         body.competition = afComp.value;
         body.teamSize = isFfa ? g('af_fsize').value : g('af_size').value;
@@ -1723,6 +1882,7 @@ async function drawAdmin(el) {
       await refresh();
     } catch (e) { toast(e.message, true); }
   };
+  adminApplyFocus();   // a link elsewhere asked for one spot on this tab
 }
 
 // ---------- per-tournament activity log (organizers + site admin only) ----------
@@ -2236,13 +2396,25 @@ function openMatchChat(m) {
 async function refresh() {
   await loadTournament();
   lastSnapshot = JSON.stringify(T);
+  redrawInPlace();
+}
+
+// Redraw the page without moving it: the poll and every save redraw the whole tab, and on a long
+// one (the Admin tab was eight screens) the organizer was thrown back to the top each time.
+function redrawInPlace() {
+  const tab = currentTab;
+  const y = window.scrollY || 0;
   drawTournament();
+  if (y && currentTab === tab && Math.abs((window.scrollY || 0) - y) > 1) {
+    try { window.scrollTo(0, y); } catch (e) {}
+  }
 }
 
 function syncTabURL() {
   const id = tourneyId();
   if (!id) return;
-  const url = '/t/' + id + (currentTab && currentTab !== 'overview' ? '?tab=' + currentTab : '');
+  let url = '/t/' + id + (currentTab && currentTab !== 'overview' ? '?tab=' + currentTab : '');
+  if (currentTab === 'admin' && adminSubKey() !== 'info') url += '&sub=' + adminSubKey();
   history.replaceState(null, '', url);
 }
 
