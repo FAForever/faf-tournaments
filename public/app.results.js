@@ -608,6 +608,13 @@ async function drawAdmin(el) {
 
   </div>`;
 
+  // Who approved publishing (decision 51): one line on Info, the steps are in the Log tab.
+  if (T.pubRecord) {
+    const pr = T.pubRecord;
+    panel.publishing = `<div class="panel section"><h2>Publishing</h2>
+      <p class="muted small" style="margin:6px 0 0">Approved by <strong>${esc(pr.byName)}</strong> on ${esc(fmtDateTime(pr.at))}, requested by <strong>${esc(pr.reqByName || '')}</strong>${pr.reqAt ? ' on ' + esc(fmtDateTime(pr.reqAt)) : ''}. Every step is in the Log tab.</p></div>`;
+  }
+
   { // Tournament details: the name and when it is played. Editable any time.
     const dv = splitDateTimeUTC(T.eventDate || '');
     panel.details = `<div class="panel section"><h2>Tournament details</h2>
@@ -998,6 +1005,11 @@ async function drawAdmin(el) {
         <input type="text" class="stUrl" placeholder="https://twitch.tv/..." maxlength="300" value="${esc(st.url || '')}" style="flex:2;min-width:220px" autocomplete="off">
         <input type="text" class="stInfo" placeholder="Info, e.g. Main stream (English), casted by X" maxlength="120" value="${esc(st.info || '')}" style="flex:2;min-width:220px" autocomplete="off">
       </div>`).join('')}</div>
+    ${(() => {
+      // decision 51: a stream on a site that is not allowed is shown as text, and saving is refused
+      const off = Array.from(new Set((T.streams || []).filter(st => st.url && !linkOk(st.url)).map(st => linkHost(st.url) || st.url)));
+      return off.length ? '<p class="warn small" style="margin:6px 0">Not an allowed site: ' + off.map(esc).join(', ') + '. Players see it as plain text, and saving is refused until it is removed or a tournament director allows the site (Site admin \u2192 Allowed links).</p>' : '';
+    })()}
     <div style="display:flex;gap:10px;margin-top:6px">
       <button class="btn ghost small" id="aiStAdd">+ Add another stream</button>
       <button class="btn" id="aiStSave">Save livestreams</button>
@@ -1198,7 +1210,7 @@ async function drawAdmin(el) {
   // playoffs and the early end. Signups: who can enter and when. People: the accounts that have a
   // role here, or a restriction.
   const order = {
-    info: ['share', 'details', 'setup', 'rewards', 'sponsors', 'streams', 'images', 'series', 'category', 'danger'],
+    info: ['share', 'publishing', 'details', 'setup', 'rewards', 'sponsors', 'streams', 'images', 'series', 'category', 'danger'],
     format: ['format', 'seeding', 'playoffs', 'endEarly', 'ended', 'reporting', 'vetoes', 'fvetoes', 'notes'],
     signups: ['signups', 'rating', 'qualifiers'],
     people: ['organizers', 'casters', 'bans', 'mutes', 'names']

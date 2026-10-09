@@ -104,18 +104,20 @@ async function refreshPending() {
     app.parentNode.insertBefore(bar, app);
   }
   if (!fafAuth.enabled || !me()) { bar.innerHTML = ''; return; }
-  let items = [], alert = null;
+  let items = [], alert = null, approvals = null;
   try {
     const d = await (await fetch('/api/my/pending', { credentials: 'same-origin' })).json();
     items = (d && d.pending) || [];
     alert = (d && d.alert) || null;
+    approvals = (d && d.approvals) || null;
   }
   catch (e) { bar.innerHTML = ''; return; }
   const cur = tourneyId();
   const shown = items.filter(it => it.tId !== cur);
   // The alert points at the console, so it's noise while you're already in it.
   if (alert && location.pathname === '/siteadmin') alert = null;
-  if (!shown.length && !alert) { bar.innerHTML = ''; return; }
+  if (approvals && location.pathname === '/siteadmin') approvals = null;
+  if (!shown.length && !alert && !approvals) { bar.innerHTML = ''; return; }
   let html = '';
   if (shown.length) {
     const it = shown[0];
@@ -131,7 +133,20 @@ async function refreshPending() {
       '<button class="btn small" id="alertGo">Review</button>' +
       (alert.dismissible ? '<button class="pending-x" id="alertX" title="Hide this until a new request comes in" aria-label="Dismiss">\u00D7</button>' : '') + '</div>';
   }
+  // Drafts waiting for a second account to approve publishing (decision 51).
+  if (approvals) {
+    html += '<div class="pending-bar pending-admin"><span class="pending-text">\uD83D\uDD14 ' + esc(approvals.text) + '</span>' +
+      '<button class="btn small" id="apprGo">Review</button>' +
+      (approvals.dismissible ? '<button class="pending-x" id="apprX" title="Hide this until a new one comes in" aria-label="Dismiss">\u00D7</button>' : '') + '</div>';
+  }
   bar.innerHTML = html;
+  const apGo = bar.querySelector('#apprGo');
+  if (apGo) apGo.onclick = () => { saTab = 'approvals'; history.pushState(null, '', '/siteadmin'); route(); };
+  const apX = bar.querySelector('#apprX');
+  if (apX) apX.onclick = async () => {
+    try { await api('/api/my/dismiss_requests', { kind: 'approvals' }); } catch (e) { toast(e.message, true); }
+    refreshPending();
+  };
   const goBtn = bar.querySelector('#pendingGo');
   if (goBtn) goBtn.onclick = () => {
     const it = shown[0];
@@ -1543,7 +1558,7 @@ function openImportWindow() {
       try {
         const r = await api('/api/import_challonge', { tournament: urlv, apiKey: keyv });
         closeModal();
-        toast('Imported "' + r.name + '"');
+        toast(r.needsApproval ? 'Imported "' + r.name + '" as a draft - a tournament director has to approve it before it is public' : 'Imported "' + r.name + '"');
         history.pushState(null, '', '/t/' + r.id);
         route();
       } catch (e) {
@@ -1598,7 +1613,7 @@ function loginFlow() {
     };
   });
 }
-let saTab = 'requests';
+let saTab = 'approvals';   // the console opens where most work waits (decision 51)
 let saData = null;
 
 async function renderSiteAdmin() {
@@ -1623,16 +1638,20 @@ async function renderSiteAdmin() {
   // what the role already carries (organizer rights on every official tournament, appointing
   // other directors); the site-admin list is the one real escalation, so it stays out.
   const director = !siteAdmin() && isDirector;
-  const validTabs = director ? ['requests', 'directors', 'bans', 'logs', 'archived', 'articles'] : ['requests', 'siteadmins', 'directors', 'bans', 'logs', 'archived', 'articles'];
+  const apOn = approvalsOn();   // without FAF login there is nothing to approve (legacy publishing)
+  const validTabs = (director ? ['approvals', 'requests', 'directors', 'bans', 'links', 'logs', 'archived', 'articles'] : ['approvals', 'requests', 'siteadmins', 'directors', 'bans', 'links', 'logs', 'archived', 'articles'])
+    .filter(k => apOn || k !== 'approvals');
   if (validTabs.indexOf(saTab) < 0) saTab = validTabs[0];
   app.innerHTML = `<div class="page">
     <h1 style="margin:0 0 14px">Site admin${director ? ' <span class="muted" style="font-size:14px;font-weight:400">(tournament director)</span>' : ''}</h1>
-    ${director ? '<p class="muted small" style="margin:-8px 0 12px">As a tournament director you have the whole console except <strong>Site Admins</strong>: access requests, the director roster, tournament bans, logs, archived tournaments and the FAQ / Rules articles.</p>' : ''}
+    ${director ? '<p class="muted small" style="margin:-8px 0 12px">As a tournament director you have the whole console except <strong>Site Admins</strong>: ' + (apOn ? 'publishing approvals, ' : '') + 'access requests, the director roster, tournament bans, allowed links, logs, archived tournaments and the FAQ / Rules articles.</p>' : ''}
     <div class="tabs" style="margin-bottom:14px">
+      ${apOn ? `<button class="tab ${saTab === 'approvals' ? 'active' : ''}" data-satab="approvals">Approvals${(saData && saData.publishing && saData.publishing.pending.length) ? ' (' + saData.publishing.pending.length + ')' : ''}</button>` : ''}
       ${`<button class="tab ${saTab === 'requests' ? 'active' : ''}" data-satab="requests">Requests${(saData && ((saData.requests || []).filter(r => r.status === 'pending').length + (saData.editorRequests || []).filter(r => r.status === 'pending').length + (saData.importerRequests || []).filter(r => r.status === 'pending').length)) ? ' (' + ((saData.requests || []).filter(r => r.status === 'pending').length + (saData.editorRequests || []).filter(r => r.status === 'pending').length + (saData.importerRequests || []).filter(r => r.status === 'pending').length) + ')' : ''}</button>`}
       ${director ? '' : `<button class="tab ${saTab === 'siteadmins' ? 'active' : ''}" data-satab="siteadmins">Site Admins${(saData && (saData.siteAdmins || []).length) ? ' (' + saData.siteAdmins.length + ')' : ''}</button>`}
       <button class="tab ${saTab === 'directors' ? 'active' : ''}" data-satab="directors">Directors${(saData && (saData.directors || []).length) ? ' (' + saData.directors.length + ')' : ''}</button>
       <button class="tab ${saTab === 'bans' ? 'active' : ''}" data-satab="bans">Tournament bans${(saData && (saData.bans || []).length) ? ' (' + saData.bans.length + ')' : ''}</button>
+      <button class="tab ${saTab === 'links' ? 'active' : ''}" data-satab="links">Allowed links</button>
       <button class="tab ${saTab === 'logs' ? 'active' : ''}" data-satab="logs">Logs</button>
       <button class="tab ${saTab === 'archived' ? 'active' : ''}" data-satab="archived">Archived${(saData && (saData.archived || []).length) ? ' (' + saData.archived.length + ')' : ''}</button>
       <button class="tab ${saTab === 'articles' ? 'active' : ''}" data-satab="articles">Articles</button>
@@ -1653,7 +1672,9 @@ async function renderSiteAdmin() {
     return;
   }
   const body = document.getElementById('saBody');
-  if (saTab === 'requests') drawSaRequests(body);
+  if (saTab === 'approvals') drawSaApprovals(body);
+  else if (saTab === 'links') drawSaLinks(body);
+  else if (saTab === 'requests') drawSaRequests(body);
   else if (saTab === 'siteadmins') drawSaSiteAdmins(body);
   else if (saTab === 'directors') drawSaDirectors(body);
   else if (saTab === 'bans') drawSaBans(body);
@@ -2034,7 +2055,15 @@ const SA_ACTION_LABEL = {
   host_access_requested: 'Requested hosting access',
   host_access_granted: 'Granted hosting access',
   host_access_denied: 'Denied hosting access',
-  host_access_revoked: 'Revoked hosting access'
+  host_access_revoked: 'Revoked hosting access',
+  tournament_publish_requested: 'Requested publishing',
+  tournament_publish_withdrawn: 'Withdrew the publish request',
+  tournament_publish_approved: 'Approved publishing',
+  tournament_publish_rejected: 'Rejected publishing',
+  tournament_publish_scheduled: 'Scheduled publishing',
+  tournament_publish_unscheduled: 'Cancelled scheduled publishing',
+  link_site_added: 'Allowed a link site',
+  link_site_removed: 'Removed a link site'
 };
 
 // Render rich text safely (articles, briefing, rewards). Everything is HTML-escaped first,
@@ -2057,17 +2086,40 @@ function stripMd(text) {
     .trim();
 }
 
+// ---- allowed link sites (decision 51) ----
+// Text may only link to, or load pictures from, the sites on the list tournament directors keep
+// (Site admin -> Allowed links). The server refuses anything else on save; this side makes sure
+// older text never turns into a clickable link to somewhere else. lib/links.js is the server's copy.
+const DEFAULT_LINK_SITES = ['faforever.com', 'discord.com', 'discord.gg', 'discordapp.com', 'discordapp.net'];
+function linkSitesNow() { return (fafAuth && Array.isArray(fafAuth.linkSites)) ? fafAuth.linkSites : DEFAULT_LINK_SITES; }
+function linkHost(url) {
+  let u;
+  try { u = new URL(String(url)); } catch (e) { return null; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+  const h = u.hostname.toLowerCase().replace(/\.$/, '');
+  return h ? h.replace(/^www\./, '') : null;
+}
+function linkOk(url) {
+  const h = linkHost(url);
+  return !!h && linkSitesNow().some(s => h === s || h.endsWith('.' + s));
+}
+// What a link to another site turns into: its text, not clickable, saying why on hover.
+function blockedLinkHTML(label, url, what) {
+  return '<span class="link-off" title="' + esc((what || 'Link') + ' to ' + (linkHost(url) || 'another site') + ': not an allowed site') + '">' + label + '</span>';
+}
+
 function renderArticleBody(text) {
   let s = esc(text || '');
   // images first so their ![..](..) doesn't get eaten by the link rule
   s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (m, alt, url) => {
-    if (/^\/(article|desc)-images\/[A-Za-z0-9_.%-]+$/.test(url) || /^https?:\/\/[^\s"'<>]+$/.test(url)) {
+    if (/^\/(article|desc)-images\/[A-Za-z0-9_.%-]+$/.test(url) || (/^https?:\/\/[^\s"'<>]+$/.test(url) && linkOk(url))) {
       return '<img src="' + url + '" alt="' + alt + '" class="art-img">';
     }
+    if (/^https?:\/\//.test(url)) return blockedLinkHTML(alt || 'picture', url, 'Picture');
     return m;
   });
   s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, label, url) => {
-    if (/^https?:\/\/[^\s"'<>]+$/.test(url)) return '<a href="' + url + '" target="_blank" rel="noopener">' + label + '</a>';
+    if (/^https?:\/\/[^\s"'<>]+$/.test(url)) return linkOk(url) ? '<a href="' + url + '" target="_blank" rel="noopener">' + label + '</a>' : blockedLinkHTML(label, url);
     return m;
   });
   s = s.replace(/\*\*([^*\n][^*\n]*?)\*\*/g, '<strong>$1</strong>');
@@ -2281,7 +2333,9 @@ function drawSaLogs(el) {
   const logs = saData.logs || [];
   const rows = logs.map(l => {
     const what = SA_ACTION_LABEL[l.action] || l.action;
-    const target = l.tournamentName ? esc(l.tournamentName) : (l.detail ? esc(l.detail) : '\u2014');
+    const target = l.tournamentName
+      ? esc(l.tournamentName) + (l.detail ? ' <span class="muted small">\u00b7 ' + esc(l.detail) + '</span>' : '')
+      : (l.detail ? esc(l.detail) : '\u2014');
     const cls = l.action === 'tournament_deleted' ? 'log-del' : (l.action === 'tournament_created' ? 'log-new' : '');
     return `<tr>
       <td class="muted small mono">${esc(fmtWhen(l.at))}</td>
