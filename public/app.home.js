@@ -410,7 +410,7 @@ async function renderHost() {
         <div style="display:flex;gap:8px"><input type="date" id="cSuDate" style="flex:1"><input type="time" id="cSuTime" style="width:130px"></div>
         <label>Signups close at (UTC) <span class="muted" style="font-weight:400">(optional \u2014 after this, signups auto-close; team forming &amp; captain picks still work. Leave empty to close manually)</span></label>
         <div style="display:flex;gap:8px"><input type="date" id="cScDate" style="flex:1"><input type="time" id="cScTime" style="width:130px"></div>
-        <label>Check-in deadline (UTC) <span class="muted" style="font-weight:400">(optional \u2014 teams that have not checked in by then are dropped when you start. Leave empty for no check-in)</span></label>
+        <label>Check-in deadline (UTC) <span class="muted" style="font-weight:400">(optional \u2014 players in 1v1, FFA and captains drafts, or premade teams, that have not checked in by then are left out when you lock the entrants or start the draft. Leave empty for no check-in)</span></label>
         <div style="display:flex;gap:8px"><input type="date" id="cCiDate" style="flex:1"><input type="time" id="cCiTime" style="width:130px"></div>
         <label>Description (rules, schedule)</label>
         <span class="muted small">Paste a screenshot straight in, or <a href="#" id="cDescImgBtn">insert an image</a>.</span>
@@ -1379,6 +1379,24 @@ function myTurnInfo() {
       return { text: n + ' player' + (n === 1 ? '' : 's') + ' want to join your team — accept or decline.', tab: 'teams', cta: 'Review requests' };
     }
   }
+  // 0b. the ready check (decisions 53, 54): check in during signups, from the day it opens until
+  // the deadline. A 1v1 / solo FFA / captains-draft player checks themselves in; any member of a
+  // full premade team checks the team in. The button does it right here, no trip to another tab.
+  if (T.status === 'signup' && T.checkInDeadline && Date.now() < T.checkInDeadline && (!T.checkInOpensAt || Date.now() >= T.checkInOpensAt)) {
+    const mine = me.signedUpPlayerId ? (T.players || []).find(p => p.id === me.signedUpPlayerId) : null;
+    const until = fmtDateTime(new Date(T.checkInDeadline).toISOString());
+    if (mine && !mine.pending && (T.formation === 'solo' || T.formation === 'draft') && !mine.checkedIn) {
+      return { text: 'Check in before ' + until + '. ' + (T.formation === 'draft'
+          ? 'Whoever has not checked in when the draft starts is left out of it.'
+          : 'Whoever has not checked in when the entrants are locked is left out of the bracket.'),
+        tab: 'players', cta: 'Check in', act: { path: 'checkin_player', body: { value: 1 }, done: 'Checked in' } };
+    }
+    const tm = (mine && mine.teamId && T.formation === 'open') ? (T.teams || []).find(x => x.id === mine.teamId) : null;
+    if (tm && tm.playerIds.length >= T.teamSize && !tm.checkedIn) {
+      return { text: 'Check in ' + tm.name + ' before ' + until + '. Teams that have not checked in are dropped when the tournament starts.',
+        tab: 'teams', cta: 'Check in', act: { path: 'checkin_team', body: { value: 1 }, done: tm.name + ' is checked in' } };
+    }
+  }
   // 0a. your opponent pick. This outranks almost everything: the whole bracket is waiting on it.
   if (T.picks && T.picks.status === 'open') {
     if (T.picks.myTurn) {
@@ -1465,8 +1483,10 @@ function myTurnInfo() {
   return null;
 }
 
+let _turnInfo = null;   // what the banner's button does (a tab, or an action such as checking in)
 function turnBannerHTML() {
   const info = myTurnInfo();
+  _turnInfo = info;
   if (!info) return '';
   return `<div class="turn-banner" id="turnBanner">
     <span class="turn-dot"></span>
@@ -1623,7 +1643,13 @@ function drawTournament() {
     const tb = app.querySelector('#tabBody');
     tb.parentNode.insertBefore(host, tb);
     const go = host.querySelector('[data-turn-tab]');
-    if (go) go.onclick = () => { currentTab = go.dataset.turnTab; syncTabURL(); drawTournament(); };
+    const act = _turnInfo && _turnInfo.act;
+    if (go && act) go.onclick = async () => {
+      go.disabled = true;
+      try { await api('/api/t/' + T.id + '/' + act.path, act.body); toast(act.done); await refresh(); }
+      catch (e) { go.disabled = false; toast(e.message, true); }
+    };
+    else if (go) go.onclick = () => { currentTab = go.dataset.turnTab; syncTabURL(); drawTournament(); };
   }
 
   const body = document.getElementById('tabBody');

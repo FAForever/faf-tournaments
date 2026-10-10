@@ -1,5 +1,46 @@
 // ----- players -----
 
+// ---------- the ready check for single players ----------
+// A solo field (1v1, solo FFA; decision 53) and a captains draft (decision 54). With a check-in
+// deadline set, every player checks in on the day of the event. Whoever has not when the organizer
+// locks the entrants is left out of the bracket and waits on the standby list; whoever has not when
+// the organizer starts the draft is left out of the draft (nobody can make them captain or pick
+// them) and ends up a substitute. The server applies it (lib/teams formTeamsGrouped, start_draft);
+// this draws the button, the badges and the counts.
+function playerCheckinOn() { return (T.formation === 'solo' || T.formation === 'draft') && !!T.checkInDeadline && T.status === 'signup'; }
+function checkinOpenNow() { return !T.checkInOpensAt || Date.now() >= T.checkInOpensAt; }
+function checkinDeadlineText() { return fmtDateTime(new Date(T.checkInDeadline).toISOString()); }
+function checkinRule() {
+  return T.formation === 'draft'
+    ? 'Whoever has not checked in when the organizer starts the draft is left out of it.'
+    : 'Whoever has not checked in when the organizer locks the entrants is left out of the bracket.';
+}
+// Who would be in and who out if the entrants were locked (or the draft started) now. The server's
+// guard: with fewer than two checked in the requirement is ignored, so then nobody is out.
+function checkinSplit() {
+  const all = T.players.filter(p => !p.pending);
+  const inn = all.filter(p => p.checkedIn);
+  return { all, inn, out: all.filter(p => !p.checkedIn), applies: inn.length >= 2 };
+}
+// The player's own check-in, in their "You're signed up" panel.
+function playerCheckinHTML(p) {
+  if (!playerCheckinOn() || !p || p.pending) return '';
+  const dl = esc(checkinDeadlineText());
+  const draft = T.formation === 'draft';
+  const rule = checkinRule();
+  if (p.checkedIn) {
+    return `<div class="ci-box ci-done"><span class="idbadge verified">Checked in \u2713</span>
+      <span class="muted small">${draft ? 'You are in the draft when the organizer starts it.' : 'You are in when the organizer locks the entrants.'}</span>
+      <button class="btn ghost small" id="ciUndo">Undo check-in</button></div>`;
+  }
+  if (!checkinOpenNow()) {
+    return `<div class="ci-box"><strong>Check-in</strong> <span class="muted small">opens on <strong>${esc(fmtDate(new Date(T.checkInOpensAt).toISOString().slice(0, 10)))}</strong> (the day of the tournament) and closes at <strong>${dl}</strong>. ${rule}</span></div>`;
+  }
+  const late = Date.now() > T.checkInDeadline;
+  return `<div class="ci-box ci-open"><button class="btn primary" id="ciGo">Check in</button>
+    <span class="small">${late ? 'The deadline (' + dl + ') has passed, but ' + (draft ? 'the draft has not started' : 'the entrants are not locked') + ' yet: check in now.' : 'Before <strong>' + dl + '</strong>.'} ${rule}</span></div>`;
+}
+
 function drawPlayers(el) {
   const admin = viewerIsOrganizer();
   let html = '';
@@ -26,9 +67,11 @@ function drawPlayers(el) {
         </div></div>`;
     } else {
       const helpText = T.competition === 'ffa' && T.teamSize === 1 ? 'Every player enters solo. Lobbies are grouped automatically.'
+            : (T.formation === 'draft' && T.checkInDeadline) ? 'Check in on the day of the tournament: the captains, and the players they draft, come from the players who checked in.'
             : T.formation === 'draft' ? 'The organizer picks captains from the player list once signups close, then captains draft their teams.'
             : T.formation === 'open' ? 'After signing up here, go to the Teams tab to create or join a team.'
             : (T.formation === 'premade' && T.teamSize > 1) ? 'Sign up and enter your team name. Teammates enter the exact same name to be grouped together. You can also set or change it later on the Teams tab.'
+            : (T.formation === 'solo' && T.checkInDeadline) ? 'Solo bracket: every player who checks in is an entrant.'
             : 'Solo bracket — every signup is an entrant.';
       const suNotOpen = T.signupOpensAt && new Date(T.signupOpensAt).getTime() > Date.now();
       // Which rating counts, as of when, and whether you qualify - as one bordered callout rather
@@ -92,6 +135,7 @@ function drawPlayers(el) {
         const myDc = (fafAuth.user && fafAuth.user.discord) || '';
         html += `<div class="panel section"><h2>Sign up</h2>
           <p class="signed-in-note">You're signed up as <strong>${esc(me())}</strong>. ${esc(helpText)}</p>
+          ${playerCheckinHTML(T.players.find(pl => pl.id === T.viewer.signedUpPlayerId))}
           ${fafAuth.enabled ? (myDc
             ? '<p class="muted small">Discord: <span class="dctag">\uD83D\uDCAC ' + esc(myDc) + '</span> <a href="#" id="sDcEdit">change</a></p>'
             : `<div class="dc-nudge"><label>Discord handle <span class="muted small">(optional \u2014 so the organizer and your teammates can reach you)</span></label>
@@ -146,7 +190,14 @@ function drawPlayers(el) {
       ${pendingReqs.length ? '<div style="margin-top:12px"><div class="ic-label">Signup requests (' + pendingReqs.length + ')</div>' + pendingReqs.map(pl => '<div class="sa-req"><div class="sa-req-main"><div class="sa-req-name">' + esc(pl.name) + (pl.rating != null ? ' <span class="muted mono small">' + pl.rating + '</span>' : '') + '</div></div><div class="sa-req-act"><button class="btn primary small" data-sapprove="' + pl.id + '">Accept</button><button class="btn ghost small" data-sdecline="' + pl.id + '">Decline</button></div></div>').join('') + '</div>' : ''}
     </div>`;
   }
-  html += `<div class="panel section"><h2>Players <span class="h2-strong">(${T.players.filter(pl => !pl.pending).length}${T.teamSize === 1 && T.maxTeams ? ' of ' + T.maxTeams : ''}${T.teamSize === 1 && T.minTeams ? ', min ' + T.minTeams : ''})</span></h2>
+  // the ready check: a badge per player once check-in is open (or someone already checked in)
+  const ciShow = playerCheckinOn() && (checkinOpenNow() || T.players.some(pl => pl.checkedIn));
+  const ciCount = T.players.filter(pl => !pl.pending && pl.checkedIn).length;
+  // a captains draft under way: the players its check-in left out (decision 54)
+  const draftRunning = T.formation === 'draft' && T.status === 'draft';
+  html += `<div class="panel section"><h2>Players <span class="h2-strong">(${T.players.filter(pl => !pl.pending).length}${T.teamSize === 1 && T.maxTeams ? ' of ' + T.maxTeams : ''}${T.teamSize === 1 && T.minTeams ? ', min ' + T.minTeams : ''}${playerCheckinOn() ? ', ' + ciCount + ' checked in' : ''})</span></h2>
+    ${playerCheckinOn() ? '<p class="muted small" style="margin:-4px 0 10px">Check-in closes <strong>' + esc(checkinDeadlineText()) + '</strong>' + (T.checkInOpensAt && !checkinOpenNow() ? ' and opens on the day of the tournament' : '') + '. ' + esc(checkinRule()) + '</p>' : ''}
+    ${draftRunning && admin && T.players.some(pl => pl.noShow && !pl.teamId) ? '<p class="muted small" style="margin:-4px 0 10px">The draft left out the players who had not checked in. One who turns up late can still go in the player pool: <strong>Check in</strong> next to their name.</p>' : ''}
     <table><thead><tr><th>#</th><th>Name</th><th>Rating</th>${T.teamSize > 1 ? '<th>Team</th>' : ''}${admin ? '<th></th>' : ''}</tr></thead>
     <tbody id="pRows"></tbody></table>
     ${T.players.length ? '' : '<div class="empty">No signups yet.</div>'}</div>`;
@@ -175,6 +226,15 @@ function drawPlayers(el) {
     let badge = '';
     if (p.manual) badge = ' <span class="idbadge manual" title="Added manually by organizer">M</span>';
     if (p.late) badge += ' <span class="idbadge late" title="Late signup">late</span>';
+    // the ready check (decisions 53, 54): who has checked in, and after the lock or the start of
+    // the draft, who was left out
+    if (ciShow && !p.pending) badge += p.checkedIn ? ' <span class="idbadge verified ci-badge">checked in</span>' : ' <span class="idbadge late ci-badge">not checked in</span>';
+    if (T.formation === 'solo' && T.status !== 'signup' && !p.teamId && (T.subs || []).indexOf(p.id) >= 0) {
+      badge += ' <span class="idbadge late ci-badge" title="Had not checked in when the entrants were locked, so not in the bracket. An organizer can still bring them in as a replacement.">standby</span>';
+    }
+    if (T.formation === 'draft' && T.status !== 'signup' && p.noShow && !p.teamId) {
+      badge += ' <span class="idbadge late ci-badge" title="Had not checked in when the draft started, so not in it.' + (draftRunning ? ' An organizer can still put them in the player pool.' : ' They are a substitute.') + '">did not check in</span>';
+    }
     // replace button: for players currently IN a team (mid-tournament drop-out replacement)
     const canReplace = admin && p.teamId;
     tr.innerHTML = `
@@ -185,6 +245,8 @@ function drawPlayers(el) {
       ${admin ? `<td style="text-align:right;white-space:nowrap">
         <button class="btn ghost small" data-allrat="${p.id}" title="Show this player's rating on every leaderboard (organizers only)">Ratings</button>
         ${canReplace ? `<button class="btn ghost small" data-replace="${p.id}">Replace</button>` : ''}
+        ${playerCheckinOn() && !p.pending ? `<button class="btn ghost small" data-pcheck="${p.id}" data-val="${p.checkedIn ? 0 : 1}">${p.checkedIn ? 'Un-check' : 'Check in'}</button>` : ''}
+        ${draftRunning && p.noShow && !p.teamId && !p.pending ? `<button class="btn ghost small" data-pcheck="${p.id}" data-val="1" title="Turned up late: puts them in the player pool for the picks still to come">Check in</button>` : ''}
         <button class="btn ghost small" data-edit="${p.id}">Edit</button>
         ${T.status === 'signup' || ((T.status === 'draft' || T.status === 'drafted') && !p.teamId) ? `<button class="btn danger small" data-del="${p.id}">${T.status === 'signup' && T.formation === 'premade' && T.teamSize > 1 ? 'Remove team' : 'Remove'}</button>` : ''}
         ${p.fafId ? `<button class="btn danger small" data-ban="${p.id}" data-banfid="${esc(p.fafId)}" data-banname="${esc(p.name)}" title="Ban from this tournament so they can't sign up again">Ban</button>` : ''}</td>` : ''}`;
@@ -201,8 +263,24 @@ function drawPlayers(el) {
     };
     const bb = tr.querySelector('[data-ban]');
     if (bb) bb.onclick = () => banPlayerFromTournament(p);
+    const pc = tr.querySelector('[data-pcheck]');
+    if (pc) pc.onclick = async () => {
+      try { await api('/api/t/' + T.id + '/checkin_player', { playerId: p.id, value: +pc.dataset.val, admin: adminToken() }); toast(draftRunning ? p.name + ' is in the player pool' : +pc.dataset.val ? p.name + ' checked in' : p.name + ' un-checked'); await refresh(); }
+      catch (e) { toast(e.message, true); }
+    };
     rows.appendChild(tr);
   });
+  // the player's own check-in
+  const ciGo = document.getElementById('ciGo');
+  if (ciGo) ciGo.onclick = async () => {
+    try { await api('/api/t/' + T.id + '/checkin_player', { value: 1 }); toast('Checked in'); await refresh(); }
+    catch (e) { toast(e.message, true); }
+  };
+  const ciUndo = document.getElementById('ciUndo');
+  if (ciUndo) ciUndo.onclick = async () => {
+    try { await api('/api/t/' + T.id + '/checkin_player', { value: 0 }); toast('Check-in undone'); await refresh(); }
+    catch (e) { toast(e.message, true); }
+  };
 
   wireSeedPanel();   // no-op unless seedPanelHTML rendered above
 
@@ -1100,7 +1178,9 @@ function wireLaterDivisions(root) {
   const modes = Array.from(root.querySelectorAll('[data-divmode]'));
   if (!modes.length) return () => {};
   const per = T.teamSize || 1;
-  const pool = T.players.filter(p => !p.pending).length;
+  // with the ready check on (decision 54), only the players who have checked in will be drafted
+  const ci = playerCheckinOn() ? checkinSplit() : null;
+  const pool = (ci && ci.applies) ? ci.inn.length : T.players.filter(p => !p.pending).length;
   const topCount = () => {
     const sel = document.getElementById('capMode');
     if (sel && sel.value === 'rating') return parseInt((document.getElementById('capNum') || {}).value, 10) || 0;
@@ -1149,7 +1229,7 @@ function wireLaterDivisions(root) {
 function waitingDivisionHTML(admin) {
   const d = T.draft.division;
   const nm = divisionNameOf(d), prev = divisionNameOf(d - 1);
-  const left = T.players.filter(p => !p.teamId && !p.pending).sort((a, b) => (b.rating || 0) - (a.rating || 0));
+  const left = T.players.filter(p => !p.teamId && !p.pending && !p.noShow).sort((a, b) => (b.rating || 0) - (a.rating || 0));
   const lastDone = (T.draftDone || []).slice(-1)[0];
   let h = `<div class="draft-turn">The <strong>${esc(prev)}</strong> draft is complete. The <strong>${esc(nm)}</strong> draft starts once its captains are chosen.</div>`;
   if (admin) {
@@ -1180,7 +1260,15 @@ function waitingDivisionHTML(admin) {
       <p class="muted small">They are drafted into the ${esc(nm)} bracket once the organizer has chosen its captains.</p>
       <div class="unteamed">${left.map(p => `<span class="unteamed-chip">${esc(p.name)}${p.rating != null ? ' <span class="muted mono">' + p.rating + '</span>' : ''}</span>`).join('') || '<span class="muted">Nobody.</span>'}</div></div>`;
   }
-  return h;
+  return h + (T.players.some(p => p.noShow && !p.teamId) ? '<div class="panel section">' + draftNoShowsHTML(admin) + '</div>' : '');
+}
+// The players the ready check left out of a running draft (decision 54), under its player pool.
+// An organizer can still put one who turns up late in the pool (wired in drawTeams).
+function draftNoShowsHTML(admin) {
+  const out = T.players.filter(p => p.noShow && !p.teamId).sort((a, b) => (b.rating || 0) - (a.rating || 0));
+  if (!out.length) return '';
+  return `<div class="ci-out"><div class="muted small">Did not check in, so not in the pool (${out.length})${admin ? '. One who turns up late can still go in:' : ':'}</div>
+    <div class="unteamed">${out.map(p => `<span class="unteamed-chip">${esc(p.name)}${p.rating != null ? ' <span class="muted mono">' + p.rating + '</span>' : ''}${admin ? ' <button class="btn ghost small" data-latein="' + p.id + '" title="Turned up late: puts them in the player pool for the picks still to come">Check in</button>' : ''}</span>`).join('')}</div></div>`;
 }
 // The seed a team shows. With divisions, before the start every seed is unique across the field;
 // the start numbers each division from 1, so the page shows the place within the division already.
@@ -1209,9 +1297,18 @@ function drawTeams(el) {
         const capRanked = T.players.filter(p => !p.pending).slice().sort((a, b) => (b.rating || 0) - (a.rating || 0));
         const capWould = capN >= 2 ? capRanked.slice(0, capN) : [];
         const divs = divisionsOnT() ? T.divisions : 0;
+        // the ready check (decision 54): who is in the draft and who is left out when it starts
+        const ci = playerCheckinOn() ? checkinSplit() : null;
+        const ciWhen = ci ? ' (' + (T.checkInOpensAt && !checkinOpenNow() ? 'opens on the day of the tournament, ' : '') + 'closes ' + esc(checkinDeadlineText()) + ')' : '';
+        const ciText = !ci ? '' : ci.applies
+          ? '<p class="small ci-sum"><strong>Check-in is on</strong>' + ciWhen + '. ' + (ci.out.length
+              ? ci.inn.length + ' of ' + ci.all.length + ' players have checked in. Starting the draft leaves out the ' + ci.out.length + ' who have not (' + ci.out.map(p => esc(p.name)).join(', ') + '): nobody can make them captain or pick them, and they end up as substitutes.'
+              : 'All ' + ci.all.length + ' players have checked in.') + '</p>'
+          : '<p class="small ci-sum"><strong>Check-in is on</strong>' + ciWhen + ', but ' + (ci.inn.length ? 'only one player has' : 'nobody has') + ' checked in yet. Starting the draft now lets everyone signed up in (it never leaves fewer than two).</p>';
         html += `<div class="panel section"><h2>Captains &amp; draft</h2>
           ${divs ? '<p class="muted small">' + esc(divisionDraftIntro()) + '</p>' : ''}
           <p class="muted small">The number of captains is the number of teams. Pick order: ${T.draftOrder === 'snake' ? 'snake (1\u2192N, N\u21921, ...)' : 'bottom seed to top seed, every round'}. Each captain fills a team of ${T.teamSize}.</p>
+          ${ciText}
           ${divs ? '<h3 class="div-draft-h">' + esc(divisionNameOf(1)) + ' captains</h3>' : ''}
           <label>How are captains chosen?</label>
           <select id="capMode">
@@ -1221,7 +1318,7 @@ function drawTeams(el) {
           <div id="capRatingWrap" style="${capMode === 'rating' ? '' : 'display:none'}">
             <label style="margin-top:12px">How many captains</label>
             <input type="number" id="capNum" min="2" max="64" step="1" value="${capN || ''}" placeholder="e.g. 8" style="max-width:160px">
-            <p class="muted small" style="margin-top:6px">Editable until you start the draft. The highest-rated players become captains, worked out at the moment the draft starts, so late signups and rating corrections are included.</p>
+            <p class="muted small" style="margin-top:6px">Editable until you start the draft. The highest-rated players become captains, worked out at the moment the draft starts, so late signups and rating corrections are included.${ci ? ' With check-in on, only the players who have checked in count.' : ''}</p>
             <div id="capPreview" class="cap-count"></div>
           </div>
           <div id="capManualWrap" style="${capMode === 'manual' ? '' : 'display:none'}">
@@ -1232,8 +1329,16 @@ function drawTeams(el) {
           ${divs ? laterDivisionsHTML() : ''}
           <div style="margin-top:16px"><button class="btn amber" id="startDraft">${divs ? 'Close signups &amp; start the ' + esc(divisionNameOf(1)) + ' draft' : 'Close signups &amp; start draft'}</button></div></div>`;
       } else {
+        // the ready check (decision 53): who is in and who is left out when this is pressed
+        const ci = playerCheckinOn() ? checkinSplit() : null;
+        const ciText = !ci ? '' : ci.applies
+          ? '<p class="small"><strong>Check-in is on.</strong> The ' + ci.inn.length + ' players who checked in become entrants' + (ci.out.length
+              ? '; the ' + ci.out.length + ' who have not (' + ci.out.map(p => esc(p.name)).join(', ') + ') are left out and go on the standby list.'
+              : '.') + '</p>'
+          : '<p class="small"><strong>Check-in is on</strong>, but ' + (ci.inn.length ? 'only one player has' : 'nobody has') + ' checked in yet. Locking now lets everyone signed up in (it never leaves fewer than two).</p>';
         html += `<div class="panel section"><h2>Form ${T.teamSize === 1 ? 'entrants' : 'teams'}</h2>
-          <p class="muted small">${T.teamSize === 1 ? 'Every signed-up player becomes an entrant.' : 'Teams are grouped by the team name players entered at signup. Players without a team name become substitutes.'}</p>
+          <p class="muted small">${T.teamSize === 1 ? (ci ? 'Check-in closes ' + esc(checkinDeadlineText()) + '.' : 'Every signed-up player becomes an entrant.') : 'Teams are grouped by the team name players entered at signup. Players without a team name become substitutes.'}</p>
+          ${ciText}
           <button class="btn amber" id="formTeams">Close signups &amp; lock ${T.teamSize === 1 ? 'entrants' : 'teams'}</button></div>`;
       }
     } else if (!(T.formation === 'premade' && T.teamSize > 1)) {
@@ -1329,7 +1434,7 @@ function drawTeams(el) {
       return `<span class="po-chip ${cls}"><span class="po-num">${i + 1}</span>${esc(teamName(tid))}</span>`;
     }).join('');
     html += `<div class="panel section"><h2>Pick order</h2><div class="pickorder">${orderChips}</div></div>`;
-    html += `<div class="panel section"><h2>Player pool</h2><div class="pool" id="draftPool"></div></div>`;
+    html += `<div class="panel section"><h2>Player pool</h2><div class="pool" id="draftPool"></div>${draftNoShowsHTML(admin)}</div>`;
   }
 
   if (T.teams.length) {
@@ -1347,11 +1452,13 @@ function drawTeams(el) {
   }
   if (T.subs && T.subs.length) {
     const subPs = T.subs.map(id => T.players.find(p => p.id === id)).filter(Boolean)
-      .sort((a, b) => (b.rating || 0) - (a.rating || 0));
+      .sort((a, b) => (a.noShow ? 1 : 0) - (b.noShow ? 1 : 0) || (b.rating || 0) - (a.rating || 0));
     const anyR = subPs.some(p => p.rating != null);
-    html += `<div class="panel section"><h2>Substitutes <span class="h2-strong">(${subPs.length})</span></h2>
+    const soloStandby = T.formation === 'solo';   // on a solo field these are the players who did not check in
+    html += `<div class="panel section"><h2>${soloStandby ? 'Standby' : 'Substitutes'} <span class="h2-strong">(${subPs.length})</span></h2>
+      ${soloStandby ? '<p class="muted small">Had not checked in when the entrants were locked, so they are not in the bracket. An organizer can still bring one in as a replacement (Players tab).</p>' : ''}
       <table><thead><tr><th style="width:40px">#</th><th>Name</th>${anyR ? '<th style="width:90px">Rating</th>' : ''}</tr></thead><tbody>` +
-      subPs.map((p, i) => `<tr><td class="mono muted">${i + 1}</td><td>${esc(p.name)}${p.fafId ? ' <span class="idbadge verified">\u2713</span>' : ''}${p.discord ? ' <span class="dctag" title="Discord \u2014 reach this player here">\uD83D\uDCAC ' + esc(p.discord) + '</span>' : ''}</td>${anyR ? '<td class="mono">' + (p.rating != null ? p.rating : '\u2014') + '</td>' : ''}</tr>`).join('') +
+      subPs.map((p, i) => `<tr><td class="mono muted">${i + 1}</td><td>${esc(p.name)}${p.fafId ? ' <span class="idbadge verified">\u2713</span>' : ''}${p.noShow ? ' <span class="idbadge late ci-badge" title="Had not checked in when the draft started">did not check in</span>' : ''}${p.discord ? ' <span class="dctag" title="Discord \u2014 reach this player here">\uD83D\uDCAC ' + esc(p.discord) + '</span>' : ''}</td>${anyR ? '<td class="mono">' + (p.rating != null ? p.rating : '\u2014') + '</td>' : ''}</tr>`).join('') +
       '</tbody></table></div>';
   }
 
@@ -1405,7 +1512,12 @@ function drawTeams(el) {
   // A later division waiting for its captains reuses the same controls; its captains come from
   // the players nobody has drafted, and its setting is stored for that division.
   const waitingDiv = (T.status === 'draft' && T.draft && T.draft.waiting) ? T.draft.division : 0;
-  const capCandidates = waitingDiv ? T.players.filter(p => !p.teamId && !p.pending) : T.players;
+  const capCandidates = waitingDiv ? T.players.filter(p => !p.teamId && !p.pending && !p.noShow) : T.players;
+  // the ready check (decision 54): with it on and two or more checked in, only they count
+  const ciSplit = (!waitingDiv && playerCheckinOn()) ? checkinSplit() : null;
+  const ciOn = !!(ciSplit && ciSplit.applies);
+  const ciOut = {};
+  if (ciOn) for (const p of ciSplit.out) ciOut[p.id] = 1;
   // the settings for division 2 and below, on the signup panel
   const paintDivHints = wireLaterDivisions(el);
   // captain-selection mode (manual vs top-N-by-rating)
@@ -1415,17 +1527,18 @@ function drawTeams(el) {
     const manualWrap = document.getElementById('capManualWrap');
     const numEl = document.getElementById('capNum');
     const prevEl = document.getElementById('capPreview');
-    const ranked = capCandidates.filter(p => !p.pending).slice().sort((a, b) => (b.rating || 0) - (a.rating || 0));
+    const ranked = (ciOn ? ciSplit.inn : capCandidates.filter(p => !p.pending)).slice().sort((a, b) => (b.rating || 0) - (a.rating || 0));
+    const have = waitingDiv ? ' left' : ciOn ? ' checked in' : ' signed up';
     const paintPreview = () => {
       if (!prevEl) return;
       const n = parseInt(numEl.value, 10);
       if (!isFinite(n) || n < 2) { prevEl.innerHTML = '<span class="muted">Enter a number (2 or more) to preview.</span>'; return; }
       if (ranked.length < n) {
-        prevEl.innerHTML = '<span class="warn">Only ' + ranked.length + (waitingDiv ? ' left for this division' : ' signed up so far') + '; ' + (n - ranked.length) + ' more needed before the draft can start.</span>';
+        prevEl.innerHTML = '<span class="warn">Only ' + ranked.length + (waitingDiv ? ' left for this division' : have + ' so far') + '; ' + (n - ranked.length) + ' more needed before the draft can start.</span>';
         return;
       }
       const need = n * T.teamSize;
-      const short = ranked.length < need ? ' <span class="warn">' + ranked.length + (waitingDiv ? ' left' : ' signed up') + '; ' + (need - ranked.length) + ' more needed to fill all ' + n + ' teams.</span>' : '';
+      const short = ranked.length < need ? ' <span class="warn">' + ranked.length + have + '; ' + (need - ranked.length) + ' more needed to fill all ' + n + ' teams.</span>' : '';
       prevEl.innerHTML = 'Captains right now would be: ' + ranked.slice(0, n).map(p => '<strong>' + esc(p.name) + '</strong> (' + (p.rating != null ? p.rating : '\u2014') + ')').join(', ') + '.' + short;
     };
     let capCfgTimer = null;
@@ -1458,18 +1571,21 @@ function drawTeams(el) {
     }
     // a waiting division picks its captains from the players left; drop any stale marks
     if (waitingDiv) for (const id of Object.keys(F.capSel)) { if (!capCandidates.some(p => p.id === id)) delete F.capSel[id]; }
-    const nPlayers = capCandidates.length;
+    const nPlayers = ciOn ? ciSplit.inn.length : capCandidates.length;
     const updateCount = () => {
       const n = Object.keys(F.capSel).length;
       const el = document.getElementById('capCount');
       if (!el) return;
       if (typeof paintDivHints === 'function') paintDivHints();
-      if (n < 2) { el.innerHTML = '<span class="muted">Mark at least 2 captains.</span>'; return; }
+      // a marked captain the check-in would leave out stops the draft from starting: say so here
+      const awol = Object.keys(F.capSel).filter(id => ciOut[id]).map(id => (T.players.find(p => p.id === id) || {}).name).filter(Boolean);
+      const awolTxt = awol.length ? ' <span class="warn">' + esc(awol.join(', ')) + (awol.length === 1 ? ' has' : ' have') + ' not checked in, so cannot be captain: check them in on the Players tab, or mark another captain.</span>' : '';
+      if (n < 2) { el.innerHTML = '<span class="muted">Mark at least 2 captains.</span>' + awolTxt; return; }
       const perTeam = T.teamSize;
       const needed = n * perTeam;
       const preview = 'Bracket preview: <strong>' + n + '</strong> team' + (n === 1 ? '' : 's') + ' (' + n + ' captain' + (n === 1 ? '' : 's') + ', ' + perTeam + ' per team = ' + needed + ' players needed).';
-      const have = nPlayers >= needed ? '' : ' <span class="warn">You have ' + nPlayers + (waitingDiv ? ' left' : ' signed up') + '; ' + (needed - nPlayers) + ' more needed to fill all teams.</span>';
-      el.innerHTML = preview + have;
+      const have = nPlayers >= needed ? '' : ' <span class="warn">You have ' + nPlayers + (waitingDiv ? ' left' : ciOn ? ' checked in' : ' signed up') + '; ' + (needed - nPlayers) + ' more needed to fill all teams.</span>';
+      el.innerHTML = preview + have + awolTxt;
     };
     // debounced persistence of the captain set to the server
     let capSaveTimer = null;
@@ -1483,9 +1599,12 @@ function drawTeams(el) {
     tbl.innerHTML = '<thead><tr><th style="width:40px">#</th><th>Name</th><th style="width:90px">Rating</th><th style="width:110px">Captain</th></tr></thead>';
     const tb = document.createElement('tbody');
     const sorted = capCandidates.slice().sort((a, b) => (b.rating || 0) - (a.rating || 0));
+    // who has checked in, next to each name, once check-in is open (or someone already has)
+    const ciBadges = !!ciSplit && (checkinOpenNow() || ciSplit.inn.length > 0);
     sorted.forEach((p, i) => {
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td class="mono muted">${i + 1}</td><td>${esc(p.name)}</td><td class="mono">${p.rating != null ? p.rating : '\u2014'}</td>
+      const ciB = (ciBadges && !p.pending) ? (p.checkedIn ? ' <span class="idbadge verified ci-badge">checked in</span>' : ' <span class="idbadge late ci-badge">not checked in</span>') : '';
+      tr.innerHTML = `<td class="mono muted">${i + 1}</td><td>${esc(p.name)}${ciB}</td><td class="mono">${p.rating != null ? p.rating : '\u2014'}</td>
         <td class="capcell"></td>`;
       const paint = () => {
         const on = !!F.capSel[p.id];
@@ -1510,9 +1629,16 @@ function drawTeams(el) {
     const rating = modeEl && modeEl.value === 'rating';
     const body = { action: 'start_draft', admin: adminToken() };
     const forDiv = waitingDiv ? { division: waitingDiv } : {};
+    // the ready check (decision 54): starting leaves out whoever has not checked in. Say who first.
+    const leftOutOk = () => {
+      const out = ciOn ? ciSplit.out : [];
+      return !out.length || confirm('Start the draft? ' + out.length + ' player' + (out.length === 1 ? ' has' : 's have') + ' not checked in and will be left out of it: ' + out.map(p => p.name).join(', ') + '.');
+    };
     if (rating) {
       const n = parseInt((document.getElementById('capNum') || {}).value, 10);
       if (!isFinite(n) || n < 2) return toast('Enter how many captains (2 or more)', true);
+      if (ciOn && ciSplit.inn.length < n) return toast('Only ' + ciSplit.inn.length + ' players have checked in; need at least ' + n + ' for ' + n + ' captains', true);
+      if (!leftOutOk()) return;
       // Make sure the number the organizer is looking at is the one the server uses, even if
       // the debounced save hasn't fired yet.
       try { await api('/api/t/' + T.id + '/phase', Object.assign({ action: 'set_captain_mode', mode: 'rating', count: n, admin: adminToken() }, forDiv)); }
@@ -1520,6 +1646,9 @@ function drawTeams(el) {
     } else {
       const ids = Object.keys(F.capSel);
       if (ids.length < 2) return toast('Mark at least 2 captains', true);
+      const awol = ids.filter(id => ciOut[id]).map(id => (T.players.find(p => p.id === id) || {}).name).filter(Boolean);
+      if (awol.length) return toast(awol.join(', ') + (awol.length === 1 ? ' has' : ' have') + ' not checked in, so cannot be captain. Check them in on the Players tab, or mark another captain.', true);
+      if (!leftOutOk()) return;
       body.captainIds = ids;
       // a waiting division starts from the captains marked here, whatever its stored setting was
       if (waitingDiv) {
@@ -1536,6 +1665,12 @@ function drawTeams(el) {
 
   const ft = document.getElementById('formTeams');
   if (ft) ft.onclick = async () => {
+    // locking leaves the players who have not checked in out of the bracket: say who, first
+    if (playerCheckinOn()) {
+      const { out, applies } = checkinSplit();
+      if (applies && out.length
+        && !confirm('Lock the entrants? ' + out.length + ' player' + (out.length === 1 ? ' has' : 's have') + ' not checked in and will not be in the bracket: ' + out.map(p => p.name).join(', ') + '.')) return;
+    }
     try { await api('/api/t/' + T.id + '/phase', { action: 'form_teams', admin: adminToken() }); await refresh(); }
     catch (e) { toast(e.message, true); }
   };
@@ -1569,6 +1704,16 @@ function drawTeams(el) {
     });
   });
 
+  // a player the check-in left out of the draft turns up late: an organizer puts them in the pool
+  el.querySelectorAll('[data-latein]').forEach(btn => btn.onclick = async () => {
+    const p = T.players.find(x => x.id === btn.dataset.latein);
+    try {
+      await api('/api/t/' + T.id + '/checkin_player', { playerId: btn.dataset.latein, value: 1, admin: adminToken() });
+      toast((p ? p.name : 'They') + ' is in the player pool');
+      await refresh();
+    } catch (e) { toast(e.message, true); }
+  });
+
   const undoBtn = document.getElementById('undoPickBtn');
   if (undoBtn) undoBtn.onclick = async () => {
     try {
@@ -1582,7 +1727,8 @@ function drawTeams(el) {
   if (dp) {
     const turnTeam = T.draft ? T.draft.order[T.draft.current] : null;
     const canPick = viewerIsAdmin() || (T.viewer && T.viewer.teamId && T.viewer.teamId === turnTeam);
-    const free = T.players.filter(p => !p.teamId).sort((a, b) => (b.rating || 0) - (a.rating || 0));
+    // the pool: not the players the check-in left out, nor requests never approved
+    const free = T.players.filter(p => !p.teamId && !p.pending && !p.noShow).sort((a, b) => (b.rating || 0) - (a.rating || 0));
     if (!free.length) {
       dp.innerHTML = '<div class="empty">Pool is empty.</div>';
     } else {

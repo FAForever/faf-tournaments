@@ -1394,9 +1394,21 @@ function factionOnlyHTML(m) {
   return h;
 }
 
-// The games of a series as one aligned table: the game, its map (marked if it was the decider),
-// then each side's faction. The teams are named once, in the header, and every row lines up
-// however long its map's name is. A faction choice still open spans both team columns.
+// A picked map's picture in the games table. It used to be the name alone, although the same map
+// had its picture in the pool right up to the moment it was picked. Clicking it opens the map.
+function vgtThumbHTML(id) {
+  const mo = mapObj(id);
+  if (mo && mo.image) {
+    return '<img class="vgt-thumb" src="/map-images/' + encodeURIComponent(mo.image) + '" alt="" loading="lazy" decoding="async" width="44" height="44" data-map-info="' + esc(id) + '">';
+  }
+  return '<span class="vgt-noimg" title="' + esc(mapNoImgLabel(mo)) + '"' + (mo ? ' data-map-info="' + esc(id) + '"' : '') + '></span>';
+}
+
+// The games of a series as one aligned table: the game, its map with its picture (marked if it
+// was the decider), then each side's faction. The teams are named once, in the header, and every
+// row lines up however long its map's name is. A faction choice still open spans both team
+// columns, and the table is as wide as it needs to be, so that choice gets room for its four
+// buttons on one line instead of the leftovers next to a wide map column.
 function vetoGamesTableHTML(m, rows) {
   const hasMap = rows.some(r => r.map);
   const fv = !!(m.fveto && m.fveto.games);
@@ -1413,7 +1425,8 @@ function vetoGamesTableHTML(m, rows) {
         f = '<td class="vgt-fwide" colspan="2">' + (inner || '<span class="muted small">-</span>') + '</td>';
       }
     }
-    const map = hasMap ? '<td class="vgt-map">' + (r.map ? mapChip(r.map, 'play') : '') + (r.decider ? '<span class="vg-dec">decider</span>' : '') + '</td>' : '';
+    const map = hasMap ? '<td class="vgt-map"><div class="vgt-mapcell">' + (r.map ? vgtThumbHTML(r.map) + mapChip(r.map, 'play') : '')
+      + (r.decider ? '<span class="vg-dec">decider</span>' : '') + '</div></td>' : '';
     return '<tr><td class="vgt-n">' + r.game + '</td>' + map + f + '</tr>';
   }).join('');
   return '<table class="vgt">' + head + '<tbody>' + body + '</tbody></table>';
@@ -3196,7 +3209,9 @@ function factionChip(f, opts) {
 // Returns { games, next:{game,action,index,of} } or null (not a competitor here, nothing left
 // to do, or the match already has a result). This is the single source of truth behind the
 // turn banner, the Vetoes tab badge, the bracket link and the Matches-tab button - before it
-// existed, a faction veto announced itself nowhere at all.
+// existed, a faction veto announced itself nowhere at all. Only games whose map is known count
+// (`open`, from the server): one ban into a map veto, "set your factions for 3 games" asked for
+// something nobody could do yet.
 function myFactionTurn(m) {
   if (!m || !m.fveto || !m.fveto.games) return null;
   if (m.status === 'done') return null;
@@ -3206,7 +3221,7 @@ function myFactionTurn(m) {
   for (const k of Object.keys(m.fveto.games).sort((a, b) => Number(a) - Number(b))) {
     const g = m.fveto.games[k];
     // `mine` is only present for a competitor: the server strips it from everyone else.
-    if (!g || !g.mine || g.mine.done || !g.next) continue;
+    if (!g || !g.mine || g.mine.done || !g.next || g.open === 0) continue;
     games++;
     if (!next) next = { game: k, action: g.next.action, index: g.next.index, of: g.next.of };
   }
