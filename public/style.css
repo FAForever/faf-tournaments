@@ -715,6 +715,11 @@ tbody tr:hover { background: #ffffff05; }
 @media (max-width: 420px) {
   .wordmark .wm-t { display: none; }                   /* just "FAF" on very small screens */
   .tab { font-size: 12px; padding: 7px 11px; }
+  /* a popup on a small phone: give the content the width instead of the frame (the veto popup's
+     games table needs about 300px, and had 250) */
+  .modal-bg { padding: 8px; }
+  .modal { padding: 14px; }
+  .modal .vetobox { margin: 6px 0 4px; padding: 6px 0; }
 }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
@@ -1087,6 +1092,18 @@ body.modal-open .turnbanner { animation: none !important; }
 .sr-swatch:hover { border-color: var(--amber); }
 .sr-swatch.on { border-color: currentColor; box-shadow: 0 0 0 1px currentColor inset; }
 
+/* ---------- the ready check on a solo field (decision 53) ---------- */
+.ci-box { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0 4px; padding: 10px 12px; border-radius: 4px; border: 1px solid var(--line-solid); background: var(--panel2, #141d28); }
+.ci-box.ci-open { border-color: var(--amber); background: linear-gradient(90deg, #ffb44714, transparent 80%); }
+.ci-box.ci-done { border-color: #2f6b45; }
+.ci-box > span { flex: 1 1 260px; }
+.ci-badge { margin-left: 4px; }
+/* a running captains draft: the players its check-in left out (decision 54) */
+.ci-out { margin-top: 14px; }
+.ci-out .unteamed { margin-top: 6px; }
+.ci-out .unteamed-chip { display: inline-flex; align-items: center; gap: 6px; }
+.ci-out .unteamed-chip .btn.small { padding: 2px 8px; }
+
 /* ---------- faction veto ---------- */
 /* A game's faction choice (inside the games table, .vgt). Colours stand in for faction logos
    (which are game assets we don't ship); the initial plus the name keeps it unambiguous. */
@@ -1148,19 +1165,44 @@ body.modal-open .turnbanner { animation: none !important; }
 .fchip.on { border-color: var(--green); }
 .fchip[disabled] { cursor: default; }
 /* The games of a series, one aligned row each: game, map, then each team's faction. Used in the
-   veto popup, on the Vetoes tab and in the match details. */
-.vgt { width: 100%; margin-top: 4px; font-size: 13px; }
+   veto popup, on the Vetoes tab and in the match details. As wide as its content: at 100% the map
+   column took every spare pixel and an open faction choice was squeezed into what was left. */
+.vgt { width: auto; max-width: 100%; margin-top: 4px; font-size: 13px; }
 /* phones turn panel tables into sideways scrollers; this one is built to fit instead */
 .panel table.vgt { display: table; overflow-x: visible; white-space: normal; }
 .vgt th { font-size: 10px; padding: 5px 8px; }
 .vgt td { padding: 6px 8px; vertical-align: middle; }
-.vgt .vgt-n { width: 1%; white-space: nowrap; font-family: var(--mono); font-size: 11px; color: var(--muted); }
-.vgt td.vgt-map .veto-map { display: inline-block; margin-right: 6px; }
+.vgt .vgt-n { white-space: nowrap; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.vgt td.vgt-map .veto-map { display: inline-block; }
+.vgt-mapcell { display: flex; align-items: center; gap: 8px; }
+/* the picked map's picture (it had one in the pool, and lost it once picked) */
+.vgt-thumb, .vgt-noimg { width: 44px; height: 44px; flex: 0 0 auto; display: block; border-radius: 3px; border: 1px solid var(--line-solid); }
+.vgt-thumb { object-fit: cover; cursor: pointer; }
+.vgt-thumb:hover { border-color: var(--amber); }
+.vgt-noimg { border-style: dashed; }
+.vgt-noimg[data-map-info] { cursor: pointer; }
 .vgt th.vgt-f { min-width: 72px; white-space: normal; overflow-wrap: anywhere; }
-.vgt td.vgt-f { width: 1%; white-space: nowrap; }
+.vgt td.vgt-f { white-space: nowrap; }
+/* (no width: 1% on any column: in a table as wide as its content, a percentage column makes
+   the browser stretch the whole table to fit it, back to full width) */
 /* an open faction choice spans both team columns; it sits in the row, not beside it */
 .vgt .fveto-col { margin: 0; padding: 0; border: none; min-width: 0; max-width: none; width: auto; }
 .vgt .fveto-col.active { padding: 2px 0 4px 10px; border-left: 3px solid var(--amber); }
+/* room for the four faction buttons on one line, and the note in two */
+.vgt td.vgt-fwide { min-width: 340px; }
+.vgt .fveto-col.active .fveto-chips { flex-wrap: nowrap; }
+/* Below 640px the table cannot have the four buttons in a row beside the picture and the name
+   (that needs about 530px), so: two buttons a line, the picture smaller and above the name. */
+@media (max-width: 640px) {
+  .vgt td.vgt-fwide { min-width: 0; }
+  .vgt .fveto-col.active .fveto-chips { display: grid; grid-template-columns: repeat(2, max-content); }
+  .vgt-mapcell { flex-direction: column; align-items: flex-start; gap: 4px; }
+  .vgt-thumb, .vgt-noimg { width: 34px; height: 34px; }
+}
+/* the smallest phones (320px): one button a line, or the table is wider than the screen */
+@media (max-width: 350px) {
+  .vgt .fveto-col.active .fveto-chips { grid-template-columns: max-content; }
+}
 @media (max-width: 520px) {
   .vgt th, .vgt td { padding: 5px 4px; }
   .vgt td.vgt-f .fchip-name { display: none; }

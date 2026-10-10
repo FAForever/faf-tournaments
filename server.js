@@ -21,7 +21,7 @@ const { BO_OK, seedOrder, nextPow2, log2i, seededSlots, cleanBoList } = require(
 const {
   poolById, poolForMatch, poolRoundKey, poolMapIds, cleanSequence, cleanVeto, abRating, decideTeamA,
   initVeto, vetoCurrentStep, vetoAdvance, initMatchVetoes,
-  FACTIONS, factionVetoOn, initFactionVeto, newFactionGame, factionSideKey, factionNextStep, factionResolve, factionViewFor,
+  FACTIONS, factionVetoOn, initFactionVeto, newFactionGame, factionSideKey, factionGameOpen, factionNextStep, factionResolve, factionViewFor,
   newMatch, routeVal, setSlot, evaluate, finalizeMatch, undoMatch, backfillMatchLinks,
   buildSingle, buildDouble, thirdPlaceMatch, addThirdPlace, removeThirdPlace, thirdPlaceStarted,
   divisionsOn, divisionFinal, divisionChampion, allDivisionsDone,
@@ -42,7 +42,7 @@ const { swissPairRound, swissAfterReport, swissStandings,
 const { ffaCreateRound, ffaAfterReport, ffaRank } = require('./lib/ffa');
 // Team formation and map lookups.
 const { buildDraft, finishDraftIfDone, finalizeOpenTeams, formTeamsGrouped,
-        divisionCaptainCfg, divisionPool, startNextDivision, splitIntoDivisions } = require('./lib/teams');
+        divisionCaptainCfg, divisionPool, startNextDivision, splitIntoDivisions, draftable, draftNoShows } = require('./lib/teams');
 const { mapById, publicMapView, secretNumbers, revealedSecrets, maskedMapView } = require('./lib/maps');
 // Wire the Swiss progression hook into the match core (see lib/match.js). Must come
 // after the swiss require above, since swissAfterReport is now imported, not hoisted.
@@ -512,6 +512,13 @@ function checkInOpensAt(t) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return null;
   const ms = Date.parse(d + 'T00:00:00Z');
   return isNaN(ms) ? null : ms;
+}
+// Can a player check in right now (signups still open, a deadline set, its day reached)? The
+// reminders use it, so nobody is told to check in days before the button would let them.
+function checkInOpenNow(t) {
+  if (!t || t.status !== 'signup' || !t.checkInDeadline) return false;
+  const gate = checkInOpensAt(t);
+  return !gate || Date.now() >= gate;
 }
 // Headline prize: a currency plus a plain number, kept separate from the free-text rewards so it
 // can be shown on its own and reused elsewhere (calendars, listings).
@@ -4029,15 +4036,21 @@ async function handleAPI(req, res, url) {
             if (!side) continue;
             for (const g of Object.keys(m.fveto.games)) {
               const mine = m.fveto.games[g][side];
-              if (mine && !mine.done && factionNextStep(m.fveto, mine)) owed++;
+              // only games whose map is known: the others cannot be chosen for yet
+              if (mine && !mine.done && factionNextStep(m.fveto, mine) && factionGameOpen(m, g)) owed++;
             }
           }
           if (owed) out.push({ tId: t.id, tName: t.name, type: 'fveto', tab: 'vetoes',
             text: owed === 1 ? 'Set your factions for a game' : 'Set your factions for ' + owed + ' games' });
         }
-        // check-in before the deadline (any member of a full, unchecked team)
-        if (myTeam && t.status === 'signup' && t.checkInDeadline && Date.now() < t.checkInDeadline && myTeam.playerIds.length >= t.teamSize && !myTeam.checkedIn) {
+        // check-in before the deadline (any member of a full, unchecked team), once it has opened
+        if (myTeam && checkInOpenNow(t) && Date.now() < t.checkInDeadline && myTeam.playerIds.length >= t.teamSize && !myTeam.checkedIn) {
           out.push({ tId: t.id, tName: t.name, type: 'checkin', tab: 'teams', text: 'Check in ' + myTeam.name + ' before the deadline' });
+        }
+        // the same for a 1v1 or solo FFA player (decision 53) and a captains-draft player (54)
+        if ((t.formation === 'solo' || t.formation === 'draft') && !meP.pending && !meP.checkedIn && checkInOpenNow(t) && Date.now() < t.checkInDeadline) {
+          out.push({ tId: t.id, tName: t.name, type: 'checkin', tab: 'players',
+            text: 'Check in before the deadline, or you are left out of the ' + (t.formation === 'draft' ? 'draft' : 'bracket') });
         }
       }
     }
@@ -5128,7 +5141,8 @@ async function handleAPI(req, res, url) {
         t.subs = (t.subs || []).filter(pid => pid !== p.id);
         if (t.status === 'draft' && t.draft && !t.draft.done) {
           // if fewer players remain than scheduled picks, trim the tail of the pick order
-          const available = t.players.filter(x => !x.teamId).length;
+          // (only players the draft can take count: not those the check-in left out)
+          const available = t.players.filter(draftable).length;
           const remaining = t.draft.order.length - t.draft.current;
           if (remaining > available) t.draft.order.length = t.draft.current + available;
           const divBefore = t.draft.division || 0;
@@ -5214,6 +5228,50 @@ async function handleAPI(req, res, url) {
       tlog(t, req, b.admin, (team.checkedIn ? 'checked in' : 'un-checked') + ' team "' + team.name + '"');
       saveDB();
       return json(res, 200, { ok: true, checkedIn: team.checkedIn });
+    }
+
+    // The ready check for single players: a solo field (1v1, solo FFA; decision 53) and a captains
+    // draft (decision 54). A player checks themselves in, an organizer checks in or un-checks
+    // anyone. Only with a check-in deadline set, and only while signups are open - locking the
+    // entrants (lib/teams formTeamsGrouped) or starting the draft (start_draft) is what applies it.
+    if (sub === 'checkin_player') {
+      if (t.formation !== 'solo' && t.formation !== 'draft') return bad(res, t.formation === 'open' ? 'Teams check in on the Teams tab' : 'This tournament has no player check-in');
+      const organizer = canOrganize(t, req, b);
+      // A draft under way: the check-in was applied when it started. A player it left out who turns
+      // up late can still be let in by an organizer: back into the pool, for the picks still to come.
+      if (t.formation === 'draft' && t.status === 'draft') {
+        const lp = (organizer && b.playerId) ? playerById(t, b.playerId) : actingPlayer(b);
+        if (!organizer) return bad(res, (lp && lp.noShow) ? 'The draft has started without you. An organizer can still put you in the player pool.' : 'The draft has already started');
+        if (!lp) return bad(res, 'Player not found');
+        if (lp.pending) return bad(res, 'The signup of ' + lp.name + ' was never approved');
+        if (!lp.noShow || lp.teamId) return bad(res, lp.name + ' is already in the draft');
+        if (b.value !== undefined && !b.value) return bad(res, 'The draft has already started');
+        delete lp.noShow;
+        lp.checkedIn = true;
+        lp.checkedInAt = now();
+        tlog(t, req, b.admin, 'checked in ' + lp.name + ' late (back in the draft pool)');
+        saveDB();
+        return json(res, 200, { ok: true, checkedIn: 1 });
+      }
+      if (!t.checkInDeadline) return bad(res, 'This tournament has no check-in');
+      if (t.status !== 'signup') return bad(res, t.formation === 'draft' ? 'The draft has already started' : 'The entrants are already locked');
+      const p = (organizer && b.playerId) ? playerById(t, b.playerId) : actingPlayer(b);
+      if (!p) return json(res, 401, { error: 'Sign up first' });
+      if (p.pending) return bad(res, organizer ? 'Accept the signup request first' : 'Your signup has not been approved yet');
+      // Same rule as the teams': check-in is for the day of the event, and saying when beats refusing.
+      if (!organizer) {
+        const gate = checkInOpensAt(t);
+        if (gate && Date.now() < gate) {
+          return bad(res, 'Check-in opens on the day of the tournament (' + new Date(gate).toISOString().slice(0, 10) + ' UTC). Come back then - your signup is safe until it opens.');
+        }
+      }
+      const on = (b.value === undefined) ? true : !!b.value;
+      p.checkedIn = on;
+      p.checkedInAt = on ? now() : null;
+      const self = (() => { const s = currentSession(req); return !!(s && p.fafId && s.fafId === p.fafId); })();
+      tlog(t, req, b.admin, (on ? 'checked in' : 'un-checked') + (self ? '' : ' ' + p.name));
+      saveDB();
+      return json(res, 200, { ok: true, checkedIn: on ? 1 : 0 });
     }
 
     if (sub === 'org_create_team') {
@@ -6939,7 +6997,8 @@ async function handleAPI(req, res, url) {
         t.teams = []; t.draft = null; t.subs = [];
         t.draftDone = null;
         t.plannedR1 = null;
-        for (const p of t.players) p.teamId = null;
+        // the ready check is applied again when the draft restarts (decision 54); check-ins stay
+        for (const p of t.players) { p.teamId = null; delete p.noShow; }
         tlog(t, req, b.admin, 'reopened signups (teams reset)');
         saveDB();
         return json(res, 200, { ok: true });
@@ -6984,7 +7043,7 @@ async function handleAPI(req, res, url) {
 
       // A division waiting for its captains (the one above has finished drafting).
       const waitingDiv = (t.status === 'draft' && t.draft && t.draft.waiting) ? t.draft.division : 0;
-      const undrafted = id => { const p = playerById(t, id); return !!(p && !p.teamId && !p.pending); };
+      const undrafted = id => draftable(playerById(t, id));
 
       if (a === 'set_captains') {
         if (t.formation !== 'draft') return bad(res, 'This tournament does not use a draft');
@@ -7005,18 +7064,25 @@ async function handleAPI(req, res, url) {
         // Division 1 opens the draft (and closes signups); a waiting division is started on its own.
         const div = waitingDiv || (divisionsOn(t) ? 1 : 0);
         const cfg = div > 1 ? divisionCaptainCfg(t, div) : { mode: t.captainMode === 'rating' ? 'rating' : 'manual', count: t.captainCount || 0 };
+        // The ready check (decision 54) is applied here, when signups close: whoever has not
+        // checked in is left out of the draft. Worked out first, marked once the draft can start.
+        const noShows = waitingDiv ? [] : draftNoShows(t);
+        const absent = {};
+        for (const p of noShows) absent[p.id] = 1;
         let capIds;
         if (cfg.mode === 'rating') {
           // Top N by rating, resolved now rather than when the setting was saved, so late
           // signups, withdrawals and rating corrections are all reflected.
           const n = cfg.count || 0;
           if (n < 2) return bad(res, 'Set how many captains there should be first');
-          const ranked = waitingDiv ? divisionPool(t) : (t.players || []).filter(p => !p.pending)
+          const ranked = waitingDiv ? divisionPool(t) : (t.players || []).filter(p => !p.pending && !absent[p.id])
             .slice().sort((x, y) => (y.rating || 0) - (x.rating || 0));
           if (ranked.length < n) {
             return bad(res, waitingDiv
               ? 'Only ' + ranked.length + ' player' + (ranked.length === 1 ? ' is' : 's are') + ' left for the ' + divisionName(t, div) + ' division; need at least ' + n + ' for ' + n + ' captains'
-              : 'Only ' + ranked.length + ' player' + (ranked.length === 1 ? '' : 's') + ' signed up; need at least ' + n + ' for ' + n + ' captains');
+              : noShows.length
+                ? 'Only ' + ranked.length + ' player' + (ranked.length === 1 ? ' has' : 's have') + ' checked in; need at least ' + n + ' for ' + n + ' captains'
+                : 'Only ' + ranked.length + ' player' + (ranked.length === 1 ? '' : 's') + ' signed up; need at least ' + n + ' for ' + n + ' captains');
           }
           capIds = ranked.slice(0, n).map(p => p.id);
         } else {
@@ -7026,12 +7092,23 @@ async function handleAPI(req, res, url) {
         }
         capIds = capIds.filter(id => playerById(t, id));
         if (capIds.length < 2) return bad(res, 'Mark at least 2 captains in the player list first');
+        // A marked captain who has not checked in: say who, rather than start a draft without them.
+        const awol = capIds.filter(id => absent[id]).map(id => playerById(t, id).name);
+        if (awol.length) {
+          return bad(res, awol.join(', ') + (awol.length === 1 ? ' has' : ' have') + ' not checked in, so cannot be captain. Check them in on the Players tab, or mark another captain.');
+        }
+        if (!waitingDiv) for (const p of t.players) delete p.noShow;
+        for (const p of noShows) p.noShow = 1;
         buildDraft(t, capIds, div);
         finishDraftIfDone(t);
         t.pendingCaptains = [];
         const how = ' (' + capIds.length + ' captains' + (cfg.mode === 'rating' ? ', top by rating' : '') + ')';
         tlog(t, req, b.admin, div > 1 ? 'started the ' + divisionName(t, div) + ' draft' + how
           : (div === 1 ? 'closed signups & started the ' + divisionName(t, 1) + ' draft' + how : 'closed signups & started the captains draft' + how));
+        if (noShows.length) {
+          tpush(t, 'System', noShows.length + ' player' + (noShows.length === 1 ? ' had' : 's had') + ' not checked in and ' + (noShows.length === 1 ? 'is' : 'are')
+            + ' left out of the draft: ' + noShows.map(p => p.name).join(', ') + '.');
+        }
         noteDraftChain(t, div);
         saveDB();
         return json(res, 200, { ok: true });
@@ -7051,6 +7128,11 @@ async function handleAPI(req, res, url) {
         if (t.status !== 'signup') return bad(res, 'Teams already formed');
         const err = (t.formation === 'open') ? finalizeOpenTeams(t) : formTeamsGrouped(t);
         if (err) return bad(res, err);
+        // The ready check on a solo field left these players out (decision 53): say so, by name.
+        if (t.formation === 'solo' && (t.subs || []).length) {
+          const out = t.subs.map(pid => (playerById(t, pid) || {}).name).filter(Boolean);
+          tpush(t, 'System', out.length + ' player' + (out.length === 1 ? ' had' : 's had') + ' not checked in and ' + (out.length === 1 ? 'is' : 'are') + ' not in the bracket (standby): ' + out.join(', ') + '.');
+        }
         // Divisions planned at creation: split the locked field by combined rating straight away.
         // The Teams tab lets an organizer move teams between them before the start.
         if (divisionsOn(t) && divisionsAllowed(t.competition, t.bracketType)) {
@@ -7419,6 +7501,9 @@ async function handleAPI(req, res, url) {
       const p = playerById(t, b.playerId);
       if (!p) return bad(res, 'Player not found');
       if (p.teamId) return bad(res, 'Player already picked');
+      // not in the pool: left out by the check-in (decision 54), or a request never approved
+      if (p.noShow) return bad(res, p.name + ' did not check in, so is not in the draft');
+      if (p.pending) return bad(res, 'The signup of ' + p.name + ' was never approved');
       const team = teamById(t, turnTeamId);
       p.teamId = team.id;
       team.playerIds.push(p.id);
@@ -7615,6 +7700,7 @@ async function handleAPI(req, res, url) {
       const g = String(parseInt(b.game, 10) || 0);
       const game = m.fveto.games[g];
       if (!game) return bad(res, 'No such game in this series');
+      if (!factionGameOpen(m, g)) return bad(res, 'The map for game ' + g + ' is not decided yet. Its factions open once the map veto has picked it.');
       const side = game[sideKey];
       const step = factionNextStep(m.fveto, side);
       if (!step) return bad(res, 'You have already finished your faction choices for this game');

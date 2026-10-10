@@ -650,7 +650,7 @@ async function drawAdmin(el) {
       <div style="display:flex;gap:8px"><input type="date" id="su_opdate" value="${esc(su.date)}" style="flex:1"><input type="time" id="su_optime" value="${esc(su.time)}" style="width:130px"></div>
       <label style="margin-top:12px">Signups close at <span class="muted small">(auto-closes signups; team forming &amp; picks still work. Empty = manual)</span></label>
       <div style="display:flex;gap:8px"><input type="date" id="su_cldate" value="${esc(sc.date)}" style="flex:1"><input type="time" id="su_cltime" value="${esc(sc.time)}" style="width:130px"></div>
-      <label style="margin-top:12px">Check-in deadline <span class="muted small">(any member of a full team can check it in. Empty = no check-in; teams enter by signup order)</span></label>
+      <label style="margin-top:12px">Check-in deadline <span class="muted small">(on the day of the event, players in 1v1, FFA and captains drafts check themselves in, and any member of a full premade team checks the team in; whoever has not when you lock the entrants or start the draft is left out. Empty = no check-in)</span></label>
       <div style="display:flex;gap:8px"><input type="date" id="su_cidate" value="${esc(ci.date)}" style="flex:1"><input type="time" id="su_citime" value="${esc(ci.time)}" style="width:130px"></div>
       <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px">
         <div style="flex:1;min-width:150px"><label>Min teams / entrants <span class="muted small">(display only)</span></label><input type="number" id="su_min" min="0" max="128" value="${T.minTeams || 0}"></div>
