@@ -21,7 +21,7 @@ const { BO_OK, seedOrder, nextPow2, log2i, seededSlots, cleanBoList } = require(
 const {
   poolById, poolForMatch, poolRoundKey, poolMapIds, cleanSequence, cleanVeto, abRating, decideTeamA,
   initVeto, vetoCurrentStep, vetoAdvance, initMatchVetoes,
-  FACTIONS, factionVetoOn, initFactionVeto, newFactionGame, factionSideKey, factionGameOpen, factionNextStep, factionResolve, factionViewFor,
+  FACTIONS, factionVetoOn, initFactionVeto, newFactionGame, factionSideKey, factionGameOpen, factionGameWait, factionNextStep, factionResolve, factionViewFor,
   newMatch, routeVal, setSlot, evaluate, finalizeMatch, undoMatch, backfillMatchLinks,
   buildSingle, buildDouble, thirdPlaceMatch, addThirdPlace, removeThirdPlace, thirdPlaceStarted,
   divisionsOn, divisionFinal, divisionChampion, allDivisionsDone,
@@ -4029,19 +4029,19 @@ async function handleAPI(req, res, url) {
         // can make them, an organizer deliberately cannot do it for them, and nothing else in
         // the product told them it was outstanding.
         if (capTeam && factionVetoOn(t) && Array.isArray(t.matches)) {
-          let owed = 0;
+          const owedGames = [];
           for (const m of t.matches) {
             if (m.status === 'done' || !m.fveto || !m.fveto.games) continue;
             const side = factionSideKey(m, capTeam.id);
             if (!side) continue;
-            for (const g of Object.keys(m.fveto.games)) {
+            for (const g of Object.keys(m.fveto.games).sort((a, b) => Number(a) - Number(b))) {
               const mine = m.fveto.games[g][side];
-              // only games whose map is known: the others cannot be chosen for yet
-              if (mine && !mine.done && factionNextStep(m.fveto, mine) && factionGameOpen(m, g)) owed++;
+              // only the open game: after the map veto, one game at a time (decision 55)
+              if (mine && !mine.done && factionNextStep(m.fveto, mine) && factionGameOpen(m, g)) owedGames.push(g);
             }
           }
-          if (owed) out.push({ tId: t.id, tName: t.name, type: 'fveto', tab: 'vetoes',
-            text: owed === 1 ? 'Set your factions for a game' : 'Set your factions for ' + owed + ' games' });
+          if (owedGames.length) out.push({ tId: t.id, tName: t.name, type: 'fveto', tab: 'vetoes',
+            text: owedGames.length === 1 ? 'Set your factions for game ' + owedGames[0] : 'Set your factions for ' + owedGames.length + ' games' });
         }
         // check-in before the deadline (any member of a full, unchecked team), once it has opened
         if (myTeam && checkInOpenNow(t) && Date.now() < t.checkInDeadline && myTeam.playerIds.length >= t.teamSize && !myTeam.checkedIn) {
@@ -7700,7 +7700,10 @@ async function handleAPI(req, res, url) {
       const g = String(parseInt(b.game, 10) || 0);
       const game = m.fveto.games[g];
       if (!game) return bad(res, 'No such game in this series');
-      if (!factionGameOpen(m, g)) return bad(res, 'The map for game ' + g + ' is not decided yet. Its factions open once the map veto has picked it.');
+      // One game at a time, after the map veto (decision 55): say which comes first.
+      const wait = factionGameWait(m, g);
+      if (wait === 'maps') return bad(res, 'Factions come after the map veto. Finish the map veto first, then game 1\u2019s factions open.');
+      if (wait) return bad(res, 'One game at a time: game ' + g + '\u2019s factions open once both players have finished game ' + wait + '\u2019s.');
       const side = game[sideKey];
       const step = factionNextStep(m.fveto, side);
       if (!step) return bad(res, 'You have already finished your faction choices for this game');

@@ -1137,12 +1137,15 @@ body.modal-open .turnbanner { animation: none !important; }
 }
 .fveto-col.done { border-left-color: var(--green); }
 .fveto-prompt { font-size: 13px; font-weight: 700; color: var(--amber); }
-.fveto-chips, .fveto-mine { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.fveto-col.active.fv-ban  { border-left-color: #d9534f; background: linear-gradient(90deg, rgba(217,83,79,0.12), transparent 75%); }
+.fveto-col.active.fv-pick { border-left-color: #57c46a; background: linear-gradient(90deg, rgba(87,196,106,0.11), transparent 75%); }
+.fveto-col.active .fveto-prompt { color: var(--text); }
+.fveto-col .veto-confirm { margin-top: 2px; min-height: 34px; }
+.fveto-chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 .fveto-wait { font-size: 12px; color: var(--muted); font-style: italic; }
 .fveto-note { line-height: 1.4; }
 .fveto-res { display: flex; align-items: center; gap: 8px; font-size: 12px; }
 .fv-who { color: var(--muted); min-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.fv-arrow { color: var(--muted); font-size: 12px; }
 
 .fchip {
   display: inline-flex; align-items: center; gap: 5px;
@@ -1188,6 +1191,10 @@ body.modal-open .turnbanner { animation: none !important; }
 /* an open faction choice spans both team columns; it sits in the row, not beside it */
 .vgt .fveto-col { margin: 0; padding: 0; border: none; min-width: 0; max-width: none; width: auto; }
 .vgt .fveto-col.active { padding: 2px 0 4px 10px; border-left: 3px solid var(--amber); }
+.vgt .fveto-col.active.fv-ban  { border-left-color: #d9534f; }
+.vgt .fveto-col.active.fv-pick { border-left-color: #57c46a; }
+/* its texts wrap rather than widen the table to the whole card (the note and the confirm line) */
+.vgt .fveto-col.active { max-width: 440px; }
 /* room for the four faction buttons on one line, and the note in two */
 .vgt td.vgt-fwide { min-width: 340px; }
 .vgt .fveto-col.active .fveto-chips { flex-wrap: nowrap; }
@@ -1257,26 +1264,61 @@ span.veto-act-ban  { background: rgba(217,83,79,0.18);  border: 1px solid rgba(2
 span.veto-act-pick { background: rgba(87,196,106,0.15); border: 1px solid rgba(87,196,106,0.5); }
 .veto-head-ban  { border-left: 3px solid #d9534f; padding-left: 8px; }
 .veto-head-pick { border-left: 3px solid #57c46a; padding-left: 8px; }
-/* the "your turn" line under the header */
-.veto-yourturn {
-  margin: 6px 0 10px; padding: 6px 10px; border-radius: 4px; font-size: 12px;
-  background: #16202c; border-left: 3px solid currentColor;
+/* The place to act (decision 55): a panel in the colour of the action, a tag on every map that
+   says what clicking it does, and a confirm bar whose button names the action and the map. The
+   bar keeps its height when idle, so nothing moves under the pointer when a map is marked. */
+.veto-act-panel {
+  margin: 8px 0 12px; padding: 10px 12px 12px; border-radius: 6px;
+  border: 1px solid #2a3d55; border-left-width: 4px;
 }
-/* a map armed by the first click, waiting for the second */
-.veto-map.armed { outline: 2px solid var(--amber); outline-offset: 1px; position: relative; }
-.veto-map .vm-confirm {
-  display: block; margin-top: 2px; font-size: 10px; font-weight: 700;
-  letter-spacing: .04em; color: var(--amber); text-transform: uppercase;
+.veto-panel-ban  { border-color: rgba(217,83,79,0.55); background: linear-gradient(90deg, rgba(217,83,79,0.10), transparent 70%); }
+.veto-panel-pick { border-color: rgba(87,196,106,0.5); background: linear-gradient(90deg, rgba(87,196,106,0.09), transparent 70%); }
+.veto-act-title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 15px; font-weight: 700; color: var(--text); }
+.veto-act-title .veto-act { font-size: 14px; }
+.veto-act-help { margin: 3px 0 10px; font-size: 12px; color: var(--muted); }
+.veto-map .vm-tag {
+  align-self: stretch; text-align: center; font-size: 10px; font-weight: 800; letter-spacing: .06em;
+  text-transform: uppercase; border-radius: 3px; padding: 1px 4px;
 }
-.veto-map.act-ban.armed  { outline-color: #d9534f; }
-.veto-map.act-ban.armed  .vm-confirm { color: #ff6b63; }
-.veto-map.act-pick.armed { outline-color: #57c46a; }
-.veto-map.act-pick.armed .vm-confirm { color: #5fd177; }
+.veto-map.act-ban  .vm-tag { color: #ff6b63; background: rgba(217,83,79,0.16); }
+.veto-map.act-pick .vm-tag { color: #5fd177; background: rgba(87,196,106,0.14); }
+/* a map marked by the first click */
+.veto-map.armed { position: relative; outline: 3px solid var(--amber); outline-offset: 1px; }
+.veto-map.act-ban.armed  { outline-color: #d9534f; background: rgba(217,83,79,0.22); }
+.veto-map.act-pick.armed { outline-color: #57c46a; background: rgba(87,196,106,0.2); }
+.veto-map.act-ban.armed .vm-tag  { color: #fff; background: #c9302c; }
+.veto-map.act-pick.armed .vm-tag { color: #08121c; background: #57c46a; }
 .veto-map[disabled] { opacity: .5; cursor: default; }
-/* armed faction chip, awaiting its confirming second click */
-.fchip.armed { outline: 2px solid var(--amber); outline-offset: 1px; }
-.fchip.armed .fchip-name { font-weight: 700; }
+.veto-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-height: 38px; margin-top: 10px; }
+/* once a map is marked, its confirm button stays on screen: on a phone the maps run several
+   screens down, and the button sat under all of them */
+.veto-act-panel .veto-confirm.on {
+  position: sticky; bottom: 8px; z-index: 3; padding: 8px 10px; border-radius: 6px;
+  background: var(--panel); box-shadow: 0 -4px 16px rgba(0,0,0,.55), 0 0 0 1px #2a3d55;
+}
+.veto-confirm-idle { font-size: 12px; color: var(--muted); font-style: italic; }
+.btn.veto-go { font-size: 13px; font-weight: 800; letter-spacing: .02em; padding: 8px 16px; border: none; text-transform: none; }
+.btn.veto-go-ban  { background: #c9302c; color: #fff; }
+.btn.veto-go-ban:hover  { background: #d9534f; }
+.btn.veto-go-pick { background: #3f9e52; color: #fff; }
+.btn.veto-go-pick:hover { background: #57c46a; }
+.btn.veto-go[disabled] { opacity: .6; cursor: default; }
+.veto-fnote { margin-top: 8px; font-size: 12px; color: var(--muted); font-style: italic; }
+/* a faction marked by the first click */
+.fchip.armed { outline: 3px solid var(--amber); outline-offset: 1px; }
 .fchip[disabled].armed { opacity: 1; }
+.fchip.act-ban:hover  { border-color: #d9534f; }
+.fchip.act-pick:hover { border-color: #57c46a; }
+.fchip.act-ban.armed  { outline-color: #d9534f; background: rgba(217,83,79,0.22); }
+.fchip.act-pick.armed { outline-color: #57c46a; background: rgba(87,196,106,0.2); }
+/* your own ban: taken from your opponent, not from you, so it is marked, not struck through */
+.fchip.fchip-ban { border-color: rgba(217,83,79,0.6); }
+.fchip.fchip-ban .fchip-name::before { content: '\2715  '; color: #ff6b63; font-weight: 700; }
+.fveto-sofar { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; }
+.fveto-sofar .fv-lbl { font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.fveto-sofar .fv-lbl + .fchip { margin-right: 4px; }
+.fveto-sofar .fv-ord { font-size: 11px; color: var(--muted); }
+.fveto-prompt .fv-which { font-size: 12px; font-weight: 400; color: var(--muted); }
 
 /* your own matches, tinted in every Matches-tab section */
 tr.mt-mine > td { background: rgba(217,164,74,0.07); }

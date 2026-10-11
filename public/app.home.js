@@ -1335,7 +1335,9 @@ async function renderTournament() {
 // can never leave someone looking at a stale bracket.
 async function pollOnce() {
   if (!tourneyId()) return;
-  if (document.getElementById('modalRoot').innerHTML) return;   // modal open
+  // A popup is open: no poll, except over a veto, which has to show the other side's moves.
+  const modalRoot = document.getElementById('modalRoot');
+  if (modalRoot.innerHTML && !modalRoot.querySelector('[data-veto-live]')) return;
   if (formHasFocus()) return;                                    // user is typing
   try {
     const tok = viewToken();
@@ -1349,7 +1351,7 @@ async function pollOnce() {
     if (typeof dockSync === 'function') dockSync();
     // The chat tab manages its own live updates and remembers the open room; a full redraw here
     // would rebuild the room list and yank the user back to Global. Keep data fresh, don't repaint.
-    if (currentTab === 'chat') return;
+    if (currentTab === 'chat') { if (typeof refreshLiveVetoes === 'function') refreshLiveVetoes(); return; }
     redrawInPlace();
   } catch (e) {}
 }
@@ -1474,7 +1476,7 @@ function myTurnInfo() {
       const verb = owed[0].ft.next.action === 'ban' ? 'ban' : 'pick';
       return {
         text: steps === 1
-          ? "It's your turn to " + verb + ' a faction vs ' + opp + '.'
+          ? "It's your turn to " + verb + ' a faction for game ' + owed[0].ft.next.game + ' vs ' + opp + '.'
           : 'You still need to set your factions for ' + steps + ' games' + (owed.length === 1 ? ' vs ' + opp : '') + '.',
         tab: 'vetoes', cta: 'Go to the faction veto'
       };
