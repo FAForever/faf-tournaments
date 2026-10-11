@@ -452,6 +452,26 @@ function vetoLinkHTML(m) {
   return `<a href="#" data-veto-link="${m.id}" class="veto-mini-link">${label}</a>`;
 }
 
+// A veto in a popup stays live (decision 55). It used to be drawn once: after a ban made in the
+// popup, the popup kept showing the old step with every button disabled, and the opponent's
+// moves never appeared. `refreshLiveVetoes` redraws it from the latest data after every refresh
+// and poll (redrawInPlace), and the poll keeps running while such a popup is open.
+function renderVetoInto(el, m, emptyHtml) {
+  if (!el || !m) return;
+  el.dataset.vetoLive = m.id;
+  el.innerHTML = vetoHTML(m) || emptyHtml || '';
+  wireVeto(el, m);
+  wireFactionVeto(el);
+}
+function refreshLiveVetoes() {
+  const root = document.getElementById('modalRoot');
+  if (!root || !T || !T.matches) return;
+  root.querySelectorAll('[data-veto-live]').forEach(el => {
+    const m = T.matches.find(x => x.id === el.dataset.vetoLive);
+    if (m) renderVetoInto(el, m, el.id === 'vpBody' ? '<div class="muted small">Nothing to show for this match.</div>' : '');
+  });
+}
+
 // Popup showing a single match's veto (status or final maps), plus a link to that match's chat.
 // Opened from the "See vetoed maps" link on a bracket match, so the user stays on the bracket.
 function showVetoPopup(m) {
@@ -467,10 +487,7 @@ function showVetoPopup(m) {
     <div id="vpBody"></div>
     <div class="veto-pop-foot" style="margin-top:10px">${chatLink}</div>
     <div class="actions"><button class="btn ghost" id="vpClose">Close</button></div>`, root => {
-    const body = root.querySelector('#vpBody');
-    body.innerHTML = vetoHTML(m) || '<div class="muted small">Nothing to show for this match.</div>';
-    wireVeto(body, m);
-    wireFactionVeto(body);
+    renderVetoInto(root.querySelector('#vpBody'), m, '<div class="muted small">Nothing to show for this match.</div>');
     const chat = root.querySelector('#vpChat');
     if (chat) chat.onclick = (e) => { e.preventDefault(); closeModal(); openMatchChat(m); };
     root.querySelectorAll('[data-teamid]').forEach(nameEl => {
@@ -1224,7 +1241,9 @@ function drawVetoes(el) {
   }
   // A veto is settled once it completes OR once the match has a result - a forfeit or an
   // organizer correction can decide a match mid-veto, and that veto can never be acted on again.
-  const settled = m => (m.veto ? m.veto.done : factionAllDone(m)) || m.status === 'done';
+  // Since decision 55 the factions come after the map veto, so a finished map veto with factions
+  // still to choose is in progress, not "Completed".
+  const settled = m => vetoAllDone(m) || m.status === 'done';
   const pending = sortByPlay(vetoMatches.filter(m => !settled(m)), true);
   const done = sortByPlay(vetoMatches.filter(settled), true);
 
@@ -1237,7 +1256,7 @@ function drawVetoes(el) {
       return `<span class="${real ? 'vteam-name' : ''}"${real ? ' data-teamid="' + esc(tid) + '"' : ''}>${esc(bracketLabel(tid))}</span>`;
     };
     const unfinished = (m.status === 'done') && m.veto && (m.veto.abandoned || !vetoRanToCompletion(m.veto));
-    const isDone = m.veto ? m.veto.done : factionAllDone(m);
+    const isDone = vetoAllDone(m);
     const doneTag = unfinished
       ? '<span class="veto-done-tag closed">CLOSED</span>'
       : (isDone ? '<span class="veto-done-tag">RESULT</span>' : '');
@@ -1372,6 +1391,12 @@ function vetoLogHTML(v) {
   return `<div class="veto-log"><div class="veto-head">Ban / pick order</div>${rows}${dec}</div>`;
 }
 
+// Is everything on this match chosen: the map veto (if any) and every game's factions (if any)?
+function vetoAllDone(m) {
+  if (m.veto && !m.veto.done) return false;
+  if (m.fveto && !factionAllDone(m)) return false;
+  return !!(m.veto || m.fveto);
+}
 // Are every game's factions resolved for this match?
 function factionAllDone(m) {
   if (!m.fveto || !m.fveto.games) return false;
@@ -1409,9 +1434,10 @@ function vgtThumbHTML(id) {
 // row lines up however long its map's name is. A faction choice still open spans both team
 // columns, and the table is as wide as it needs to be, so that choice gets room for its four
 // buttons on one line instead of the leftovers next to a wide map column.
-function vetoGamesTableHTML(m, rows) {
+function vetoGamesTableHTML(m, rows, opts) {
   const hasMap = rows.some(r => r.map);
-  const fv = !!(m.fveto && m.fveto.games);
+  // `factions: false` while the map veto runs: the faction columns come after it (decision 55)
+  const fv = !!(m.fveto && m.fveto.games) && !(opts && opts.factions === false);
   const teamTh = tid => '<th class="vgt-f" title="' + esc(teamName(tid) || '') + '">' + esc(bracketLabel(tid) || '') + '</th>';
   const head = '<thead><tr><th class="vgt-n">Game</th>' + (hasMap ? '<th class="vgt-map">Map</th>' : '') + (fv ? teamTh(m.team1) + teamTh(m.team2) : '') + '</tr></thead>';
   const body = rows.map(r => {
@@ -1497,15 +1523,37 @@ function vetoHTML(m) {
   const turnTeam = step ? (step.team === 'A' ? v.teamA : v.teamB) : null;
   const turnName = turnTeam ? bracketLabel(turnTeam) : '';
   const actionWord = step ? (step.action === 'ban' ? 'ban' : 'pick') : '';
-  const canActNow = (myTeamId && turnTeam === myTeamId) || isOrg;
+  const mineNow = !!(myTeamId && turnTeam === myTeamId);
+  const canActNow = mineNow || isOrg;
   const stepsLeft = v.sequence.length - v.stepIndex;
+  const forGame = (v.picks || []).length + 1;   // the game a pick made now is for
 
   // BAN vs PICK is the thing captains misread, so it gets its own colour-coded badge rather than
   // being one lowercase word buried in a sentence.
   const actBadge = `<span class="veto-act veto-act-${actionWord}">${actionWord.toUpperCase()}</span>`;
   h += `<div class="veto-head veto-head-${actionWord}">Step ${v.stepIndex + 1} of ${v.sequence.length} · <strong>${esc(turnName)}</strong> to ${actBadge} <span class="muted">(${stepsLeft} left, then decider)</span></div>`;
+
+  // thumbnail so captains see WHICH map they're banning/picking without tab-switching
+  const vThumb = (mp) => {
+    const mo = mapObj(mp);
+    return (mo && mo.image) ? '<img class="vm-thumb" src="/map-images/' + encodeURIComponent(mo.image) + '" alt="" loading="lazy">' : '';
+  };
+  const remainingSpans = () => '<div class="veto-remaining">' + (v.remaining || []).map(mp =>
+    '<span class="veto-map vm-card avail" data-map-info="' + esc(mp) + '">' + vThumb(mp) + '<span class="vm-name">' + esc(mapName(mp)) + '</span></span>').join('') + '</div>';
+
+  // The one place to act, right under the header and in the colour of the action (decision 55):
+  // what a click does, said on every map; then a separate button that names the action and the map,
+  // so a double click, or a click on the map you meant to ban during a pick, sends nothing.
   if (canActNow) {
-    h += `<div class="veto-yourturn veto-act-${actionWord}">${myTeamId && turnTeam === myTeamId ? 'Your turn' : 'Acting for ' + esc(turnName)} \u2014 choose a map to <strong>${actionWord.toUpperCase()}</strong>. You'll be asked to confirm.</div>`;
+    const what = actionWord === 'ban' ? 'A banned map is out of the pool.' : 'The map you pick is played in game ' + forGame + '.';
+    h += `<div class="veto-act-panel veto-panel-${actionWord}">
+      <div class="veto-act-title"><span class="turn-dot"></span>${mineNow ? 'Your turn' : 'Acting for ' + esc(turnName)}: ${actBadge} ${actionWord === 'ban' ? 'a map' : 'the map for game ' + forGame}</div>
+      <div class="veto-act-help">${what}</div>
+      <div class="veto-remaining">${(v.remaining || []).map(mp =>
+        '<button type="button" class="veto-map vm-card act-' + actionWord + '" data-veto-map="' + esc(mp) + '"><span class="vm-tag">' + (actionWord === 'ban' ? '\u2715 Ban' : '\u2713 Pick') + '</span>'
+        + vThumb(mp) + '<span class="vm-name">' + esc(mapName(mp)) + '</span></button>').join('')}</div>
+      <div class="veto-confirm" data-veto-bar="${esc(m.id)}"></div>
+    </div>`;
   }
 
   // history so far: bans struck, picks as games
@@ -1516,23 +1564,15 @@ function vetoHTML(m) {
       const th = (mo && mo.image) ? '<img class="vm-thumb dim" src="/map-images/' + encodeURIComponent(mo.image) + '" alt="" loading="lazy">' : '';
       return '<span class="veto-map vm-card banned" title="Banned by ' + esc(teamName(b.by)) + '">' + th + '<span class="vm-name">' + esc(mapName(b.map)) + '</span></span>';
     }).join('') + '</div>';
-    if (picks.length) h += vetoGamesTableHTML(m, picks.map(g => ({ game: g.game, map: g.map })));
+    // no faction columns yet: the factions come after the whole map veto
+    if (picks.length) h += vetoGamesTableHTML(m, picks.map(g => ({ game: g.game, map: g.map })), { factions: false });
     h += '</div>';
     h += vetoLogHTML(v);
   }
 
-  // remaining maps: clickable if it's the viewer's turn (ban or pick)
-  const cls = step && step.action === 'pick' ? 'pick' : 'ban';
-  // thumbnail so captains see WHICH map they're banning/picking without tab-switching
-  const vThumb = (mp) => {
-    const mo = mapObj(mp);
-    return (mo && mo.image) ? '<img class="vm-thumb" src="/map-images/' + encodeURIComponent(mo.image) + '" alt="" loading="lazy">' : '';
-  };
-  h += '<div class="veto-remaining">' + (v.remaining || []).map(mp =>
-    canActNow
-      ? '<button class="veto-map vm-card act-' + cls + '" data-veto-map="' + esc(mp) + '">' + vThumb(mp) + '<span class="vm-name">' + esc(mapName(mp)) + '</span></button>'
-      : '<span class="veto-map vm-card avail" data-map-info="' + esc(mp) + '">' + vThumb(mp) + '<span class="vm-name">' + esc(mapName(mp)) + '</span></span>'
-  ).join('') + '</div>';
+  // remaining maps for everyone not acting (the acting panel above has them as buttons)
+  if (!canActNow) h += remainingSpans();
+  if (m.fveto) h += '<div class="veto-fnote">Factions come after the map veto, one game at a time.</div>';
 
   // organizer undo
   if (isOrg && v.stepIndex > 0) h += '<div style="margin-top:8px"><button class="btn ghost small" data-veto-undo="' + m.id + '">↶ Undo last step</button></div>';
@@ -1547,49 +1587,69 @@ function wireVeto(box, m) {
   const step = v.sequence ? v.sequence[v.stepIndex] : null;
   const turnTeam = step ? (step.team === 'A' ? v.teamA : v.teamB) : null;
 
-  // Two-step confirm, inline rather than a modal: the first click arms that map and turns it into
-  // a "Confirm ban/pick" button, a second click commits. A misclick costs nothing - clicking any
-  // other map moves the arming, and Cancel or Escape clears it. Deliberately not a popup, since a
-  // dialog on every one of a dozen steps would be worse than the misclick it prevents.
+  // Choose, then confirm with a separate button (decision 55). The first click marks a map; the
+  // bar under the maps then says exactly what will happen - "Ban Floralis" in red, "Pick Floralis
+  // for game 1" in green - and only that button sends it. A second click on the map does nothing,
+  // so a double click can no longer ban or pick by itself (the old confirm was a second click on
+  // the same spot), and the word BAN or PICK is on screen at the moment of confirming. Clicking
+  // another map moves the mark; Cancel, Escape or a click elsewhere clears it. Inline, not a popup.
   const actionWord = step ? (step.action === 'ban' ? 'ban' : 'pick') : '';
+  const forGame = (v.picks || []).length + 1;
+  const mineNow = !!(T.viewer && T.viewer.teamId && T.viewer.teamId === turnTeam);
   const btns = Array.from(box.querySelectorAll('[data-veto-map]'));
-  const label = (b) => {
-    const tag = document.createElement('span');
-    tag.className = 'vm-confirm';
-    tag.textContent = 'Confirm ' + actionWord + '?';
-    b.appendChild(tag);
-  };
+  const bar = box.querySelector('[data-veto-bar]');
+  // a mark belongs to one step: after an undo, or the next step, it no longer applies
+  const armedMap = () => (_vetoArmed && _vetoArmed.matchId === m.id && _vetoArmed.step === v.stepIndex
+    && (v.remaining || []).indexOf(_vetoArmed.map) >= 0) ? _vetoArmed.map : null;
+  let busy = false;
   const paint = () => {
-    for (const b of btns) {
-      const on = _vetoArmed && _vetoArmed.matchId === m.id && _vetoArmed.map === b.dataset.vetoMap;
-      b.classList.toggle('armed', !!on);
-      const lbl = b.querySelector('.vm-confirm');
-      if (on && !lbl) label(b);
-      if (!on && lbl) lbl.remove();
+    const sel = armedMap();
+    for (const b of btns) b.classList.toggle('armed', b.dataset.vetoMap === sel);
+    if (!bar) return;
+    if (!sel) {
+      bar.classList.remove('on');
+      bar.innerHTML = '<span class="veto-confirm-idle">Click a map to ' + actionWord + ' it. Nothing is sent until you confirm.</span>';
+      return;
     }
+    bar.classList.add('on');
+    const verb = actionWord === 'ban' ? '\u2715 Ban ' : '\u2713 Pick ';
+    bar.innerHTML = '<button type="button" class="btn veto-go veto-go-' + actionWord + '" data-veto-go>' + verb + esc(mapName(sel))
+      + (actionWord === 'pick' ? ' for game ' + forGame : '') + (mineNow ? '' : ' (for ' + esc(bracketLabel(turnTeam)) + ')') + '</button>'
+      + '<button type="button" class="btn ghost small" data-veto-cancel>Cancel</button>';
+    bar.querySelector('[data-veto-go]').onclick = () => commit(sel);
+    bar.querySelector('[data-veto-cancel]').onclick = disarm;
   };
-  const disarm = () => { _vetoArmed = null; paint(); };
-  const commit = async (btn) => {
-    const map = btn.dataset.vetoMap;
+  const disarm = () => { if (_vetoArmed && _vetoArmed.matchId === m.id) _vetoArmed = null; paint(); };
+  const commit = async (map) => {
+    if (busy) return;
+    busy = true;
     btns.forEach(b => { b.disabled = true; });
+    const go = bar && bar.querySelector('[data-veto-go]');
+    if (go) go.disabled = true;
     const body = { matchId: m.id, map: map, token: myToken() };
     // organizer acting on behalf of the team whose turn it is
     if (viewerIsOrganizer() && (!T.viewer || T.viewer.teamId !== turnTeam)) body.asTeam = turnTeam;
-    try { _vetoArmed = null; await api('/api/t/' + T.id + '/veto_action', body); await refresh(); }
-    catch (e) { toast(e.message, true); btns.forEach(b => { b.disabled = false; }); disarm(); }
+    try { await api('/api/t/' + T.id + '/veto_action', body); _vetoArmed = null; await refresh(); }
+    catch (e) { toast(e.message, true); busy = false; btns.forEach(b => { b.disabled = false; }); disarm(); }
   };
   for (const btn of btns) {
-    btn.onclick = async () => {
-      const on = _vetoArmed && _vetoArmed.matchId === m.id && _vetoArmed.map === btn.dataset.vetoMap;
-      if (on) return commit(btn);
-      _vetoArmed = { matchId: m.id, map: btn.dataset.vetoMap };
+    btn.onclick = () => {
+      if (busy) return;
+      _vetoArmed = { matchId: m.id, map: btn.dataset.vetoMap, step: v.stepIndex };
       paint();
     };
   }
-  paint();
-  // Escape or a click anywhere else clears the arming.
-  box.addEventListener('keydown', e => { if (e.key === 'Escape') disarm(); });
-  box.addEventListener('click', e => { if (!e.target.closest('[data-veto-map]')) disarm(); });
+  paint();   // survives the 4s poll redraw: re-applied from module state, not rebuilt from scratch
+  // Escape or a click anywhere else clears it. Once per element: a popup re-renders into the same one.
+  if (!box._vetoKeys) {
+    box._vetoKeys = 1;
+    box.addEventListener('keydown', e => { if (e.key === 'Escape' && _vetoArmed) { _vetoArmed = null; const p = box._vetoPaint; if (p) p(); } });
+    box.addEventListener('click', e => {
+      if (e.target.closest('[data-veto-map], [data-veto-bar]') || !_vetoArmed) return;
+      _vetoArmed = null; const p = box._vetoPaint; if (p) p();
+    });
+  }
+  box._vetoPaint = paint;
   box.querySelectorAll('[data-veto-seta]').forEach(btn => {
     btn.onclick = async () => {
       const teamA = btn.dataset.team;
@@ -1600,7 +1660,7 @@ function wireVeto(box, m) {
   });
   const undo = box.querySelector('[data-veto-undo]');
   if (undo) undo.onclick = async () => {
-    try { await api('/api/t/' + T.id + '/veto_undo', { matchId: m.id, admin: adminToken() }); await refresh(); }
+    try { await api('/api/t/' + T.id + '/veto_undo', { matchId: m.id, admin: adminToken() }); _vetoArmed = null; await refresh(); }
     catch (e) { toast(e.message, true); }
   };
 }
@@ -3147,7 +3207,7 @@ function showMatchDetails(m) {
     </div>`, root => {
     // ban/pick history, hidden while masked so a caster doesn't spoil the maps
     const vh = root.querySelector('#mdVeto');
-    if ((m.veto || m.fveto) && !masked) { vh.innerHTML = vetoHTML(m); wireVeto(vh, m); wireFactionVeto(vh); }
+    if ((m.veto || m.fveto) && !masked) renderVetoInto(vh, m, '');
     else if ((m.veto || m.fveto) && masked) vh.innerHTML = '<div class="muted small" style="margin-top:10px">Veto hidden by streamer mode.</div>';
     root.querySelectorAll('[data-teamid]').forEach(n => n.onclick = (e) => {
       e.preventDefault(); closeModal(); showTeamPopup(n.dataset.teamid);
@@ -3176,13 +3236,13 @@ function showMatchDetails(m) {
 }
 
 // ---------- faction veto (1v1) ----------
-// Rendered per game slot, to the right of the map that game will be played on. Runs in parallel
-// with the map veto and independently of it: your own choices are the only ones you can ever see,
-// because the server strips the opponent's out of the payload until both sides are finished.
-// Pending "click again to confirm" state. Held at module level rather than inside the wiring
+// Rendered per game slot, to the right of the map that game will be played on. Since decision 55
+// it follows the map veto, one game at a time: your own choices are the only ones you can ever
+// see, because the server strips the opponent's out of the payload until both sides are finished.
+// A choice marked but not yet confirmed. Held at module level rather than inside the wiring
 // functions so the 4-second poll redraw re-applies it instead of silently cancelling it.
-let _vetoArmed = null;    // { matchId, map }
-let _fvetoArmed = null;   // { matchId, game, faction }
+let _vetoArmed = null;    // { matchId, map, step }
+let _fvetoArmed = null;   // { matchId, game, act, index, faction }
 
 const FACTION_META = {
   uef:      { label: 'UEF',      short: 'U', cls: 'uef' },
@@ -3199,7 +3259,9 @@ function factionChip(f, opts) {
   const cls = ['fchip', 'f-' + meta.cls];
   if (o.dim) cls.push('dim');
   if (o.on) cls.push('on');
+  if (o.banned) cls.push('fchip-ban');    // your own ban: taken from your opponent, not from you
   if (o.btn) cls.push('clickable');
+  if (o.btn && o.act) cls.push('act-' + o.act);
   const attrs = o.btn ? ` data-fpick="${esc(f)}" data-fgame="${esc(String(o.game))}" data-fmatch="${esc(o.matchId)}"` : '';
   const title = o.title ? ` title="${esc(o.title)}"` : ` title="${esc(meta.label)}"`;
   return `<button type="button" class="${cls.join(' ')}"${attrs}${title}${o.btn ? '' : ' disabled'}><span class="fchip-glyph">${meta.short}</span><span class="fchip-name">${esc(meta.label)}</span></button>`;
@@ -3282,6 +3344,14 @@ function factionGameHTML(m, gameNum) {
     </div>`;
   }
 
+  // Not open yet (decision 55): the factions come after the whole map veto, one game at a time.
+  if (g.open === 0 && !settled) {
+    const prev = Number(gameNum) - 1;
+    return `<div class="fveto-col"><div class="fveto-wait fv-later">${g.wait === 'maps'
+      ? 'After the map veto'
+      : (Number(g.wait) === prev ? 'Next, once game ' + prev + '\u2019s factions are done' : 'After game ' + prev)}</div></div>`;
+  }
+
   // Not a competitor (organizer, caster, spectator): only who still owes choices.
   if (!mySide || !g.mine) {
     const pend = [];
@@ -3290,98 +3360,125 @@ function factionGameHTML(m, gameNum) {
     return `<div class="fveto-col">
       <div class="fveto-wait">${pend.length
         ? 'Waiting on ' + pend.map(esc).join(' and ')
-        : 'Both done \u2014 resolving\u2026'}</div>
+        : 'Both done - resolving\u2026'}</div>
     </div>`;
   }
 
   const mine = g.mine;
   const oppDone = mySide === 't1' ? g.t2Done : g.t1Done;
+  // What you have chosen so far, said in words: a struck-through chip read as "not available to
+  // you", while banning a faction only takes it away from your opponent.
+  const soFar = (mine.bans.length || mine.picks.length) ? '<div class="fveto-sofar">'
+    + (mine.bans.length ? '<span class="fv-lbl">You banned</span>' + mine.bans.map(f => factionChip(f, { banned: true, title: 'You banned ' + FACTION_META[f].label + ': your opponent cannot play it' })).join('') : '')
+    + (mine.picks.length ? '<span class="fv-lbl">Your picks</span>' + mine.picks.map((f, i) => '<span class="fv-ord">' + (i + 1) + '.</span>' + factionChip(f, { on: true, title: 'Your pick ' + (i + 1) })).join('') : '')
+    + '</div>' : '';
 
   // Mine finished, opponent not.
   if (mine.done) {
     return `<div class="fveto-col">
-      <div class="fveto-wait">${oppDone ? 'Resolving\u2026' : '\u2713 You\u2019re done \u2014 waiting on your opponent'}</div>
-      <div class="fveto-mine">${mine.bans.map(f => factionChip(f, { dim: true, title: 'You banned ' + FACTION_META[f].label })).join('')}
-        <span class="fv-arrow">\u2192</span>
-        ${mine.picks.map((f, i) => factionChip(f, { on: true, title: 'Your pick ' + (i + 1) })).join('')}</div>
+      <div class="fveto-wait">${oppDone ? 'Resolving\u2026' : '\u2713 You\u2019re done - waiting on your opponent'}</div>
+      ${soFar}
     </div>`;
   }
 
-  if (settled) return '<div class="fveto-col"><div class="fveto-wait">Match decided \u2014 faction veto closed.</div></div>';
+  if (settled) return '<div class="fveto-col"><div class="fveto-wait">Match decided - faction veto closed.</div></div>';
 
-  // My turn: banning or picking.
+  // My turn: banning or picking, in the colour of the action, for this one game. The chips mark
+  // a choice; the button under them names it ("Ban Cybran", "Pick Cybran as your 1st choice") and
+  // is the only thing that sends it (wireFactionVeto).
   const step = g.next;
   if (!step) return '';
   const ord = n => n === 1 ? '1st' : n === 2 ? '2nd' : n === 3 ? '3rd' : n + 'th';
   const banning = step.action === 'ban';
+  const act = banning ? 'ban' : 'pick';
   // Already-used factions grey out: you can't ban the same one twice, or pick it twice. Banning a
   // faction you also pick is allowed - a ban denies it to your opponent, not to you.
   const used = banning ? mine.bans : mine.picks;
   const chips = FACTION_ORDER.map(f => used.indexOf(f) >= 0
     ? factionChip(f, { dim: true, title: banning ? 'Already banned' : 'Already picked' })
-    : factionChip(f, { btn: true, game: gameNum, matchId: m.id })).join('');
-  const soFar = (mine.bans.length ? '<div class="fveto-mine">' + mine.bans.map(f => factionChip(f, { dim: true, title: 'You banned ' + FACTION_META[f].label })).join('') + '</div>' : '')
-    + (mine.picks.length ? '<div class="fveto-mine">' + mine.picks.map((f, i) => factionChip(f, { on: true, title: 'Your pick ' + (i + 1) })).join('') + '</div>' : '');
-  // "1st faction to ban (1/1)" read like a status line, not a job. It is now an explicit
-  // YOUR TURN pill with the same pulsing dot the tournament-wide turn banner uses, so the one
-  // thing on this screen that needs the player's hands looks like it.
-  return `<div class="fveto-col active">
+    : factionChip(f, { btn: true, act, game: gameNum, matchId: m.id })).join('');
+  const which = banning
+    ? (step.of > 1 ? ' <span class="fv-which">' + ord(step.index) + ' of ' + step.of + '</span>' : '')
+    : ' <span class="fv-which">your ' + ord(step.index) + ' choice' + (step.of > 1 ? ' of ' + step.of : '') + '</span>';
+  return `<div class="fveto-col active fv-${act}">
     <div class="fveto-turn"><span class="turn-dot"></span>Your turn</div>
-    <div class="fveto-prompt">${banning ? 'Ban a faction' : 'Pick a faction'}${step.of > 1 ? '<span class="muted small"> \u2014 ' + ord(step.index) + ' of ' + step.of + '</span>' : ''}</div>
+    <div class="fveto-prompt"><span class="veto-act veto-act-${act}">${act.toUpperCase()}</span> a faction for game ${esc(String(gameNum))}${which}</div>
     <div class="fveto-chips">${chips}</div>
+    <div class="veto-confirm fv-confirm" data-fv-bar="${esc(m.id)}:${esc(String(gameNum))}" data-fv-act="${act}" data-fv-index="${step.index}"></div>
     ${soFar}
-    <div class="fveto-note muted small">${banning ? 'Bans deny that faction to your opponent.' : 'Picks are in order of preference \u2014 you get the highest one your opponent didn\u2019t ban.'} Nobody can see your choices.</div>
+    <div class="fveto-note muted small">${banning ? 'Your ban takes that faction away from your opponent.' : 'Picks are in order of preference: you play the highest one your opponent did not ban.'} Nobody sees your choices until you are both done.</div>
   </div>`;
 }
 
-// Wire the faction buttons inside a card body.
+// Wire the faction buttons inside a card body: choose, then confirm with the named button, as for
+// the map veto (decision 55). The old confirm was a second click on the same chip, and while it
+// waited the prompt said "Click Cybran again to confirm (or pick another)" - the word BAN was gone
+// from the screen at the very moment of confirming, and "pick another" said the opposite.
 function wireFactionVeto(root) {
-  const chips = Array.from(root.querySelectorAll('[data-fpick]'));
-  if (!chips.length) return;
-  // Same two-click confirm as the map veto. A faction choice is irreversible for the player
-  // (only an organizer can reset it), so a stray click matters more here, not less.
-  const paint = () => {
-    for (const b of chips) {
-      const armed = _fvetoArmed && _fvetoArmed.matchId === b.dataset.fmatch
-        && _fvetoArmed.game === b.dataset.fgame && _fvetoArmed.faction === b.dataset.fpick;
-      b.classList.toggle('armed', !!armed);
-    }
-    // The chips are too small for an inline label, so the prompt above them does the talking.
-    const col = root.querySelector('.fveto-col.active .fveto-prompt');
-    if (!col) return;
-    if (!col.dataset.orig) col.dataset.orig = col.innerHTML;
-    if (_fvetoArmed && chips.some(b => b.dataset.fmatch === _fvetoArmed.matchId && b.dataset.fgame === _fvetoArmed.game)) {
-      const meta = FACTION_META[_fvetoArmed.faction];
-      col.innerHTML = 'Click <strong>' + esc(meta ? meta.label : _fvetoArmed.faction) + '</strong> again to confirm'
-        + ' <span class="muted small">(or pick another / press Esc)</span>';
-    } else {
-      col.innerHTML = col.dataset.orig;
-    }
-  };
-  for (const b of chips) {
-    b.onclick = async () => {
-      const same = _fvetoArmed && _fvetoArmed.matchId === b.dataset.fmatch
-        && _fvetoArmed.game === b.dataset.fgame && _fvetoArmed.faction === b.dataset.fpick;
-      if (!same) {
-        _fvetoArmed = { matchId: b.dataset.fmatch, game: b.dataset.fgame, faction: b.dataset.fpick };
-        paint();
+  const bars = Array.from(root.querySelectorAll('[data-fv-bar]'));
+  for (const bar of bars) {
+    const col = bar.closest('.fveto-col');
+    if (!col) continue;
+    const [matchId, game] = bar.dataset.fvBar.split(':');
+    const act = bar.dataset.fvAct;
+    const index = bar.dataset.fvIndex;
+    const chips = Array.from(col.querySelectorAll('[data-fpick]'));
+    // a mark belongs to one step of one game: the next ban or pick starts unmarked
+    const armed = () => (_fvetoArmed && _fvetoArmed.matchId === matchId && _fvetoArmed.game === game
+      && _fvetoArmed.act === act && _fvetoArmed.index === index
+      && chips.some(c => c.dataset.fpick === _fvetoArmed.faction)) ? _fvetoArmed.faction : null;
+    let busy = false;
+    const ord = n => n === '1' ? '1st' : n === '2' ? '2nd' : n === '3' ? '3rd' : n + 'th';
+    const paint = () => {
+      const f = armed();
+      for (const c of chips) c.classList.toggle('armed', c.dataset.fpick === f);
+      if (!f) {
+        bar.classList.remove('on');
+        bar.innerHTML = '<span class="veto-confirm-idle">Click a faction to ' + (act === 'ban' ? 'ban it' : 'pick it as your ' + ord(index) + ' choice') + '. Nothing is sent until you confirm.</span>';
         return;
       }
+      const meta = FACTION_META[f];
+      bar.classList.add('on');
+      bar.innerHTML = '<button type="button" class="btn veto-go veto-go-' + act + '" data-fv-go>'
+        + (act === 'ban' ? '\u2715 Ban ' + esc(meta.label) : '\u2713 Pick ' + esc(meta.label) + ' as your ' + ord(index) + ' choice') + '</button>'
+        + '<button type="button" class="btn ghost small" data-fv-cancel>Cancel</button>';
+      bar.querySelector('[data-fv-go]').onclick = () => commit(f);
+      bar.querySelector('[data-fv-cancel]').onclick = () => { _fvetoArmed = null; paint(); };
+    };
+    const commit = async (f) => {
+      if (busy) return;
+      busy = true;
       chips.forEach(x => { x.disabled = true; });
+      const go = bar.querySelector('[data-fv-go]');
+      if (go) go.disabled = true;
       try {
-        await api('/api/t/' + T.id + '/fveto_action', {
-          matchId: b.dataset.fmatch, game: parseInt(b.dataset.fgame, 10),
-          faction: b.dataset.fpick, token: viewToken()
-        });
+        await api('/api/t/' + T.id + '/fveto_action', { matchId, game: parseInt(game, 10), faction: f, token: viewToken() });
         _fvetoArmed = null;
         await refresh();
       } catch (e) {
+        busy = false;
         chips.forEach(x => { x.disabled = false; });
         _fvetoArmed = null; paint();
         toast(e.message, true);
       }
     };
+    for (const c of chips) {
+      c.onclick = () => {
+        if (busy) return;
+        _fvetoArmed = { matchId, game, act, index, faction: c.dataset.fpick };
+        paint();
+      };
+    }
+    paint();   // survives the 4s poll redraw: re-applied from module state, not rebuilt from scratch
+    col._fvPaint = paint;
   }
-  root.addEventListener('keydown', e => { if (e.key === 'Escape' && _fvetoArmed) { _fvetoArmed = null; paint(); } });
-  paint();   // survives the 4s poll redraw: re-applied from module state, not rebuilt from scratch
+  // Escape clears a mark. Once per element: a popup re-renders into the same one.
+  if (!root._fvKeys) {
+    root._fvKeys = 1;
+    root.addEventListener('keydown', e => {
+      if (e.key !== 'Escape' || !_fvetoArmed) return;
+      _fvetoArmed = null;
+      root.querySelectorAll('.fveto-col').forEach(c => { if (c._fvPaint) c._fvPaint(); });
+    });
+  }
 }

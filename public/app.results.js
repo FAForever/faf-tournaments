@@ -2420,6 +2420,8 @@ function redrawInPlace() {
   if (y && currentTab === tab && Math.abs((window.scrollY || 0) - y) > 1) {
     try { window.scrollTo(0, y); } catch (e) {}
   }
+  // a veto open in a popup follows the new data too (decision 55)
+  if (typeof refreshLiveVetoes === 'function') refreshLiveVetoes();
 }
 
 function syncTabURL() {
