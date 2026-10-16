@@ -125,6 +125,8 @@ function approverBoxHTML(P) {
   else if (!P.canApprove) {
     action = '<p class="warn small" style="margin:0">' + (P.why === 'requested'
       ? 'You requested this yourself, so another tournament director has to approve it.'
+      : P.why === 'took'
+        ? 'You took this proposal over, so a second tournament director has to approve publishing it.'
       : P.why === 'edited'
         ? 'You changed this tournament yourself, so another tournament director has to approve it.'
         : P.why === 'new'
@@ -219,6 +221,7 @@ function drawSaApprovals(el) {
   const state = (t) => t.stale ? '<span class="idbadge pubchip pub-warn">changed since requested</span>'
     : t.can ? '<a href="/t/' + esc(t.id) + '" data-link class="btn small primary">Review</a>'
     : t.why === 'requested' ? '<span class="muted small">you requested it</span>'
+    : t.why === 'took' ? '<span class="muted small">you took it over (a proposal)</span>'
     : t.why === 'edited' ? '<span class="muted small">you wrote part of it</span>'
     : t.why === 'new' ? '<span class="muted small" title="New tournament directors and site admins wait 3 days before they can approve">you can approve from ' + esc(fmtDateTime(t.from)) + '</span>'
     : '<span class="muted small">-</span>';

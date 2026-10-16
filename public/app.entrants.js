@@ -1851,7 +1851,7 @@ function openStartConfig() {
       <p class="muted small">${n} entrants → round 1 gets ${Math.ceil(n / T.ffaCfg.perMatch)} lobb${Math.ceil(n / T.ffaCfg.perMatch) === 1 ? 'y' : 'ies'} of up to ${T.ffaCfg.perMatch}. ${T.ffaCfg.advance === 2 ? 'Top 2 advance from each lobby.' : 'Winners advance.'}</p>
       <div class="actions"><button class="btn ghost" id="cfgCancel">Cancel</button><button class="btn primary" id="cfgGo">Start</button></div>`,
       root => {
-        root.querySelector('#cfgCancel').onclick = closeModal;
+        root.querySelector('#cfgCancel').onclick = closeModal; if (typeof lockStartDialog === 'function') lockStartDialog(root);
         root.querySelector('#cfgGo').onclick = () => start({});
       });
   }
@@ -1886,7 +1886,7 @@ function openStartConfig() {
       </label>` : ''}
       <div class="actions"><button class="btn ghost" id="cfgCancel">Cancel</button><button class="btn primary" id="cfgGo">Generate bracket</button></div>`,
       root => {
-        root.querySelector('#cfgCancel').onclick = closeModal;
+        root.querySelector('#cfgCancel').onclick = closeModal; if (typeof lockStartDialog === 'function') lockStartDialog(root);
         root.querySelector('#cfgGo').onclick = () => {
           const rounds = [];
           for (let r = 1; r <= R; r++) rounds.push(parseInt(root.querySelector('#bo_r' + r).value, 10));
@@ -1925,7 +1925,7 @@ function openStartConfig() {
       </label>
       <div class="actions"><button class="btn ghost" id="cfgCancel">Cancel</button><button class="btn primary" id="cfgGo">Generate bracket</button></div>`,
       root => {
-        root.querySelector('#cfgCancel').onclick = closeModal;
+        root.querySelector('#cfgCancel').onclick = closeModal; if (typeof lockStartDialog === 'function') lockStartDialog(root);
         root.querySelector('#cfgGo').onclick = () => {
           const wb = [], lb = [];
           for (let r = 1; r <= R; r++) wb.push(parseInt(root.querySelector('#bo_wb' + r).value, 10));
@@ -1986,7 +1986,7 @@ function openStartConfig() {
     root => {
       const fin = root.querySelector('#swFinal');
       fin.onchange = () => { root.querySelector('#swFinalBoWrap').style.display = fin.checked ? '' : 'none'; };
-      root.querySelector('#cfgCancel').onclick = closeModal;
+      root.querySelector('#cfgCancel').onclick = closeModal; if (typeof lockStartDialog === 'function') lockStartDialog(root);
       root.querySelector('#cfgGo').onclick = () => {
         const cfg = {
           rounds: parseInt(root.querySelector('#swRounds').value, 10) || defR,

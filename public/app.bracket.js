@@ -774,7 +774,9 @@ function drawMaps(el) {
     }
   }
 
-  el.innerHTML = adminHead + poolsHtml + mapsHtml;
+  // what the proposer of this tournament asked to keep (decision 59)
+  const propLock = (admin && typeof proposalLockNoticeHTML === 'function') ? proposalLockNoticeHTML('maps') : '';
+  el.innerHTML = propLock + adminHead + poolsHtml + mapsHtml;
 
   const addBtn = document.getElementById('mapAdd');
   if (addBtn) addBtn.onclick = () => editMapEntry(null);

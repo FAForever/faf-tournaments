@@ -34,6 +34,7 @@ const PRED = require('./lib/predict');
 // Per-day start times of a multi-day event, and moving an event by whole days.
 const SCHED = require('./lib/schedule');
 const LINKS = require('./lib/links');
+const LIVE = require('./lib/livestreams');
 const { swissPairRound, swissAfterReport, swissStandings,
         swissCuts, swissCutRounds, swissRecord, swissAdvanced, swissPlanRound1, swissShufflePlan,
         stageTwoCfg, stageTwoField, stageTwoBuild, swissStageDone, swissFinishIfDone,
@@ -523,6 +524,39 @@ function checkInOpenNow(t) {
 // Headline prize: a currency plus a plain number, kept separate from the free-text rewards so it
 // can be shown on its own and reused elsewhere (calendars, listings).
 const PRIZE_CURRENCIES = ['USD', 'EUR', 'RUB'];
+// ---------- rewards by place (decision 58) ----------
+// One row per place: the place (1, 2, 3, or a label such as 5-8 or MVP), the reward, and the cash
+// for it. The Overview draws them like a podium: a medal-coloured place, the reward, the cash on
+// the right. The free-text Rewards stays for everything else. Plain text only: no links, no markdown.
+const PLACE_MAX = 16;
+function cleanPlaceLabel(v) {
+  const s = String(v == null ? '' : v).replace(/[<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 12);
+  let m = /^#?\s*(\d{1,3})\s*(?:st|nd|rd|th|\.)?(?:\s*place)?$/i.exec(s);
+  if (m) return String(parseInt(m[1], 10));
+  m = /^(\d{1,3})\s*(?:st|nd|rd|th)?\s*[-\u2013]\s*(\d{1,3})\s*(?:st|nd|rd|th)?$/i.exec(s);
+  if (m) return parseInt(m[1], 10) + '-' + parseInt(m[2], 10);
+  return s;
+}
+// { rows, error }: every row needs its place, and cash is a number (or empty).
+function cleanRewardPlaces(v) {
+  if (v === null || v === '' || v === undefined) return { rows: [], error: null };
+  if (!Array.isArray(v)) return { rows: [], error: 'Rewards by place must be a list' };
+  if (v.length > PLACE_MAX) return { rows: [], error: 'At most ' + PLACE_MAX + ' places' };
+  const rows = [];
+  for (const r of v) {
+    if (!r || typeof r !== 'object') continue;
+    const place = cleanPlaceLabel(r.place);
+    const text = cleanName(r.text || '', 200) || '';
+    const raw = (r.amount === '' || r.amount === null || r.amount === undefined) ? null : r.amount;
+    const a = raw === null ? null : Number(raw);
+    if (raw !== null && (!isFinite(a) || a < 0 || a > 10000000)) return { rows: [], error: 'The cash for place ' + (place || '?') + ' must be a number' };
+    if (!text && a === null) continue;   // an empty row (a place number alone says nothing)
+    if (!place) return { rows: [], error: 'Every reward needs its place (1, 2, 3, or a label like 5-8)' };
+    rows.push({ place, text, amount: a === null ? null : Math.round(a * 100) / 100 });
+  }
+  return { rows, error: null };
+}
+function cleanRewardCur(c) { const u = String(c || '').toUpperCase(); return PRIZE_CURRENCIES.indexOf(u) >= 0 ? u : null; }
 function cleanPrize(cur, amt) {
   const c = PRIZE_CURRENCIES.indexOf(String(cur || '').toUpperCase()) >= 0 ? String(cur).toUpperCase() : null;
   const n = (amt === '' || amt === null || amt === undefined) ? null : Number(amt);
@@ -1425,6 +1459,9 @@ function contentFp(t) {
     divisions: t.divisionNames || null,
     predictPrize: (t.predict && t.predict.prize) || ''
   };
+  // Added only when present, so a tournament without them keeps the fingerprint it had: a pending
+  // request must not turn stale because the server was updated.
+  if (Array.isArray(t.rewardPlaces) && t.rewardPlaces.length) pick.places = [t.rewardCur || '', t.rewardPlaces.map(r => [r.place, r.text, r.amount])];
   return crypto.createHash('sha256').update(JSON.stringify(pick)).digest('hex').slice(0, 24);
 }
 // Every account that changed what the public will read while this was a draft. The creator is
@@ -1462,6 +1499,8 @@ function approveBlocker(t, req) {
   const r = t.publishReq;
   if (!r) return 'none';
   if (String(r.by) === String(sess.fafId)) return 'requested';
+  // a proposal's TD (decision 59): taking it over was their yes, publishing needs a second one
+  if (t.proposal && t.proposal.state === 'taken' && String(t.proposal.takenBy) === String(sess.fafId)) return 'took';
   if (t.contentEditors && t.contentEditors[sess.fafId]) return 'edited';
   if (approverFrom(req)) return 'new';
   return null;
@@ -1511,6 +1550,209 @@ function approvableFor(req) {
   if (!APPROVALS_ON || !isApprover(req)) return [];
   return Object.values(db.tournaments).filter(t => !t.archived && t.published === false && t.publishReq
     && !approveBlocker(t, req) && t.publishReq.fp === contentFp(t));
+}
+
+// ---------- tournament proposals (decision 59) ----------
+// Anyone with a FAF account can PROPOSE a tournament: build it like any other (format, rating
+// limits, maps, mods, rewards) as a draft, then send it to the TD team. A tournament director takes
+// it over ("I will TD this") or declines it with a reason; when nobody has within the timeout (28
+// days unless the TD team set another), it comes back to the proposer as well. Taken over, it is
+// that director's to run, and it still needs a SECOND director to approve publishing (decision 51):
+// the one who took it over cannot. While it waits nothing in it can change, so what a director
+// reads is what they take over. The proposer can ask that the maps and/or the format stay as
+// proposed; only they (or a site admin, with a reason) can lift that afterwards.
+//   t.proposal = { by, byName, at, state: 'draft' | 'proposed' | 'taken', proposedAt,
+//     lockMaps, lockFormat (1 = the TD may not change them), keep (1 = the proposer stays an
+//     organizer after the takeover), note (to the TD team), takenBy, takenByName, takenAt,
+//     takeNote, prevOrganizers, last: { act, by, byName, at, reason }, history: [...] }
+const PROPOSALS_ON = FAF_OAUTH_ON;
+const PROPOSAL_DAYS = 28;
+const PROPOSAL_MAX_OPEN = 5;
+// what a proposal waiting for the TD team still accepts (everything else changes it)
+const PROPOSAL_OPEN_SUBS = ['proposal_withdraw', 'proposal_take', 'proposal_decline', 'news_read', 'check_rating', 'faf_lookup', 'check_renames'];
+// what the proposer's locks cover once a TD runs it: the settings, not running the event
+const PROPOSAL_MAP_SUBS = ['map_save', 'map_delete', 'map_secret', 'pool_save', 'pool_delete', 'pool_assign', 'copy_maps', 'pool_copy_sequence', 'set_maps', 'fveto_config'];
+const PROPOSAL_FORMAT_SUBS = ['edit_format', 'set_plan_round_bo', 'set_round_bo', 'set_match_bo', 'third_place', 'playoff_setup', 'set_stop_at'];
+function proposalDays() {
+  const d = parseInt(db.proposalCfg && db.proposalCfg.days, 10);
+  return (d >= 7 && d <= 90) ? d : PROPOSAL_DAYS;
+}
+function proposalDeadline(t) {
+  const p = t && t.proposal;
+  return (p && p.state === 'proposed') ? (Number(p.proposedAt) || 0) + proposalDays() * 86400000 : null;
+}
+function isProposer(t, req) {
+  const sess = currentSession(req);
+  return !!(t && t.proposal && sess && sess.fafId && String(sess.fafId) === String(t.proposal.by));
+}
+function propWho(req) {
+  const sess = currentSession(req);
+  return (sess && sess.fafId) ? { by: sess.fafId, byName: sess.fafName || ('FAF ' + sess.fafId) } : { by: null, byName: 'System' };
+}
+function propHistory(t, act, who, reason, at) {
+  const p = t.proposal;
+  p.history = Array.isArray(p.history) ? p.history : [];
+  p.history.push({ act, by: who.by, byName: who.byName, at: at || Date.now(), reason: reason || '' });
+  if (p.history.length > 30) p.history = p.history.slice(-30);
+}
+// Proposals nobody took over in time go back to their proposer. No timer, like scheduled
+// publishing: applied whenever tournaments are listed or opened.
+function sweepProposals() {
+  if (!PROPOSALS_ON) return false;
+  const now = Date.now();
+  let changed = false;
+  for (const t of Object.values(db.tournaments)) {
+    const p = t.proposal;
+    if (!p || p.state !== 'proposed' || t.archived) continue;
+    const until = proposalDeadline(t);
+    if (until === null || now < until) continue;
+    const reason = 'no tournament director took it over within ' + proposalDays() + ' days';
+    p.state = 'draft';
+    p.last = { act: 'timeout', by: null, byName: 'System', at: until, reason };
+    propHistory(t, 'timeout', { by: null, byName: 'System' }, reason, until);
+    audit(null, 'proposal_timeout', { tournamentId: t.id, tournamentName: t.name, actor: { kind: 'system', fafId: null, name: 'Timeout' },
+      detail: 'back to ' + p.byName + ': ' + reason });
+    changed = true;
+  }
+  if (changed) saveDB();
+  return changed;
+}
+// Why the proposer's lock refuses this change, or null. Binds everyone but the proposer.
+function proposalLockRefusal(t, req, area) {
+  const p = t && t.proposal;
+  if (!p || p.state !== 'taken') return null;
+  if (area === 'maps' ? !p.lockMaps : !p.lockFormat) return null;
+  if (isProposer(t, req)) return null;
+  return area === 'maps'
+    ? p.byName + ' proposed this tournament and asked that its maps, map pools and vetoes stay as proposed. Only they can lift that (Proposal box above the tabs), or a site admin.'
+    : p.byName + ' proposed this tournament and asked that its format stay as proposed: bracket type, team size, match lengths, divisions, 3rd place, the playoff and early-end settings. Only they can lift that (Proposal box above the tabs), or a site admin.';
+}
+// The start dialog's lengths, from the plan, for a format the proposer locked: the same defaults
+// the dialog offers, so the bracket that starts is the one that was proposed.
+function planStartConfig(t) {
+  const n = (t.teams || []).length;
+  const p = t.plan || {};
+  const divs = divisionsOn(t) ? t.divisions : 0;
+  const R = log2i(nextPow2(divs ? largestDivision(t, divs) : n));
+  const per = !!t.perRoundBo;
+  const at = (list, i, fb) => (per && Array.isArray(list) && list[i] != null) ? list[i] : fb;
+  if (t.bracketType === 'single') {
+    const rounds = [];
+    for (let r = 1; r <= R; r++) rounds.push(at(p.roundsList, r - 1, r === R ? (p.final || 5) : r === R - 1 ? (p.semi || 3) : (p.early || 3)));
+    return { rounds, thirdPlace: p.thirdPlace ? 1 : 0 };
+  }
+  if (t.bracketType === 'double') {
+    const wb = [], lb = [];
+    const lbR = 2 * R - 2;
+    for (let r = 1; r <= R; r++) wb.push(at(p.wbList, r - 1, r === R ? (p.wbFinal || 3) : (p.wb || 3)));
+    for (let q = 1; q <= lbR; q++) lb.push(at(p.lbList, q - 1, q === lbR ? (p.lbFinal || 3) : (p.lb || 3)));
+    return { wb, lb, gf: p.gf || 5, lbHandicap: (t.plan && !t.plan.lbHandicap) ? 0 : 1 };
+  }
+  const cutsOn = !!(p.winCut || p.lossCut);
+  const c = { rounds: Math.max(1, R), bo: p.bo === 1 ? 1 : 3, final: p.stage2 ? 0 : (p.final === 0 ? 0 : 1), finalBo: p.finalBo || 5, fast: cutsOn ? 0 : (p.fast ? 1 : 0) };
+  if (cutsOn) { c.winCut = p.winCut; c.lossCut = p.lossCut; c.decidingBo = parseInt(p.decidingBo, 10) || 0; }
+  if (p.stage2) {
+    c.stage2 = 1; c.s2CutTo = parseInt(p.s2CutTo, 10) || 8; c.s2Type = p.s2Type || 'single';
+    c.s2Bo = parseInt(p.s2Bo, 10) || 3; c.s2Final = parseInt(p.s2Final, 10) || 5; c.s2Gf = parseInt(p.s2Gf, 10) || 5; c.s2Third = p.s2Third ? 1 : 0;
+  }
+  return c;
+}
+// Open proposals (a draft or waiting) of one account, for the limit.
+function openProposalsOf(fid, states) {
+  return Object.values(db.tournaments).filter(t => t.proposal && !t.archived && t.published === false
+    && String(t.proposal.by) === String(fid) && (states || ['draft', 'proposed']).indexOf(t.proposal.state) >= 0).length;
+}
+// For the page: where the proposal stands and what this viewer may do with it. The public only
+// gets the credit, once it is published.
+function proposalView(t, req, organizer) {
+  const p = t.proposal;
+  if (!p) return undefined;
+  const sess = currentSession(req);
+  const fid = sess && sess.fafId;
+  const mine = !!(fid && String(fid) === String(p.by));
+  const named = namedOrganizer(t, req);
+  const approver = PROPOSALS_ON && isApprover(req);
+  if (!organizer && !mine && !approver) return (t.published !== false && p.state === 'taken') ? { credit: p.byName } : undefined;
+  return {
+    state: p.state, byName: p.byName, at: p.at || null, proposedAt: p.proposedAt || null, until: proposalDeadline(t), days: proposalDays(),
+    lockMaps: p.lockMaps ? 1 : 0, lockFormat: p.lockFormat ? 1 : 0, keep: p.keep ? 1 : 0, note: p.note || '',
+    takenByName: p.takenByName || null, takenAt: p.takenAt || null, takeNote: p.takeNote || '',
+    last: p.last ? { act: p.last.act, byName: p.last.byName, at: p.last.at, reason: p.last.reason || '' } : null,
+    history: (p.history || []).map(h => ({ act: h.act, byName: h.byName, at: h.at, reason: h.reason || '' })),
+    mine: mine ? 1 : 0, organizer: named ? 1 : 0,
+    canSubmit: (PROPOSALS_ON && named && p.state === 'draft' && t.published === false) ? 1 : 0,
+    canWithdraw: ((named || mine) && p.state === 'proposed') ? 1 : 0,
+    canDecide: (approver && p.state === 'proposed' && !mine && !named) ? 1 : 0,
+    canDrop: (named && p.state === 'draft' && canHost(req)) ? 1 : 0,
+    canRelease: (p.state === 'taken' && t.published === false && t.status === 'signup' && ((organizer && approver) || isSiteAdmin(req))) ? 1 : 0,
+    canUnlock: (p.state === 'taken' && (p.lockMaps || p.lockFormat) && (mine || isSiteAdmin(req))) ? 1 : 0,
+    credit: p.byName
+  };
+}
+// One row of the home page list.
+function proposalListState(t, ctx) {
+  const p = t.proposal;
+  const mine = !!(ctx && ctx.fid && String(ctx.fid) === String(p.by));
+  const named = !!(ctx && ctx.fid && (t.organizerFafIds || []).indexOf(ctx.fid) >= 0);
+  return { s: p.state, by: p.byName, at: p.proposedAt || p.at || 0, until: proposalDeadline(t), taken: p.takenByName || null,
+    last: p.last ? { act: p.last.act, at: p.last.at } : null, mine: mine ? 1 : 0,
+    can: (p.state === 'proposed' && ctx && (ctx.siteAdmin || ctx.director) && !mine && !named) ? 1 : 0 };
+}
+// What a director reads before deciding (the console's Proposals tab). Map pools included: a
+// proposal is reviewed as a whole, so directors see its maps while it waits.
+function proposalSummary(t, fid) {
+  const p = t.proposal;
+  const mapName = id => { const m = (t.mapDb || []).find(x => x.id === id); return m ? m.name : '?'; };
+  const cut = (s, n) => { s = String(s || ''); return s.length > n ? s.slice(0, n) + '...' : s; };
+  return {
+    id: t.id, name: t.name, by: p.byName, proposedAt: p.proposedAt || null, until: proposalDeadline(t), note: p.note || '',
+    lockMaps: p.lockMaps ? 1 : 0, lockFormat: p.lockFormat ? 1 : 0, keep: p.keep ? 1 : 0,
+    mine: (fid && (String(fid) === String(p.by) || (t.organizerFafIds || []).indexOf(fid) >= 0)) ? 1 : 0,
+    competition: t.competition, teamSize: t.teamSize, formation: t.formation, bracketType: t.bracketType, plan: t.plan || null,
+    ffaCfg: t.ffaCfg || null, divisions: t.divisions || 0, divisionNames: t.divisionNames || null, stopAtAlive: t.stopAtAlive || 0,
+    pickOpponents: t.pickOpponents ? 1 : 0, pickMode: t.pickMode || null, tiebreak: t.tiebreak || null, seeding: t.seeding,
+    eventDate: t.eventDate || null, eventDays: (t.eventDays && t.eventDays.length) ? t.eventDays.slice() : null,
+    signupMode: t.signupMode || 'open', maxTeams: t.maxTeams || 0, minTeams: t.minTeams || 0, checkInDeadline: t.checkInDeadline || null,
+    ratingType: t.ratingType || 'global', minRating: t.minRating != null ? t.minRating : null, maxRating: t.maxRating != null ? t.maxRating : null,
+    maxTeamRating: t.maxTeamRating != null ? t.maxTeamRating : null, ratingCap: t.ratingCap != null ? t.ratingCap : null,
+    playerReporting: t.playerReporting === false ? 0 : 1,
+    veto: t.veto && t.veto.enabled ? { mode: t.veto.mode || 'upfront', abMode: t.veto.abMode || 'lowerA' } : null,
+    fveto: t.fveto && t.fveto.enabled ? { bans: t.fveto.bans, picks: t.fveto.picks } : null,
+    maps: (t.mapDb || []).length,
+    pools: (t.mapPools || []).map(pl => ({ name: pl.name || 'Pool', bo: pl.bo || 1, published: pl.published ? 1 : 0, maps: (pl.mapIds || []).map(mapName) })),
+    mods: cut(t.mods, 300), lobbyOptions: cut(t.lobbyOptions, 600), description: cut(t.description, 900),
+    rewards: cut(t.rewards, 400), rewardPlaces: (t.rewardPlaces || []).slice(), rewardCur: t.rewardCur || null,
+    prize: (t.prize && t.prize.currency && t.prize.amount != null) ? t.prize : null,
+    streams: (t.streams || []).length
+  };
+}
+// The console's Proposals tab: what waits (oldest first), and what was decided lately.
+function proposalQueue(req) {
+  sweepProposals();
+  const sess = currentSession(req);
+  const fid = (sess && sess.fafId) || null;
+  const pending = [], recent = [];
+  const since = Date.now() - 60 * 86400000;
+  for (const t of Object.values(db.tournaments)) {
+    const p = t.proposal;
+    if (!p || t.archived) continue;
+    if (p.state === 'proposed') pending.push(proposalSummary(t, fid));
+    for (const h of (p.history || [])) {
+      if (h.act === 'proposed' || (h.at || 0) < since) continue;
+      recent.push({ id: t.id, name: t.name, act: h.act, byName: h.byName, at: h.at, reason: h.reason || '', proposer: p.byName });
+    }
+  }
+  pending.sort((a, b) => (a.proposedAt || 0) - (b.proposedAt || 0));
+  recent.sort((a, b) => b.at - a.at);
+  return { pending, recent: recent.slice(0, 40), days: proposalDays(), daysDefault: PROPOSAL_DAYS };
+}
+// Proposals this TD could decide on now (for the bar at the top).
+function proposalsFor(req) {
+  if (!PROPOSALS_ON || !isApprover(req)) return [];
+  const sess = currentSession(req);
+  const fid = sess && sess.fafId;
+  return Object.values(db.tournaments).filter(t => t.proposal && t.proposal.state === 'proposed' && !t.archived
+    && String(t.proposal.by) !== String(fid) && (t.organizerFafIds || []).indexOf(fid) < 0);
 }
 
 // Scheduled publishing: a draft can carry publishAt (UTC ISO). There is no background timer in
@@ -1604,6 +1846,10 @@ function ctxCanManage(t, ctx) {
 // secrets, no mutations - because isOrganizer() still says no. Look, don't touch.
 function canSeeDraft(t, ctx) {
   if (!t || !ctx) return false;
+  // proposals (decision 59): the proposer keeps seeing theirs after handing it over, and one not
+  // sent to the TD team yet is the proposer's own business, not a director's
+  if (t.proposal && ctx.fid && String(t.proposal.by) === String(ctx.fid)) return true;
+  if (t.proposal && t.proposal.state === 'draft' && !ctxCanManage(t, ctx)) return false;
   if (ctx.director) return true;          // any category, view only unless also official
   return ctxCanManage(t, ctx);
 }
@@ -1757,6 +2003,8 @@ function canManageMaps(t, req, body) {
 // May this viewer SEE the map prep (unpublished maps, unpublished pools)?
 function canSeeMapPrep(t, tok, req) {
   if (canManageMaps(t, req, { admin: tok })) return true;
+  // a proposal waiting for the TD team is read as a whole, maps included (decision 59)
+  if (t.proposal && t.proposal.state === 'proposed' && PROPOSALS_ON && isApprover(req)) return true;
   return isCaster(t, req);
 }
 
@@ -2148,6 +2396,7 @@ function teamOfCaptainToken(t, token) {
 function publicView(t) {
   return {
     id: t.id, name: t.name, description: t.description, rewards: t.rewards || '', prize: t.prize || { currency: null, amount: null }, sponsors: t.sponsors || '', category: t.category || null,
+    rewardPlaces: (t.rewardPlaces || []).map(r => ({ place: r.place, text: r.text, amount: r.amount })), rewardCur: t.rewardCur || null,
     published: t.published !== false ? 1 : 0, publishAt: t.publishAt || null, archived: t.archived ? 1 : 0, abandoned: t.abandoned ? 1 : 0,
     seriesId: t.seriesId || null,
     survivors: (t.status === 'running' || t.status === 'finished') && t.bracketType !== 'swiss' && t.competition !== 'ffa'
@@ -2843,6 +3092,8 @@ async function handleAuth(req, res, url) {
       enabled: FAF_OAUTH_ON,
       // publishing needs a second account (decision 51) and the sites text may link to
       approvals: APPROVALS_ON ? 1 : 0,
+      // proposals to the TD team (decision 59): on with FAF login, and how long one waits
+      proposals: PROPOSALS_ON ? 1 : 0, proposalDays: proposalDays(),
       linkSites: linkSites(),
       // siteAdmin is the EFFECTIVE flag (false while stood down) so every existing client check
       // stays correct without being touched. siteAdminAccount + adminStandDown exist only so the
@@ -2984,8 +3235,17 @@ async function handleAPI(req, res, url) {
     // the legacy flow still applies so the site keeps working before go-live).
     const hostSess = currentSession(req);
     if (FAF_OAUTH_ON && !hostSess && !isSiteAdmin(req)) return json(res, 401, { error: 'Log in with FAF to host a tournament' });
-    // Once FAF login is live, hosting is approval-only: the site admin grants it per account.
-    if (!canHost(req, b.admin)) {
+    // A proposal (decision 59) needs no hosting rights: any FAF account may build one and send it
+    // to the TD team. A few open ones per account, and not from someone banned from official events.
+    const asProposal = !!b.proposal;
+    if (asProposal) {
+      if (!PROPOSALS_ON) return bad(res, 'Proposals need FAF login on this site');
+      if (!hostSess || !hostSess.fafId) return json(res, 401, { error: 'Log in with FAF to propose a tournament' });
+      const ban = activeBan(hostSess.fafId);
+      if (ban) return json(res, 403, { error: 'You are banned from official tournaments' + (ban.expires ? ' until ' + String(ban.expires).slice(0, 10) : '') + ', so you cannot propose one.' });
+      const open = openProposalsOf(hostSess.fafId);
+      if (open >= PROPOSAL_MAX_OPEN) return bad(res, 'You have ' + open + ' proposals already (being written or waiting for the TD team). Send, finish or delete one first.');
+    } else if (!canHost(req, b.admin)) {
       const pending = (db.hostRequests || []).some(r => r.fafId === (hostSess && hostSess.fafId) && r.status === 'pending');
       return json(res, 403, {
         error: pending
@@ -3016,6 +3276,8 @@ async function handleAPI(req, res, url) {
     }
     let category = (b.category === 'official' || b.category === 'community') ? b.category : null;
     if (preset && preset.forceCategory) category = preset.forceCategory;
+    // a proposal is the proposer's draft until a director takes it over and decides
+    if (asProposal) category = 'community';
     if (!category) return bad(res, 'Choose whether this is an Official or Community tournament');
     const competition = b.competition === 'ffa' ? 'ffa' : 'team';
     let teamSize, formation, bracketType = 'single', ffaCfg = null, draftOrder = 'linear', plan = null;
@@ -3053,6 +3315,8 @@ async function handleAPI(req, res, url) {
       if (ffaCfg.finalSize === 1) ffaCfg.finalSize = 2;
     }
     const maxTeams = intIn(b.maxTeams, 0, 128, 0);
+    const places = cleanRewardPlaces(b.rewardPlaces);
+    if (places.error) return bad(res, places.error);
     const t = {
       id: uid(5), adminToken: uid(12), lateToken: uid(12),
       name, description: cleanName(b.description, 20000),
@@ -3108,10 +3372,20 @@ async function handleAPI(req, res, url) {
       createdByName: (hostSess && hostSess.fafName) || '',
       players: [], teams: [], matches: [], rounds: 0, draft: null, subs: []
     };
+    // rewards by place (decision 58): only written when there are some, so other data keeps its shape
+    if (places.rows.length) {
+      t.rewardPlaces = places.rows;
+      const rc = cleanRewardCur(b.rewardCur);
+      if (rc) t.rewardCur = rc;
+    }
+    if (asProposal) {
+      t.proposal = { by: hostSess.fafId, byName: hostSess.fafName || ('FAF ' + hostSess.fafId), at: Date.now(), state: 'draft',
+        lockMaps: 0, lockFormat: 0, keep: 0, note: '', history: [] };
+    }
     if (APPROVALS_ON) noteContentEditor(t, req);   // the creator wrote it, so cannot approve it
     db.tournaments[t.id] = t;
     saveDB();
-    audit(req, 'tournament_created', { tournamentId: t.id, tournamentName: t.name, token: b.admin });
+    audit(req, 'tournament_created', { tournamentId: t.id, tournamentName: t.name, token: b.admin, detail: asProposal ? 'as a proposal for the TD team' : '' });
     return json(res, 200, { id: t.id, adminToken: t.adminToken });
   }
 
@@ -3316,7 +3590,9 @@ async function handleAPI(req, res, url) {
                            'editor_decide', 'editor_revoke', 'editor_grant',
                            'importer_decide', 'importer_revoke', 'importer_grant',
                            // the sites user text may link to (decision 51)
-                           'link_add', 'link_remove'];
+                           'link_add', 'link_remove',
+                           // how long a proposal waits for the TD team (decision 59)
+                           'proposal_days'];
     if (director && DIRECTOR_ACTS.indexOf(act) < 0) return json(res, 403, { error: 'Directors can\u2019t do that \u2014 site admin only' });
     if (editor && act === 'data') {
       return json(res, 200, { role: 'editor', articles: (db.articles || []).slice().sort((a, c) => (a.order || 0) - (c.order || 0) || (a.createdAt || 0) - (c.createdAt || 0)).map(a => Object.assign({}, a, { archived: a.archived ? 1 : 0 })) });
@@ -3352,6 +3628,7 @@ async function handleAPI(req, res, url) {
           importerRequests: (db.importerRequests || []).slice().reverse(),
           importerAllowed,
           publishing: publishingQueue(req),
+          proposals: PROPOSALS_ON ? proposalQueue(req) : null,
           linkSites: linkSites(), linkSitesDefault: LINKS.DEFAULT_SITES,
           me: (currentSession(req) || {}).fafId || null
           // deliberately NOT siteAdmins - see the DIRECTOR_ACTS note above
@@ -3376,8 +3653,85 @@ async function handleAPI(req, res, url) {
         me: (currentSession(req) || {}).fafId || null,
         bans: bansList,
         publishing: publishingQueue(req),
-        linkSites: linkSites(), linkSitesDefault: LINKS.DEFAULT_SITES
+        proposals: PROPOSALS_ON ? proposalQueue(req) : null,
+        linkSites: linkSites(), linkSitesDefault: LINKS.DEFAULT_SITES,
+        // "live now" on the Livestream panel (decision 57): site admins only, secrets never sent
+        live: LIVE.settings()
       });
+    }
+
+    // How long a proposal waits for the TD team before it goes back to its proposer (decision 59).
+    if (act === 'proposal_days') {
+      const d = parseInt(b.days, 10);
+      if (!(d >= 7 && d <= 90)) return bad(res, 'Between 7 and 90 days');
+      const was = proposalDays();
+      if (d === PROPOSAL_DAYS) delete db.proposalCfg; else db.proposalCfg = { days: d };
+      saveDB();
+      if (d !== was) audit(req, 'proposal_days_changed', { detail: was + ' -> ' + d + ' days' });
+      return json(res, 200, { ok: true, days: proposalDays() });
+    }
+
+    // ---- "live now" settings (decision 57): site admins only (not in DIRECTOR_ACTS) ----
+    // Credentials for Twitch and YouTube, how often to ask, and the window around each event day.
+    // Kept in db.liveCfg; the server's environment is the fallback. A secret is write-only: the
+    // console is told whether one is set and its last 4 characters, never the value, and the log
+    // says what changed, never to what.
+    if (act === 'live_save') {
+      const cur = Object.assign({}, db.liveCfg || {});
+      const next = Object.assign({}, cur);
+      const changed = [];
+      const ID_RE = /^[A-Za-z0-9]{1,64}$/;
+      const KEY_RE = /^[A-Za-z0-9_-]{10,100}$/;
+      if (b.twitchId !== undefined) {
+        const v = String(b.twitchId || '').trim();
+        if (v && !ID_RE.test(v)) return bad(res, 'A Twitch client id is letters and digits only');
+        if (v !== (cur.twitchId || '')) { if (v) next.twitchId = v; else delete next.twitchId; changed.push('Twitch client id'); }
+      }
+      if (b.clearTwitchSecret) {
+        if (cur.twitchSecret) { delete next.twitchSecret; changed.push('Twitch client secret (removed)'); }
+      } else if (b.twitchSecret) {
+        const v = String(b.twitchSecret).trim();
+        if (!ID_RE.test(v)) return bad(res, 'A Twitch client secret is letters and digits only');
+        if (v !== cur.twitchSecret) { next.twitchSecret = v; changed.push('Twitch client secret (replaced)'); }
+      }
+      if (b.clearYtKey) {
+        if (cur.ytKey) { delete next.ytKey; changed.push('YouTube API key (removed)'); }
+      } else if (b.ytKey) {
+        const v = String(b.ytKey).trim();
+        if (!KEY_RE.test(v)) return bad(res, 'That does not look like a Google API key (letters, digits, - and _)');
+        if (v !== cur.ytKey) { next.ytKey = v; changed.push('YouTube API key (replaced)'); }
+      }
+      const eff = LIVE.settings();   // what is in force now (saved, else environment, else default)
+      const num = (k, label, unit) => {
+        if (b[k] === undefined || b[k] === null || b[k] === '') return null;
+        const n = parseInt(b[k], 10);
+        const lim = LIVE.LIMITS[k];
+        if (!isFinite(n) || n < lim[0] || n > lim[1]) return label + ' must be between ' + lim[0] + ' and ' + lim[1] + ' ' + unit;
+        const was = eff[k];
+        if (n !== was) { next[k] = n; changed.push(label + ' ' + was + ' -> ' + n + ' ' + unit); }
+        return null;
+      };
+      const numErr = num('twitchEvery', 'Twitch check interval', 's') || num('ytEvery', 'YouTube check interval', 's')
+        || num('before', 'hours before a day starts', 'h') || num('after', 'hours after a day starts', 'h');
+      if (numErr) return bad(res, numErr.charAt(0).toUpperCase() + numErr.slice(1));
+      if (b.off !== undefined && !!b.off !== !!cur.off) {
+        if (b.off) next.off = 1; else delete next.off;
+        changed.push(b.off ? 'switched off' : 'switched on');
+      }
+      if (!changed.length) return json(res, 200, { ok: true, changed: 0, live: LIVE.settings() });
+      if (Object.keys(next).length) db.liveCfg = next; else delete db.liveCfg;
+      LIVE.configure(db.liveCfg || {});
+      saveDB();
+      audit(req, 'live_settings_changed', { detail: changed.join(', ') });
+      return json(res, 200, { ok: true, changed: changed.length, live: LIVE.settings() });
+    }
+    // Try credentials before (or after) saving them: the form's values, else the saved ones.
+    if (act === 'live_test') {
+      const which = b.which === 'youtube' ? 'youtube' : 'twitch';
+      const r = await LIVE.test(which, {
+        twitchId: String(b.twitchId || '').trim(), twitchSecret: String(b.twitchSecret || '').trim(), ytKey: String(b.ytKey || '').trim()
+      });
+      return json(res, 200, r);
     }
 
     // The sites user text may link to (decision 51). Directors and site admins, logged.
@@ -3871,6 +4225,7 @@ async function handleAPI(req, res, url) {
 
   if (parts.length === 2 && parts[1] === 'tournaments' && method === 'GET') {
     sweepScheduledPublishes();   // flip any drafts whose scheduled publish time has passed
+    sweepProposals();            // proposals whose time with the TD team ran out go back (decision 59)
     sweepQualifications();       // invite qualifiers from any child that has finished
     const dctx = draftViewerCtx(req);
     const list = Object.values(db.tournaments)
@@ -3907,7 +4262,9 @@ async function handleAPI(req, res, url) {
         // or caster. Absent for everyone else, which is most rows for most viewers.
         me: viewerRolesIn(t, dctx) || undefined,
         // a draft's publishing state (decision 51): only drafts the viewer can see reach here
-        pub: (APPROVALS_ON && t.published === false) ? draftPubState(t, req) : undefined
+        pub: (APPROVALS_ON && t.published === false) ? draftPubState(t, req) : undefined,
+        // a proposal's state (decision 59), while it is not published
+        prop: (PROPOSALS_ON && t.proposal && t.published === false) ? proposalListState(t, dctx) : undefined
       }));
     return json(res, 200, list);
   }
@@ -4089,6 +4446,35 @@ async function handleAPI(req, res, url) {
             (fresh.length < n ? ' (' + fresh.length + ' new)' : '') };
       }
     }
+    // Proposals (decision 59): directors hear that some wait (silenced until a new one comes in,
+    // like the approvals); a proposer hears what became of theirs, for 3 days.
+    let proposals = null;
+    if (sess && sess.fafId && PROPOSALS_ON) {
+      sweepProposals();
+      if (isApprover(req)) {
+        const pend = proposalsFor(req);
+        const seenQ = ((db.profiles[sess.fafId] || {}).seenProposals) || {};
+        const fresh = pend.filter(t => !seenQ[t.id + ':' + t.proposal.proposedAt]);
+        if (fresh.length) {
+          const n = pend.length;
+          proposals = { dismissible: 1, n,
+            text: n + ' tournament proposal' + (n === 1 ? ' is' : 's are') + ' waiting for a tournament director' + (fresh.length < n ? ' (' + fresh.length + ' new)' : '') };
+        }
+      }
+      for (const t of Object.values(db.tournaments)) {
+        const p = t.proposal;
+        if (!p || t.archived || String(p.by) !== String(sess.fafId)) continue;
+        const recent = at => Date.now() - (Number(at) || 0) <= 3 * 86400000;
+        if (p.state === 'taken' && recent(p.takenAt)) {
+          out.push({ tId: t.id, tName: t.name, type: 'prop', tab: 'overview', text: p.takenByName + ' took over your proposal' + (p.takeNote ? ': ' + p.takeNote : '') });
+        } else if (p.state === 'draft' && p.last && recent(p.last.at)) {
+          const L = p.last;
+          if (L.act === 'declined') out.push({ tId: t.id, tName: t.name, type: 'prop', tab: 'overview', text: L.byName + ' declined your proposal: ' + L.reason });
+          else if (L.act === 'timeout') out.push({ tId: t.id, tName: t.name, type: 'prop', tab: 'overview', text: 'Your proposal came back: ' + L.reason });
+          else if (L.act === 'released') out.push({ tId: t.id, tName: t.name, type: 'prop', tab: 'overview', text: L.byName + ' gave your proposal back: ' + L.reason });
+        }
+      }
+    }
     // An organizer whose publish request was rejected hears about it wherever they are, for 3 days
     // (the draft's own banner keeps saying it until they request again).
     if (sess && sess.fafId && APPROVALS_ON) {
@@ -4099,7 +4485,7 @@ async function handleAPI(req, res, url) {
         out.push({ tId: t.id, tName: t.name, type: 'pubrej', tab: 'overview', text: 'Publishing was rejected by ' + t.publishRejected.byName + ': ' + t.publishRejected.reason });
       }
     }
-    return json(res, 200, { pending: out, alert, approvals });
+    return json(res, 200, { pending: out, alert, approvals, proposals });
   }
 
   // Silence the access-request alert until a NEW request arrives. Only ids that are still
@@ -4110,6 +4496,14 @@ async function handleAPI(req, res, url) {
     if (!isSiteAdmin(req) && !isDirector(req)) return json(res, 403, { error: 'Site admin or tournament director only' });
     db.profiles[sess.fafId] = db.profiles[sess.fafId] || {};
     const b = await readBody(req);
+    // the proposals alert (decision 59), keyed by proposal and when it was sent
+    if (b && b.kind === 'proposals') {
+      const seenQ = {};
+      for (const t of proposalsFor(req)) seenQ[t.id + ':' + t.proposal.proposedAt] = 1;
+      db.profiles[sess.fafId].seenProposals = seenQ;
+      saveDB();
+      return json(res, 200, { ok: true, dismissed: Object.keys(seenQ).length });
+    }
     // the publishing alert (decision 51) has its own memory, keyed by request
     if (b && b.kind === 'approvals') {
       const seenP = {};
@@ -4137,11 +4531,21 @@ async function handleAPI(req, res, url) {
       if (sweepPoolPublishes(t)) dirty = true;   // reveal any pool whose scheduled time has passed
       if (syncFafName(t, req)) dirty = true;     // they renamed on FAF since signing up
       if (sweepPicks(t)) dirty = true;           // a pick clock ran out while nobody was looking
+      if (t.proposal && t.proposal.state === 'proposed') sweepProposals();   // its time with the TD team ran out
       if (dirty) saveDB();
       const view = publicView(t);
+      // "Live now" and the viewers of each livestream, on the tournament's days only (decision 56).
+      // Absent without Twitch / YouTube credentials, and outside those days. Links to sites that
+      // are not allowed are shown as plain text, so they are not checked either.
+      const liveSites = linkSites();
+      const streamLive = LIVE.statusFor(t, Date.now(), u => LINKS.siteAllowed(LINKS.hostOf(u), liveSites));
+      if (streamLive) view.streamLive = streamLive;
       const capTeam = teamOfCaptainToken(t, tok) || teamOfSession(t, req);
       const sess = currentSession(req);
       const organizer = isAdmin(t, tok, req) || isOrganizer(t, req);
+      // a proposal (decision 59): where it stands and what this viewer may do; the public, the credit
+      const propV = proposalView(t, req, organizer);
+      if (propV) view.proposal = propV;
       // The pick phase is viewer-specific (it has to say "your pick"), so it is attached here
       // rather than in publicView. Absent entirely when the tournament does not pick opponents.
       // "Your pick" means the viewer's OWN team is on the clock. An organizer still gets the pick
@@ -4346,6 +4750,18 @@ async function handleAPI(req, res, url) {
     // publishing steps (with approvals an import arrives as a draft, decision 51)
     if (t.imported && method === 'POST' && sub !== 'delete' && sub !== 'edit_date' && !/^publish_(request|withdraw|approve|reject)$/.test(sub)) {
       return bad(res, 'Imported tournaments are read-only.');
+    }
+    // Proposals (decision 59). One waiting for the TD team cannot change, so what a director takes
+    // over is what they read; once taken over, what the proposer locked stays as proposed.
+    if (t.proposal && method === 'POST') {
+      if (t.proposal.state === 'proposed') sweepProposals();
+      // (a site admin can still delete one, e.g. junk)
+      if (t.proposal.state === 'proposed' && PROPOSAL_OPEN_SUBS.indexOf(sub) < 0 && !(sub === 'delete' && isSiteAdmin(req))) {
+        return json(res, 409, { error: 'This proposal is waiting for the TD team, so nothing in it can change. Withdraw it to change something.' });
+      }
+      const area = PROPOSAL_MAP_SUBS.indexOf(sub) >= 0 ? 'maps' : PROPOSAL_FORMAT_SUBS.indexOf(sub) >= 0 ? 'format' : null;
+      const lock = area ? proposalLockRefusal(t, req, area) : null;
+      if (lock) return json(res, 403, { error: lock });
     }
 
     if (method === 'GET' && sub === 'predictions') {
@@ -4708,12 +5124,167 @@ async function handleAPI(req, res, url) {
     // An organizer requests; a director or site admin who did not request it and did not write any of it
     // approves (now, or the requested time) or rejects with a reason. Everything lands in the
     // tournament's Log and the site audit log, with both names.
+    // ---------- proposals (decision 59) ----------
+    if (/^proposal_/.test(sub)) {
+      if (!PROPOSALS_ON) return bad(res, 'Proposals need FAF login on this site');
+      const sess = currentSession(req);
+      if (!sess || !sess.fafId) return json(res, 401, { error: 'Log in with FAF first' });
+      const who = { by: sess.fafId, byName: sess.fafName || ('FAF ' + sess.fafId) };
+      const named = namedOrganizer(t, req);
+      const p = t.proposal;
+      const tn = { tournamentId: t.id, tournamentName: t.name };
+
+      // Send it to the TD team (also turns a host's own draft into a proposal).
+      if (sub === 'proposal_submit') {
+        if (!named) return json(res, 403, { error: 'Only its organizers can propose it' });
+        if (t.published !== false) return bad(res, 'It is published already');
+        if (t.archived) return bad(res, 'It is archived');
+        if (p && p.state === 'proposed') return bad(res, 'It is already waiting for the TD team');
+        if (p && p.state === 'taken') return bad(res, p.takenByName + ' has already taken it over');
+        if (t.publishReq || (t.publishApproval && t.publishAt)) return bad(res, 'Publishing it is already requested. Withdraw that first: a proposal is published by the director who takes it over.');
+        const proposer = p ? p.by : sess.fafId;
+        const waiting = openProposalsOf(proposer, ['proposed']);
+        if (waiting >= PROPOSAL_MAX_OPEN) return bad(res, waiting + ' proposals are waiting for the TD team already. Wait for an answer on one first.');
+        if (!p) t.proposal = { by: who.by, byName: who.byName, at: Date.now(), state: 'draft', lockMaps: 0, lockFormat: 0, keep: 0, note: '', history: [] };
+        const q = t.proposal;
+        q.lockMaps = b.lockMaps ? 1 : 0;
+        q.lockFormat = b.lockFormat ? 1 : 0;
+        q.keep = b.keep ? 1 : 0;
+        q.note = cleanName(b.note || '', 1000) || '';
+        q.state = 'proposed';
+        q.proposedAt = Date.now();
+        delete q.last;
+        propHistory(t, 'proposed', who);
+        delete t.publishRejected;
+        saveDB();
+        const locks = [q.lockMaps ? 'maps' : '', q.lockFormat ? 'format' : ''].filter(Boolean);
+        audit(req, 'proposal_submitted', Object.assign({ detail: 'waits for a tournament director until ' + new Date(proposalDeadline(t)).toISOString().slice(0, 10)
+          + (locks.length ? '; the TD may not change the ' + locks.join(' or the ') : '; the TD may change anything')
+          + (q.keep ? '; the proposer stays an organizer' : '; the proposer hands it over') }, tn));
+        return json(res, 200, { ok: true, until: proposalDeadline(t) });
+      }
+      if (!p) return bad(res, 'This tournament is not a proposal');
+
+      // Take it back while it waits (to change something).
+      if (sub === 'proposal_withdraw') {
+        if (!named && !isProposer(t, req)) return json(res, 403, { error: 'Only its proposer or organizers can withdraw it' });
+        if (p.state !== 'proposed') return bad(res, 'It is not waiting for the TD team');
+        p.state = 'draft';
+        p.last = { act: 'withdrawn', by: who.by, byName: who.byName, at: Date.now(), reason: '' };
+        propHistory(t, 'withdrawn', who);
+        saveDB();
+        audit(req, 'proposal_withdrawn', tn);
+        return json(res, 200, { ok: true });
+      }
+
+      // A director: "I will TD this", or no, with the reason.
+      if (sub === 'proposal_take' || sub === 'proposal_decline') {
+        if (!isApprover(req)) return json(res, 403, { error: 'Only a tournament director or a site admin can decide on a proposal' });
+        if (p.state !== 'proposed') {
+          return bad(res, p.state === 'taken' ? p.takenByName + ' has already taken it over' : 'It is not waiting for the TD team any more');
+        }
+        if (isProposer(t, req) || named) return json(res, 403, { error: 'You proposed it yourself, so another tournament director decides on it' });
+        if (sub === 'proposal_decline') {
+          const reason = cleanName(b.reason, 300);
+          if (!reason) return bad(res, 'Say what is missing or has to change, so the proposer can fix it');
+          p.state = 'draft';
+          p.last = { act: 'declined', by: who.by, byName: who.byName, at: Date.now(), reason };
+          propHistory(t, 'declined', who, reason);
+          saveDB();
+          audit(req, 'proposal_declined', Object.assign({ detail: reason + ' (proposed by ' + p.byName + ')' }, tn));
+          return json(res, 200, { ok: true });
+        }
+        const category = b.category === 'community' ? 'community' : 'official';
+        const note = cleanName(b.note || '', 300) || '';
+        // The proposer's side either stays (they asked to) or hands it over; either way they keep
+        // seeing it, and get it back with their organizers if the director gives it back.
+        p.prevOrganizers = { ids: (t.organizerFafIds || []).slice(), names: Object.assign({}, t.organizerNames || {}), category: t.category || null };
+        if (!p.keep) {
+          for (const fid of (t.organizerFafIds || [])) if (t.organizerHidden) delete t.organizerHidden[fid];
+          t.organizerFafIds = [];
+          t.organizerNames = {};
+        }
+        t.organizerFafIds = t.organizerFafIds || [];
+        if (t.organizerFafIds.indexOf(who.by) < 0) t.organizerFafIds.push(who.by);
+        t.organizerNames = t.organizerNames || {};
+        t.organizerNames[who.by] = who.byName;
+        t.category = category;
+        p.state = 'taken';
+        p.takenBy = who.by; p.takenByName = who.byName; p.takenAt = Date.now(); p.takeNote = note;
+        delete p.last;
+        propHistory(t, 'taken', who, note);
+        delete t.publishReq; delete t.publishApproval; delete t.publishRejected;
+        t.publishAt = null;
+        saveDB();
+        audit(req, 'proposal_taken', Object.assign({ detail: 'proposed by ' + p.byName + '; runs as ' + category
+          + (p.keep ? '; the proposer stays an organizer' : '; the proposer handed it over') + (note ? ': ' + note : '') }, tn));
+        return json(res, 200, { ok: true, category });
+      }
+
+      // The director gives it back (not for them after all): the proposer's draft again, with the
+      // organizers it had, and the reason.
+      if (sub === 'proposal_release') {
+        if (p.state !== 'taken') return bad(res, 'Nobody has taken it over');
+        // a director with organizer rights here (the one who took it over; on an official one, any)
+        if (!((canOrganize(t, req, b) && isApprover(req)) || isSiteAdmin(req))) return json(res, 403, { error: 'Only a director running it, or a site admin, can give it back' });
+        if (t.published !== false) return bad(res, 'It is published already, so it can no longer be given back');
+        if (t.status !== 'signup') return bad(res, 'It has started, so it can no longer be given back');
+        const reason = cleanName(b.reason, 300);
+        if (!reason) return bad(res, 'Say why, so the proposer knows');
+        const prev = p.prevOrganizers || { ids: [p.by], names: { [p.by]: p.byName }, category: 'community' };
+        t.organizerFafIds = (prev.ids && prev.ids.length) ? prev.ids.slice() : [p.by];
+        t.organizerNames = Object.assign({}, prev.names || {});
+        t.category = prev.category === 'official' ? 'official' : 'community';
+        p.state = 'draft';
+        p.last = { act: 'released', by: who.by, byName: who.byName, at: Date.now(), reason };
+        delete p.takenBy; delete p.takenByName; delete p.takenAt; delete p.takeNote; delete p.prevOrganizers;
+        propHistory(t, 'released', who, reason);
+        delete t.publishReq; delete t.publishApproval; delete t.publishRejected;
+        t.publishAt = null;
+        saveDB();
+        audit(req, 'proposal_released', Object.assign({ detail: 'back to ' + p.byName + ': ' + reason }, tn));
+        return json(res, 200, { ok: true });
+      }
+
+      // Lift what the proposer locked: the proposer any time, a site admin with a reason.
+      if (sub === 'proposal_unlock') {
+        if (p.state !== 'taken') return bad(res, 'Nothing is locked before a director takes it over');
+        const mine = isProposer(t, req);
+        if (!mine && !isSiteAdmin(req)) return json(res, 403, { error: 'Only ' + p.byName + ', who proposed it, can lift that (or a site admin)' });
+        const which = b.which === 'format' ? 'format' : 'maps';
+        if (which === 'maps' ? !p.lockMaps : !p.lockFormat) return bad(res, 'The ' + (which === 'maps' ? 'maps are' : 'format is') + ' not locked');
+        const reason = cleanName(b.reason || '', 300) || '';
+        if (!mine && !reason) return bad(res, 'Say why: ' + p.byName + ' asked for this to stay as proposed');
+        if (which === 'maps') p.lockMaps = 0; else p.lockFormat = 0;
+        propHistory(t, which === 'maps' ? 'unlocked maps' : 'unlocked format', who, reason);
+        saveDB();
+        audit(req, 'proposal_unlocked', Object.assign({ detail: 'the ' + (which === 'maps' ? 'maps' : 'format') + ' may be changed now' + (mine ? '' : ' (proposed by ' + p.byName + ')') + (reason ? ': ' + reason : '') }, tn));
+        return json(res, 200, { ok: true });
+      }
+
+      // A host who proposed their own draft and wants to run it after all.
+      if (sub === 'proposal_drop') {
+        if (!named) return json(res, 403, { error: 'Only its organizers can do that' });
+        if (p.state !== 'draft') return bad(res, p.state === 'proposed' ? 'Withdraw it from the TD team first' : 'A director has taken it over');
+        if (!canHost(req)) return json(res, 403, { error: 'Your account is not approved to host, so this stays a proposal' });
+        delete t.proposal;
+        saveDB();
+        audit(req, 'proposal_dropped', Object.assign({ detail: 'an ordinary draft again' }, tn));
+        return json(res, 200, { ok: true });
+      }
+      return bad(res, 'Unknown proposal action');
+    }
+
     if (sub === 'publish_request') {
       if (!APPROVALS_ON) return bad(res, 'Approvals need FAF login - publish directly');
       if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
       const sess = currentSession(req);
       if (!sess || !sess.fafId) return json(res, 401, { error: 'Log in with FAF first' });
       if (t.published !== false) return bad(res, 'This tournament is already published');
+      if (t.proposal && t.proposal.state !== 'taken') {
+        return bad(res, 'This is a proposal: propose it to the TD team, and the tournament director who takes it over publishes it'
+          + (canHost(req) ? ' (or turn it back into your own draft to host it yourself)' : '') + '.');
+      }
       const prob = SCHED.scheduleProblem(t);
       if (prob) return bad(res, prob);
       // A time in the future is kept with the request; an old schedule (set before approvals
@@ -4771,6 +5342,7 @@ async function handleAPI(req, res, url) {
         return json(res, 200, { ok: true });
       }
       if (why === 'edited') return json(res, 403, { error: 'You changed this tournament yourself, so another tournament director has to approve it' });
+      if (why === 'took') return json(res, 403, { error: 'You took this proposal over, so a second tournament director has to approve publishing it' });
       if (why === 'new') return json(res, 403, { error: 'You got this role less than 3 days ago, so you can approve publishing from ' + approverFrom(req) + '. Until then another tournament director has to.' });
       if (why) return json(res, 403, { error: 'You cannot approve this' });
       const fp = contentFp(t);
@@ -6568,11 +7140,18 @@ async function handleAPI(req, res, url) {
 
     if (sub === 'edit_info') {
       if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
+      // the map veto is part of what a proposer can ask to keep (decision 59)
+      if (b.veto !== undefined) {
+        const lock = proposalLockRefusal(t, req, 'maps');
+        if (lock) return json(res, 403, { error: lock });
+      }
       {
         const refusedLinks = linkRefusal([b.description, b.rewards, b.sponsors, b.lobbyOptions, b.mods],
           Array.isArray(b.streams) ? b.streams.map(x => String((x && x.url) || '').trim()) : []);
         if (refusedLinks) return bad(res, refusedLinks);
       }
+      const places = b.rewardPlaces !== undefined ? cleanRewardPlaces(b.rewardPlaces) : null;
+      if (places && places.error) return bad(res, places.error);
       // Per-day start times are checked against the NEW schedule before anything is written, so
       // a refused save changes nothing and a published event can never be left with a day that
       // has no start time. Drafts may be saved half-done: the publish button is what insists.
@@ -6595,6 +7174,7 @@ async function handleAPI(req, res, url) {
         touched.push(nextSched.dayTimesMode === 'perday' ? 'start time per day'
           : (nextSched.dayTimesMode === 'same' ? 'same start time every day' : 'start times per day (unanswered)'));
       }
+      if (places) touched.push('rewards by place');
       if (touched.length) tlog(t, req, b.admin, 'updated settings: ' + touched.join(', '));
       if (b.description !== undefined) t.description = cleanName(b.description, 20000);
       if (b.rewards !== undefined) t.rewards = cleanName(b.rewards, 2000);
@@ -6605,6 +7185,8 @@ async function handleAPI(req, res, url) {
         );
       }
       if (b.sponsors !== undefined) t.sponsors = cleanName(b.sponsors, 2000);
+      if (places) { if (places.rows.length) t.rewardPlaces = places.rows; else delete t.rewardPlaces; }
+      if (b.rewardCur !== undefined) { const rc = cleanRewardCur(b.rewardCur); if (rc) t.rewardCur = rc; else delete t.rewardCur; }
       if (Array.isArray(b.streams)) {
         t.streams = b.streams.map(x => ({
           url: String((x && x.url) || '').trim().slice(0, 300),
@@ -7199,8 +7781,10 @@ async function handleAPI(req, res, url) {
         }
         // The tournament is starting: pending and declined invites are no longer relevant.
         t.invites = (t.invites || []).filter(i => (t.players || []).some(pl => pl.fafId === i.fafId));
-        tlog(t, req, b.admin, 'started the bracket (' + n + ' teams)');
-        const c = b.config || {};
+        // The proposer locked the format (decision 59): the lengths come from the plan as proposed.
+        const fmtLocked = !!proposalLockRefusal(t, req, 'format');
+        tlog(t, req, b.admin, 'started the bracket (' + n + ' teams)' + (fmtLocked ? ' with the format as proposed' : ''));
+        const c = fmtLocked ? planStartConfig(t) : (b.config || {});
 
         if (t.competition === 'ffa') {
           ffaCreateRound(t, 1, t.teams.map(x => x.id));
@@ -8140,6 +8724,8 @@ function serveStatic(req, res, url) {
 
 probeDataDirs();
 loadDB();
+// live status settings from the console (decision 57); the environment is the fallback
+LIVE.configure(db.liveCfg || {});
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
