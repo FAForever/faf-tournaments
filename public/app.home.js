@@ -235,9 +235,11 @@ function homeCard(t) {
       <div class="tlist-meta">${esc(kind)}${t.imported ? '' : ' · ' + t.players + ' signed up'}${tourneyDate(t) ? ' · <span class="tdate">' + esc(fmtDateTime(tourneyDate(t))) + '</span>' : ''}${daysTip ? ' <span class="tdays" title="' + esc(daysTip) + '">' + esc(eventDaysCountLabel(t)) + '</span>' : ''}${t.seriesName ? ' · <span class="tseries">' + esc(t.seriesName) + '</span>' : ''}${ratingLine ? ' · ' + esc(ratingLine) : ''}${teamsLine ? ' · ' + esc(teamsLine) : ''}${t.prize ? ' · <span class="tprize">' + esc(formatPrize(t.prize)) + '</span>' : ''}</div>
     </div>
     <span style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end">
-      ${t.published === 0 ? (t.canManage === 0
+      ${t.published === 0 ? (t.canManage === 0 && t.prop && t.prop.mine
+        ? '<span class="idbadge late" title="Your proposal: a tournament director runs it now">draft</span>'
+        : t.canManage === 0
         ? '<span class="idbadge late" title="Someone else’s draft. You can see it as a tournament director, but you have no organizer rights on it.">draft · view only</span>'
-        : '<span class="idbadge late" title="Draft - not listed publicly until you publish it">draft</span>') + pubChipHTML(t) : ''}
+        : '<span class="idbadge late" title="Draft - not listed publicly until you publish it">draft</span>') + pubChipHTML(t) + (typeof propChipHTML === 'function' ? propChipHTML(t) : '') : ''}
       ${closeChip}
       ${closeChip ? pill : (countdown || pill)}
       ${siteAdmin() ? '<button class="btn danger small" data-del="' + t.id + '">Delete</button>' : ''}
@@ -274,13 +276,19 @@ function drawHomeList(body, list) {
   const mineRole = t => !!(t.me && (t.me.org || t.me.player || t.me.caster));
   // My drafts are the ones the viewer is a NAMED organizer of. Everything else a director or a
   // site admin can see goes under Drafts, which they can fold away.
-  const myDraft = t => isDraft(t) && !!(t.me && t.me.org);
-  const otherDraft = t => isDraft(t) && !(t.me && t.me.org);
+  // A proposal (decision 59) is the proposer's draft even after they handed it over, and one
+  // waiting for the TD team that this director could decide on has a section of its own.
+  const toDecide = t => isDraft(t) && !!(t.prop && t.prop.s === 'proposed' && t.prop.can);
+  const myDraft = t => isDraft(t) && (!!(t.me && t.me.org) || !!(t.prop && t.prop.mine));
+  const otherDraft = t => isDraft(t) && !myDraft(t) && !toDecide(t);
   const live = list.filter(t => !isDraft(t));
   const completed = live.filter(isDone).sort((a, b) => tourneyDateMs(b) - tourneyDateMs(a));
   // Drafts a second account must approve before they go public, that this viewer may decide on.
   const toApprove = t => isDraft(t) && !!(t.pub && t.pub.can);
   const sections = [
+    { key: 'proposals', title: 'Proposals waiting for a TD', items: list.filter(toDecide).sort((a, b) => (a.prop.until || 0) - (b.prop.until || 0)),
+      optional: !all.some(toDecide),
+      note: 'Players proposed these for the TD team to run. Open one and read it, then take it over or decline it with what is missing. Each goes back to its proposer if nobody decides in time.' },
     { key: 'approvals', title: 'Waiting for your approval', items: list.filter(toApprove).sort((a, b) => (a.pub.at || 0) - (b.pub.at || 0)),
       optional: !all.some(toApprove),
       note: 'Organizers requested to publish these. Open one, read what players will see, then approve or reject it on its page. You can never approve what you requested or wrote yourself.' },
@@ -325,7 +333,7 @@ function drawHomeList(body, list) {
           <div class="cmp-more" id="cmpMore${yi}"></div>
         </div>`).join('')
       : '<div class="tlist" data-hlist="' + s.key + '">' + (emptyText ? '<div class="empty">' + esc(emptyText) + '</div>' : '') + '</div>';
-    return `<div class="panel section home-sec${s.key === 'mydrafts' || s.key === 'drafts' || s.key === 'approvals' ? ' draft-panel' : ''}" data-sec="${s.key}">
+    return `<div class="panel section home-sec${s.key === 'mydrafts' || s.key === 'drafts' || s.key === 'approvals' || s.key === 'proposals' ? ' draft-panel' : ''}" data-sec="${s.key}">
       <h2 class="collapsy" data-sectoggle="${s.key}" role="button" tabindex="0" aria-expanded="${open ? 'true' : 'false'}">
         <span class="collapsy-caret">${open ? '▾' : '▸'}</span> ${esc(s.title)} <span class="h2-strong">(${s.items.length})</span>
       </h2>
@@ -394,7 +402,15 @@ async function renderHost() {
         </div>
       </div>
       <div class="panel section">
-        <h2>Host a <span class="h2-strong">Tournament</span></h2>
+        <h2 id="hostTitle">Host a <span class="h2-strong">Tournament</span></h2>
+        <div id="hostModeBox" class="host-mode" hidden>
+          <label class="prop-cb"><input type="radio" name="hostMode" value="host" checked> Host it myself</label>
+          <label class="prop-cb"><input type="radio" name="hostMode" value="propose"> Propose it to the TD team: a tournament director runs it</label>
+        </div>
+        <div id="proposeIntro" class="infocell prop-intro" hidden>
+          <div class="mono small muted">PROPOSAL</div>
+          <div>Build it the way you want it played: the format, rating limits, mods and rewards here, the maps on its Maps tab afterwards. Then propose it to the TD team from its page: a tournament director takes it over and runs it, or tells you what is missing. The date is optional: the TD team picks one with you.</div>
+        </div>
         <div id="presetPanel" style="display:none">
           <label>Format preset <span class="muted" style="font-weight:400">(optional)</span></label>
           <select id="cPreset"><option value="">Set everything up myself</option></select>
@@ -428,12 +444,14 @@ async function renderHost() {
           <select id="cPrizeCur"><option value="">\u2014</option><option value="USD">USD $</option><option value="EUR">EUR \u20ac</option><option value="RUB">RUB \u20bd</option></select>
           <input type="number" id="cPrizeAmt" min="0" step="1" inputmode="numeric" placeholder="Amount">
         </div>
-        <div class="muted small" style="margin-top:4px">Just the number \u2014 describe the full prize breakdown in Rewards below.</div>
-        <label>Rewards <span class="muted small">(optional)</span></label>
+        <div class="muted small" style="margin-top:4px">Just the number - the places and their prizes go just below.</div>
+        <label>Rewards by place <span class="muted small">(optional - one row per place: the reward and its cash; shown like a podium)</span></label>
+        <div id="cPlaces">${placesEditorHTML([], '')}</div>
+        <label>Other rewards <span class="muted small">(optional - text under the places)</span></label>
         <span class="muted small">Paste a screenshot straight in (e.g. an avatar), or <a href="#" id="cRwImgBtn">insert an image</a>.</span>
         <input type="file" id="cRwImgFile" accept="image/*" style="display:none">
         ${mdToolbarHTML()}
-        <textarea id="cRewards" maxlength="2000" rows="3" placeholder="1st: avatar + 500 credits..."></textarea>
+        <textarea id="cRewards" maxlength="2000" rows="3" placeholder="e.g. Every finalist gets the tournament avatar"></textarea>
         <label>Sponsors <span class="muted small">(optional)</span></label>
         <span class="muted small">Paste a screenshot straight in, or <a href="#" id="cSpImgBtn">insert an image</a>.</span>
         <input type="file" id="cSpImgFile" accept="image/*" style="display:none">
@@ -449,12 +467,14 @@ async function renderHost() {
           <option value="ffa">FFA</option>
         </select>
 
+        <div id="cCategoryWrap">
         <label>Type <span class="req">*</span></label>
         <select id="cCategory">
           <option value="">Select Official or Community…</option>
           <option value="official">Official</option>
           <option value="community">Community</option>
         </select>
+        </div>
 
         <label>Series <span class="muted small">(optional)</span></label>
         <select id="cSeries"><option value="">\u2014 not part of a series \u2014</option></select>
@@ -924,6 +944,9 @@ async function renderHost() {
   if (cModsTa) wireMdToolbar(cModsTa.previousElementSibling, cModsTa);
   const cRewardsTa = document.getElementById('cRewards');
   if (cRewardsTa) wireMdToolbar(cRewardsTa.previousElementSibling, cRewardsTa);
+  // rewards by place (decision 58)
+  const cPlacesBox = document.querySelector('#cPlaces .rwp-edit');
+  const cPlaces = cPlacesBox ? wirePlacesEditor(cPlacesBox, { prizeCur: document.getElementById('cPrizeCur'), prizeAmt: document.getElementById('cPrizeAmt'), text: cRewardsTa }) : null;
   const cSponsorsTa = document.getElementById('cSponsors');
   if (cSponsorsTa) wireMdToolbar(cSponsorsTa.previousElementSibling, cSponsorsTa);
   const cVetoBox = document.getElementById('cVeto');
@@ -1045,6 +1068,7 @@ async function renderHost() {
     setv('cName', t.name || '');
     setv('cDesc', t.description || ''); setv('cLobby', t.lobbyOptions || ''); setv('cMods', t.mods || '');
     setv('cRewards', t.rewards || ''); setv('cSponsors', t.sponsors || '');
+    if (cPlaces) cPlaces.set(t.rewardPlaces || [], t.rewardCur || (t.prize && t.prize.currency) || '');
     if (t.prize) { setv('cPrizeCur', t.prize.currency || ''); setv('cPrizeAmt', t.prize.amount != null ? t.prize.amount : ''); }
     if (document.getElementById('cCategory')) setv('cCategory', t.category || '');
     // copying a tournament is how the next edition of a series usually gets made, so inherit it.
@@ -1122,12 +1146,39 @@ async function renderHost() {
     if (timeEl && _cDayTimes) timeEl.addEventListener('change', () => _cDayTimes.refresh());
   }
 
+  // Host it, or propose it to the TD team (decision 59). Someone who may not host can only propose.
+  let proposeMode = new URLSearchParams(location.search).get('propose') === '1';
+  const applyHostMode = () => {
+    setTitle(proposeMode ? 'Propose a tournament' : 'Host a tournament');
+    const h = document.getElementById('hostTitle');
+    if (h) h.innerHTML = proposeMode ? 'Propose a <span class="h2-strong">Tournament</span>' : 'Host a <span class="h2-strong">Tournament</span>';
+    const intro = document.getElementById('proposeIntro');
+    if (intro) intro.hidden = !proposeMode;
+    const cw = document.getElementById('cCategoryWrap');
+    if (cw) cw.style.display = proposeMode ? 'none' : '';
+    const go = document.getElementById('cGo');
+    if (go) go.textContent = proposeMode ? 'Create the proposal' : 'Create tournament';
+    document.querySelectorAll('input[name="hostMode"]').forEach(r => { r.checked = (r.value === 'propose') === proposeMode; });
+  };
+  document.querySelectorAll('input[name="hostMode"]').forEach(r => r.onchange = () => { proposeMode = r.value === 'propose' && r.checked; applyHostMode(); });
+  applyHostMode();
+  if (typeof proposalsOn === 'function' && proposalsOn()) {
+    (async () => {
+      let allowed = !!siteAdmin();
+      if (!allowed) { try { const st = await (await fetch('/api/host_status')).json(); allowed = !(st && st.oauth && !st.allowed); } catch (e) {} }
+      if (!allowed) proposeMode = true;
+      const box = document.getElementById('hostModeBox');
+      if (box) box.hidden = !allowed;   // the choice only for someone who may host
+      applyHostMode();
+    })();
+  }
+
   document.getElementById('cGo').onclick = async () => {
     const presetSel = document.getElementById('cPreset');
     const presetId = presetSel ? presetSel.value : '';
     const name = document.getElementById('cName').value.trim();
     if (!name) return toast('Give the tournament a name', true);
-    const category = document.getElementById('cCategory').value;
+    const category = proposeMode ? 'community' : document.getElementById('cCategory').value;
     if (!category) return toast('Choose whether this is an Official or Community tournament', true);
     const isFfa = comp.value === 'ffa';
     const bt = cBracket.value;
@@ -1149,6 +1200,7 @@ async function renderHost() {
       const pickOn = (document.getElementById('pPickPhase') || {}).checked ? 1 : 0;
       const r = await api('/api/tournaments', {
         name,
+        proposal: proposeMode ? 1 : 0,
         presetId: presetId || '',
         pickOpponents: pickOn,
         pickMinutes: pickOn ? pv('pPickMins') : 0,
@@ -1183,6 +1235,8 @@ async function renderHost() {
         playerReporting: document.getElementById('cPlayerReporting').checked ? 1 : 0,
         admin: siteAdmin() || undefined,
         rewards: document.getElementById('cRewards').value,
+        rewardPlaces: cPlaces ? cPlaces.get().rows : [],
+        rewardCur: (cPlaces && cPlaces.get().rows.some(r => r.amount !== null)) ? cPlaces.get().cur : '',
         prizeCurrency: document.getElementById('cPrizeCur').value,
         prizeAmount: document.getElementById('cPrizeAmt').value,
         sponsors: document.getElementById('cSponsors').value,
@@ -1228,7 +1282,7 @@ async function renderHost() {
       }
       history.pushState(null, '', '/t/' + r.id);
       route();
-      toast('Tournament created — you are the organizer on this browser');
+      toast(proposeMode ? 'Proposal created - finish it (maps on the Maps tab), then propose it to the TD team from its page' : 'Tournament created — you are the organizer on this browser');
     } catch (e) { toast(e.message, true); }
   };
 
@@ -1485,6 +1539,21 @@ function myTurnInfo() {
   return null;
 }
 
+// "LIVE NOW" and the viewers of one livestream (decision 56), as Twitch shows them: a red dot,
+// and a red person with the count. Nothing when the server does not know or it is offline.
+function streamLiveHTML(L) {
+  if (!L || !L.live) return '';
+  const n = L.viewers;
+  const short = (x, unit) => (Math.round(x) / 10).toFixed(1).replace(/\.0$/, '') + unit;   // 12.3K, 20K
+  const count = (typeof n === 'number' && isFinite(n) && n >= 0)
+    ? (n >= 1000000 ? short(n / 100000, 'M') : n >= 10000 ? short(n / 100, 'K') : n.toLocaleString('en-US'))
+    : '';
+  // one unit, so on a phone the count never wraps away from the tag
+  return ' <span class="live-badge"><span class="live-pill"><span class="live-dot"></span>Live now</span>'
+    + (count ? ' <span class="live-viewers" title="' + esc(n.toLocaleString('en-US')) + ' watching now"><svg class="live-ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="8" cy="5" r="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M2.5 14.5c0-3 2.5-5 5.5-5s5.5 2 5.5 5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>' + count + '</span>' : '')
+    + '</span>';
+}
+
 let _turnInfo = null;   // what the banner's button does (a tab, or an action such as checking in)
 function turnBannerHTML() {
   const info = myTurnInfo();
@@ -1596,7 +1665,8 @@ function drawTournament() {
           return `<button class="tab ${tb === currentTab ? 'active' : ''}" data-tab="${tb}">${esc(tabLabel(tb))}${badgeHtml}</button>`;
         }).join('')}
       </div>
-      ${!T.published && (admin || (T.pub && T.pub.approver)) ? draftBannerHTML(admin) : ''}
+      ${proposalBannerHTML(admin)}
+      ${!T.published && (admin || (T.pub && T.pub.approver)) && !(T.proposal && T.proposal.state && T.proposal.state !== 'taken') ? draftBannerHTML(admin) : ''}
     </div>
     <div id="tabBody" class="${isBracketTab(currentTab) && T.competition !== 'ffa' && T.bracketType !== 'swiss' ? 'widepage' : 'page'}"></div>`;
 
@@ -1632,6 +1702,7 @@ function drawTournament() {
     catch (e) { toast(e.message, true); }
   };
   wireDraftBanner();   // requesting, withdrawing, approving, rejecting (decision 51)
+  wireProposalBanner();   // proposing, withdrawing, taking over, declining (decision 59)
   app.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => navigator.clipboard.writeText(b.dataset.copy).then(() => toast('Copied')));
   app.querySelectorAll('[data-serieslink]').forEach(a => a.onclick = (e) => { e.preventDefault(); nav(a.getAttribute('href')); });
 
@@ -1933,11 +2004,20 @@ function drawOverview(el) {
     </div>`;
   }
 
+  // a proposal the TD team ran: who proposed it (decision 59)
+  if (typeof proposalCreditHTML === 'function') html += proposalCreditHTML();
+
   if ((T.streams || []).length) {
-    html += `<div class="panel section stream-panel"><h2>Livestream${T.streams.length === 1 ? '' : 's'}</h2>
-      ${T.streams.map(st => {
-        const safe = /^https?:\/\/[^\s"'<>]+$/.test(st.url) && linkOk(st.url);   // decision 51: allowed sites only
-        return `<div class="stream-line">\uD83D\uDCFA ${safe ? '<a href="' + esc(st.url) + '" target="_blank" rel="noopener">' + esc(st.url.replace(/^https?:\/\//, '')) + '</a>' : blockedLinkHTML(esc(st.url.replace(/^https?:\/\//, '')), st.url, 'Livestream')}${st.info ? ' <span class="muted small">\u2014 ' + esc(st.info) + '</span>' : ''}</div>`;
+    // Live now, with the viewers (decision 56): the server asks Twitch / YouTube on the
+    // tournament's days only, and sends `streamLive` per stream when it knows.
+    // A link shown as plain text (not an allowed site) gets no badge either.
+    const lv = Array.isArray(T.streamLive) ? T.streamLive : [];
+    const streamSafe = st => /^https?:\/\/[^\s"'<>]+$/.test(st.url) && linkOk(st.url);   // decision 51: allowed sites only
+    const anyLive = T.streams.some((st, i) => lv[i] && lv[i].live && streamSafe(st));
+    html += `<div class="panel section stream-panel${anyLive ? ' is-live' : ''}"><h2>Livestream${T.streams.length === 1 ? '' : 's'}</h2>
+      ${T.streams.map((st, i) => {
+        const safe = streamSafe(st);
+        return `<div class="stream-line">\uD83D\uDCFA ${safe ? '<a href="' + esc(st.url) + '" target="_blank" rel="noopener">' + esc(st.url.replace(/^https?:\/\//, '')) + '</a>' + streamLiveHTML(lv[i]) : blockedLinkHTML(esc(st.url.replace(/^https?:\/\//, '')), st.url, 'Livestream')}${st.info ? ' <span class="muted small">\u2014 ' + esc(st.info) + '</span>' : ''}</div>`;
       }).join('')}</div>`;
   }
 
@@ -1967,19 +2047,36 @@ function drawOverview(el) {
   }
 
   const prize = T.prize && T.prize.currency && T.prize.amount != null ? T.prize : null;
-  if (T.rewards || T.sponsors || prize) {
+  let places = Array.isArray(T.rewardPlaces) ? T.rewardPlaces : [];
+  let rewardsText = T.rewards || '';
+  let placesCur = rewardPlacesCur(T);
+  // Rewards written as text before there were places ("1st - Champion avatar + $160", a line per
+  // place) are drawn the same way, until an organizer turns them into places on the Admin tab.
+  // Two place lines at least: one numbered line alone may be anything.
+  if (!places.length && rewardsText) {
+    const parsed = parsePlacesFromText(rewardsText);
+    if (parsed.rows.length >= 2) {
+      places = parsed.rows;
+      rewardsText = parsed.rest;
+      placesCur = parsed.cur || (prize && prize.currency) || 'USD';
+    }
+  }
+  if (rewardsText || T.sponsors || prize || places.length) {
     // The headline cash prize gets its own boxed cell at the top of Rewards (like Format does in
-    // Game setup) so it reads at a glance and can be lifted for calendars and listings.
+    // Game setup) so it reads at a glance and can be lifted for calendars and listings. Under it
+    // the places, one row each like a podium (decision 58), then any other text. Rewards take the
+    // larger share of the row next to Sponsors: they are what players come for.
     const prizeCell = prize ? `<div class="infocell prize-cell">
         <div class="ic-label">Overall cash prize</div>
         <div class="ic-body prize-amount">${esc(formatPrize(prize))}</div>
       </div>` : '';
-    const rw = (T.rewards || prize) ? `<div class="panel section" style="flex:1;min-width:280px"><h2>Rewards</h2>
+    const rw = (rewardsText || prize || places.length) ? `<div class="panel section rewards-panel"><h2>Rewards</h2>
       ${prizeCell}
-      ${T.rewards ? '<div class="ic-body reward-body">' + renderArticleBody(T.rewards) + '</div>' : ''}</div>` : '';
-    const sp = T.sponsors ? `<div class="panel section" style="flex:1;min-width:280px"><h2>Sponsors</h2>
+      ${places.length ? rewardPlacesHTML(places, placesCur) : ''}
+      ${rewardsText ? '<div class="ic-body reward-body">' + renderArticleBody(rewardsText) + '</div>' : ''}</div>` : '';
+    const sp = T.sponsors ? `<div class="panel section sponsors-panel"><h2>Sponsors</h2>
       <div class="ic-body reward-body">${renderArticleBody(T.sponsors)}</div></div>` : '';
-    html += `<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:stretch">${rw}${sp}</div>`;
+    html += `<div class="rw-sp-row">${rw}${sp}</div>`;
   }
 
   html += gameInfoPanel();

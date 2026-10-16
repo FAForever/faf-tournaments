@@ -104,12 +104,13 @@ async function refreshPending() {
     app.parentNode.insertBefore(bar, app);
   }
   if (!fafAuth.enabled || !me()) { bar.innerHTML = ''; return; }
-  let items = [], alert = null, approvals = null;
+  let items = [], alert = null, approvals = null, proposals = null;
   try {
     const d = await (await fetch('/api/my/pending', { credentials: 'same-origin' })).json();
     items = (d && d.pending) || [];
     alert = (d && d.alert) || null;
     approvals = (d && d.approvals) || null;
+    proposals = (d && d.proposals) || null;
   }
   catch (e) { bar.innerHTML = ''; return; }
   const cur = tourneyId();
@@ -117,7 +118,8 @@ async function refreshPending() {
   // The alert points at the console, so it's noise while you're already in it.
   if (alert && location.pathname === '/siteadmin') alert = null;
   if (approvals && location.pathname === '/siteadmin') approvals = null;
-  if (!shown.length && !alert && !approvals) { bar.innerHTML = ''; return; }
+  if (proposals && location.pathname === '/siteadmin') proposals = null;
+  if (!shown.length && !alert && !approvals && !proposals) { bar.innerHTML = ''; return; }
   let html = '';
   if (shown.length) {
     const it = shown[0];
@@ -139,7 +141,20 @@ async function refreshPending() {
       '<button class="btn small" id="apprGo">Review</button>' +
       (approvals.dismissible ? '<button class="pending-x" id="apprX" title="Hide this until a new one comes in" aria-label="Dismiss">\u00D7</button>' : '') + '</div>';
   }
+  // Proposals waiting for a tournament director (decision 59).
+  if (proposals) {
+    html += '<div class="pending-bar pending-admin"><span class="pending-text">\uD83D\uDD14 ' + esc(proposals.text) + '</span>' +
+      '<button class="btn small" id="propGo">Review</button>' +
+      (proposals.dismissible ? '<button class="pending-x" id="propX" title="Hide this until a new one comes in" aria-label="Dismiss">\u00D7</button>' : '') + '</div>';
+  }
   bar.innerHTML = html;
+  const prGo = bar.querySelector('#propGo');
+  if (prGo) prGo.onclick = () => { saTab = 'proposals'; history.pushState(null, '', '/siteadmin'); route(); };
+  const prX = bar.querySelector('#propX');
+  if (prX) prX.onclick = async () => {
+    try { await api('/api/my/dismiss_requests', { kind: 'proposals' }); } catch (e) { toast(e.message, true); }
+    refreshPending();
+  };
   const apGo = bar.querySelector('#apprGo');
   if (apGo) apGo.onclick = () => { saTab = 'approvals'; history.pushState(null, '', '/siteadmin'); route(); };
   const apX = bar.querySelector('#apprX');
@@ -813,6 +828,128 @@ function formatPrize(p) {
   const num = isFinite(n) ? n.toLocaleString('en-US', { maximumFractionDigits: 2 }) : String(p.amount);
   const sym = PRIZE_SYMBOLS[p.currency] || '';
   return p.currency === 'RUB' ? (num + ' ' + sym) : (sym + num);
+}
+
+// ---------- rewards by place (decision 58) ----------
+// One row per place (1, 2, 3, or a label like 5-8 or MVP): the reward and the cash. Drawn on the
+// Overview like a podium, a medal-coloured place, the reward, and the cash on the right.
+function placeMedal(label) { const s = String(label || ''); return s === '1' ? 1 : s === '2' ? 2 : s === '3' ? 3 : 0; }
+function rewardPlacesCur(t) { return (t && t.rewardCur) || (t && t.prize && t.prize.currency) || 'USD'; }
+function rewardPlacesHTML(rows, cur) {
+  return '<div class="rwp-list">' + (rows || []).map(r => {
+    const m = placeMedal(r.place);
+    const amt = (r.amount !== null && r.amount !== undefined && r.amount !== '') ? formatPrize({ currency: cur, amount: r.amount }) : '';
+    return '<div class="rwp-row' + (m ? ' rwp-' + m : '') + '"><span class="rwp-place">' + esc(r.place) + '</span>' +
+      '<span class="rwp-text">' + esc(r.text || '') + '</span>' + (amt ? '<span class="rwp-amt">' + esc(amt) + '</span>' : '') + '</div>';
+  }).join('') + '</div>';
+}
+// Lines such as "1st - Champion avatar + $160" or "2. Faction face (80 EUR)" in old free text,
+// turned into rows. Whatever is not a place line stays as text.
+function parsePlacesFromText(text) {
+  const lines = String(text || '').split('\n');
+  const rows = [], rest = [];
+  let cur = '';
+  const head = /^\s*(?:\*\*|__)?\s*#?\s*(\d{1,3})(?:\s*(?:st|nd|rd|th))?(?:\s*place)?\s*(?:[-:.)=\u2013\u2014]+)\s*(.+)$/i;
+  const cash = /(?:^|\s)(?:\+|&|and|plus|,)?\s*\(?\s*(?:([$\u20ac\u20bd])\s*(\d[\d,]*(?:\.\d+)?)|(\d[\d,]*(?:\.\d+)?)\s*([$\u20ac\u20bd]|usd|eur|rub|dollars?|euros?))\s*\)?\s*(?:\*\*|__)?\s*$/i;
+  const curOf = c => { c = String(c || '').toLowerCase(); return (c === '$' || c === 'usd' || c.indexOf('dollar') === 0) ? 'USD' : (c === '\u20ac' || c === 'eur' || c.indexOf('euro') === 0) ? 'EUR' : (c === '\u20bd' || c === 'rub') ? 'RUB' : ''; };
+  for (const line of lines) {
+    const m = head.exec(line);
+    if (!m) { rest.push(line); continue; }
+    let body = m[2].replace(/\*\*|__/g, '').trim();
+    let amount = '';
+    const c = cash.exec(body);
+    if (c) {
+      amount = String(c[2] || c[3] || '').replace(/,/g, '');
+      cur = cur || curOf(c[1] || c[4]);
+      body = body.slice(0, c.index).replace(/[\s+&,]+$/, '').replace(/\s+(?:and|plus)$/i, '').trim();
+    }
+    rows.push({ place: String(parseInt(m[1], 10)), text: body, amount });
+  }
+  // what is left of the text, without the bold markers that wrapped the place lines
+  const left = rest.join('\n').replace(/^\s*(?:\*\*|__)\s*$/gm, '').replace(/^\s+|\s+$/g, '');
+  return { rows, rest: left, cur };
+}
+function placeRowHTML(r) {
+  r = r || {};
+  return '<div class="rwp-erow">' +
+    '<input type="text" class="rwpPlace" maxlength="12" placeholder="#" value="' + esc(r.place || '') + '" autocomplete="off" aria-label="Place">' +
+    '<input type="text" class="rwpText" maxlength="200" placeholder="e.g. Champion avatar" value="' + esc(r.text || '') + '" autocomplete="off" aria-label="Reward">' +
+    '<input type="number" class="rwpAmt" min="0" step="1" inputmode="numeric" placeholder="cash" value="' + (r.amount !== null && r.amount !== undefined ? esc(r.amount) : '') + '" aria-label="Cash">' +
+    '<button type="button" class="btn ghost small rwpDel" title="Remove this place" aria-label="Remove this place">&times;</button></div>';
+}
+// The editor (host form, Admin tab -> Info -> Rewards). A new one starts with places 1-3 to fill in;
+// a row with neither a reward nor cash is ignored, so unused ones need no deleting.
+function placesEditorHTML(rows, cur) {
+  const list = (rows && rows.length) ? rows : [{ place: '1' }, { place: '2' }, { place: '3' }];
+  const c0 = cur || 'USD';
+  return '<div class="rwp-edit" data-cur="' + esc(cur || '') + '">' +
+    '<div class="rwp-ehead"><span>Place</span><span>Reward</span><span>Cash</span><span></span></div>' +
+    '<div class="rwp-erows">' + list.map(placeRowHTML).join('') + '</div>' +
+    '<div class="rwp-etools">' +
+      '<button type="button" class="btn ghost small rwpAdd">+ Add a place</button>' +
+      '<label class="rwp-cur">Cash in <select class="rwpCur">' + ['USD', 'EUR', 'RUB'].map(k => '<option value="' + k + '"' + (k === c0 ? ' selected' : '') + '>' + k + ' ' + esc(PRIZE_SYMBOLS[k]) + '</option>').join('') + '</select></label>' +
+      '<span class="rwpSum muted small"></span>' +
+      '<button type="button" class="btn ghost small rwpUseSum" hidden>Use as the overall cash prize</button>' +
+    '</div>' +
+    '<button type="button" class="btn small rwpImport" hidden>Read the places from the rewards text below</button>' +
+  '</div>';
+}
+// opts: { prizeCur, prizeAmt } (the overall cash prize inputs), text (the free-text rewards area).
+function wirePlacesEditor(box, opts) {
+  const o = opts || {};
+  const rowsEl = box.querySelector('.rwp-erows');
+  const curSel = box.querySelector('.rwpCur');
+  const read = () => Array.from(rowsEl.querySelectorAll('.rwp-erow')).map(r => ({
+    place: r.querySelector('.rwpPlace').value.trim(), text: r.querySelector('.rwpText').value.trim(), amount: r.querySelector('.rwpAmt').value.trim()
+  })).filter(r => r.text || r.amount !== '');
+  const total = () => read().reduce((a, r) => a + ((r.amount !== '' && isFinite(Number(r.amount))) ? Number(r.amount) : 0), 0);
+  const sync = () => {
+    const rows = read();
+    const any = rows.some(r => r.amount !== '');
+    box.querySelector('.rwpSum').textContent = any ? 'Total ' + formatPrize({ currency: curSel.value, amount: total() }) : '';
+    box.querySelector('.rwpUseSum').hidden = !(any && o.prizeAmt);
+    box.querySelector('.rwpImport').hidden = !(o.text && !rows.length && parsePlacesFromText(o.text.value).rows.length);
+  };
+  const nextPlace = () => {
+    const nums = Array.from(rowsEl.querySelectorAll('.rwpPlace')).map(i => parseInt(i.value, 10)).filter(n => isFinite(n));
+    return nums.length ? Math.max.apply(null, nums) + 1 : 1;
+  };
+  box.querySelector('.rwpAdd').onclick = () => {
+    rowsEl.insertAdjacentHTML('beforeend', placeRowHTML({ place: String(nextPlace()) }));
+    const last = rowsEl.lastElementChild;
+    if (last) last.querySelector('.rwpText').focus();
+    sync();
+  };
+  rowsEl.addEventListener('click', e => {
+    const d = e.target.closest('.rwpDel');
+    if (d) { d.closest('.rwp-erow').remove(); sync(); }
+  });
+  rowsEl.addEventListener('input', sync);
+  curSel.onchange = sync;
+  box.querySelector('.rwpUseSum').onclick = () => {
+    if (o.prizeCur) o.prizeCur.value = curSel.value;
+    if (o.prizeAmt) o.prizeAmt.value = String(Math.round(total() * 100) / 100);
+    toast('The overall cash prize is now ' + formatPrize({ currency: curSel.value, amount: total() }) + ' - save to keep it');
+  };
+  box.querySelector('.rwpImport').onclick = () => {
+    const p = parsePlacesFromText(o.text.value);
+    if (!p.rows.length) return;
+    rowsEl.innerHTML = p.rows.map(placeRowHTML).join('');
+    if (p.cur) curSel.value = p.cur;
+    else if (o.prizeCur && o.prizeCur.value) curSel.value = o.prizeCur.value;
+    o.text.value = p.rest;
+    o.text.dispatchEvent(new Event('input'));
+    sync();
+    toast('Read ' + p.rows.length + ' place' + (p.rows.length === 1 ? '' : 's') + ' from the text - check them, then save');
+  };
+  if (o.text) o.text.addEventListener('input', sync);
+  // no currency saved for the places yet: follow the overall cash prize's
+  if (!box.dataset.cur && o.prizeCur && o.prizeCur.value) curSel.value = o.prizeCur.value;
+  sync();
+  return {
+    get: () => ({ rows: read().map(r => ({ place: r.place, text: r.text, amount: r.amount === '' ? null : r.amount })), cur: curSel.value }),
+    set: (rows, cur) => { rowsEl.innerHTML = ((rows && rows.length) ? rows : [{ place: '1' }, { place: '2' }, { place: '3' }]).map(placeRowHTML).join(''); if (cur) curSel.value = cur; sync(); }
+  };
 }
 
 function statusLabel(s) {
@@ -1506,12 +1643,31 @@ function drawTopbar(modeText) {
 
 // Ask the site admin for permission to host. Shown when an approved-only server turns
 // someone away, so the next step is obvious rather than a dead end.
-function hostAccessFlow(st) {
+function hostAccessFlow(st, asked) {
+  // Without hosting rights a player can still PROPOSE a tournament for the TD team to run (decision 59).
+  const propose = typeof proposalsOn === 'function' && proposalsOn();
+  const goPropose = () => { closeModal(); history.pushState(null, '', '/host?propose=1'); route(); };
   if (st && st.pending) {
     return modal(`<h3>Request already sent</h3>
       <p class="muted small">Your request to host tournaments is waiting on the site admin. You'll be able to host as soon as it's approved.</p>
-      <div class="actions"><button class="btn primary" id="haClose">OK</button></div>`, root => {
+      ${propose ? '<p class="muted small">Meanwhile you can <strong>propose</strong> a tournament: set it up the way you want it, and the TD team takes it over and runs it.</p>' : ''}
+      <div class="actions">${propose ? '<button class="btn" id="haPropose">Propose a tournament</button>' : ''}<button class="btn primary" id="haClose">OK</button></div>`, root => {
       root.querySelector('#haClose').onclick = closeModal;
+      const pp = root.querySelector('#haPropose');
+      if (pp) pp.onclick = goPropose;
+    });
+  }
+  if (propose && !asked) {
+    return modal(`<h3>Host or <span class="h2-strong">propose</span>?</h3>
+      <p class="muted small">Hosting on this site is approved per FAF account. Without that you can still <strong>propose</strong> a tournament: build it the way you want it played (format, rating limits, maps, mods, rewards), and a tournament director takes it over and runs it. You don't have to run anything.</p>
+      <div class="actions" style="flex-wrap:wrap">
+        <button class="btn ghost" id="haCancel">Cancel</button>
+        <button class="btn" id="haAsk">Request permission to host</button>
+        <button class="btn primary" id="haPropose">Propose a tournament</button>
+      </div>`, root => {
+      root.querySelector('#haCancel').onclick = closeModal;
+      root.querySelector('#haPropose').onclick = goPropose;
+      root.querySelector('#haAsk').onclick = () => { closeModal(); hostAccessFlow(st, true); };
     });
   }
   modal(`<h3>Request permission to host</h3>
@@ -1639,19 +1795,22 @@ async function renderSiteAdmin() {
   // other directors); the site-admin list is the one real escalation, so it stays out.
   const director = !siteAdmin() && isDirector;
   const apOn = approvalsOn();   // without FAF login there is nothing to approve (legacy publishing)
-  const validTabs = (director ? ['approvals', 'requests', 'directors', 'bans', 'links', 'logs', 'archived', 'articles'] : ['approvals', 'requests', 'siteadmins', 'directors', 'bans', 'links', 'logs', 'archived', 'articles'])
-    .filter(k => apOn || k !== 'approvals');
+  const prOn = typeof proposalsOn === 'function' && proposalsOn();   // proposals to the TD team (decision 59)
+  const validTabs = (director ? ['approvals', 'proposals', 'requests', 'directors', 'bans', 'links', 'logs', 'archived', 'articles'] : ['approvals', 'proposals', 'requests', 'siteadmins', 'directors', 'bans', 'links', 'live', 'logs', 'archived', 'articles'])
+    .filter(k => (apOn || k !== 'approvals') && (prOn || k !== 'proposals'));
   if (validTabs.indexOf(saTab) < 0) saTab = validTabs[0];
   app.innerHTML = `<div class="page">
     <h1 style="margin:0 0 14px">Site admin${director ? ' <span class="muted" style="font-size:14px;font-weight:400">(tournament director)</span>' : ''}</h1>
-    ${director ? '<p class="muted small" style="margin:-8px 0 12px">As a tournament director you have the whole console except <strong>Site Admins</strong>: ' + (apOn ? 'publishing approvals, ' : '') + 'access requests, the director roster, tournament bans, allowed links, logs, archived tournaments and the FAQ / Rules articles.</p>' : ''}
+    ${director ? '<p class="muted small" style="margin:-8px 0 12px">As a tournament director you have the whole console except <strong>Site Admins</strong> and <strong>Livestreams</strong>: ' + (apOn ? 'publishing approvals, ' : '') + (prOn ? 'tournament proposals, ' : '') + 'access requests, the director roster, tournament bans, allowed links, logs, archived tournaments and the FAQ / Rules articles.</p>' : ''}
     <div class="tabs" style="margin-bottom:14px">
       ${apOn ? `<button class="tab ${saTab === 'approvals' ? 'active' : ''}" data-satab="approvals">Approvals${(saData && saData.publishing && saData.publishing.pending.length) ? ' (' + saData.publishing.pending.length + ')' : ''}</button>` : ''}
+      ${prOn ? `<button class="tab ${saTab === 'proposals' ? 'active' : ''}" data-satab="proposals">Proposals${(saData && saData.proposals && saData.proposals.pending.length) ? ' (' + saData.proposals.pending.length + ')' : ''}</button>` : ''}
       ${`<button class="tab ${saTab === 'requests' ? 'active' : ''}" data-satab="requests">Requests${(saData && ((saData.requests || []).filter(r => r.status === 'pending').length + (saData.editorRequests || []).filter(r => r.status === 'pending').length + (saData.importerRequests || []).filter(r => r.status === 'pending').length)) ? ' (' + ((saData.requests || []).filter(r => r.status === 'pending').length + (saData.editorRequests || []).filter(r => r.status === 'pending').length + (saData.importerRequests || []).filter(r => r.status === 'pending').length) + ')' : ''}</button>`}
       ${director ? '' : `<button class="tab ${saTab === 'siteadmins' ? 'active' : ''}" data-satab="siteadmins">Site Admins${(saData && (saData.siteAdmins || []).length) ? ' (' + saData.siteAdmins.length + ')' : ''}</button>`}
       <button class="tab ${saTab === 'directors' ? 'active' : ''}" data-satab="directors">Directors${(saData && (saData.directors || []).length) ? ' (' + saData.directors.length + ')' : ''}</button>
       <button class="tab ${saTab === 'bans' ? 'active' : ''}" data-satab="bans">Tournament bans${(saData && (saData.bans || []).length) ? ' (' + saData.bans.length + ')' : ''}</button>
       <button class="tab ${saTab === 'links' ? 'active' : ''}" data-satab="links">Allowed links</button>
+      ${director ? '' : `<button class="tab ${saTab === 'live' ? 'active' : ''}" data-satab="live">Livestreams</button>`}
       <button class="tab ${saTab === 'logs' ? 'active' : ''}" data-satab="logs">Logs</button>
       <button class="tab ${saTab === 'archived' ? 'active' : ''}" data-satab="archived">Archived${(saData && (saData.archived || []).length) ? ' (' + saData.archived.length + ')' : ''}</button>
       <button class="tab ${saTab === 'articles' ? 'active' : ''}" data-satab="articles">Articles</button>
@@ -1673,7 +1832,9 @@ async function renderSiteAdmin() {
   }
   const body = document.getElementById('saBody');
   if (saTab === 'approvals') drawSaApprovals(body);
+  else if (saTab === 'proposals') drawSaProposals(body);
   else if (saTab === 'links') drawSaLinks(body);
+  else if (saTab === 'live') drawSaLive(body);
   else if (saTab === 'requests') drawSaRequests(body);
   else if (saTab === 'siteadmins') drawSaSiteAdmins(body);
   else if (saTab === 'directors') drawSaDirectors(body);
@@ -2063,7 +2224,17 @@ const SA_ACTION_LABEL = {
   tournament_publish_scheduled: 'Scheduled publishing',
   tournament_publish_unscheduled: 'Cancelled scheduled publishing',
   link_site_added: 'Allowed a link site',
-  link_site_removed: 'Removed a link site'
+  link_site_removed: 'Removed a link site',
+  live_settings_changed: 'Changed the live status settings',
+  proposal_submitted: 'Proposed a tournament',
+  proposal_withdrawn: 'Withdrew a proposal',
+  proposal_taken: 'Took over a proposal',
+  proposal_declined: 'Declined a proposal',
+  proposal_timeout: 'Proposal came back (timeout)',
+  proposal_released: 'Gave a proposal back',
+  proposal_unlocked: 'Lifted a proposal lock',
+  proposal_dropped: 'Turned a proposal into a draft',
+  proposal_days_changed: 'Changed how long proposals wait'
 };
 
 // Render rich text safely (articles, briefing, rewards). Everything is HTML-escaped first,
@@ -2350,6 +2521,92 @@ function drawSaLogs(el) {
     <p class="muted small">Newest first. Records who created and deleted tournaments, and hosting-access decisions. Keeps the most recent 5000 entries.</p>
     ${logs.length ? `<table class="sa-log"><thead><tr><th style="width:150px">When</th><th style="width:190px">Action</th><th>Tournament</th><th style="width:200px">Who</th><th style="width:120px">IP</th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="empty">Nothing logged yet.</div>'}
   </div>`;
+}
+
+// ---------- console: Livestreams (decision 57, site admins only) ----------
+// "LIVE NOW" and the viewer count on a tournament's Livestream panel need Twitch and YouTube
+// credentials. A site admin sets them here instead of in the deployment; the server keeps them,
+// never sends a secret back (only whether one is set and its last 4 characters), and logs what
+// changed but never the value. The server's environment variables still work as the fallback.
+function drawSaLive(el) {
+  const L = (saData && saData.live) || null;
+  if (!L) { el.innerHTML = '<div class="panel"><div class="empty">Not available.</div></div>'; return; }
+  const when = ms => ms ? esc(fmtWhen(ms)) : '';
+  const fromNote = f => f === 'env' ? ' <span class="muted small">(from the server environment; a value saved here replaces it)</span>' : '';
+  const state = (on, kind) => {
+    const err = L.lastError && L.lastError[kind];
+    const ok = L.lastOk && L.lastOk[kind];
+    let h = on ? '<span class="idbadge pubchip pub-ok">checking</span>' : '<span class="idbadge pubchip">off</span>';
+    if (!on) h += ' <span class="muted small">' + (L.off ? 'switched off below' : (kind === 'twitch' ? 'no client id and secret' : 'no API key')) + '</span>';
+    if (on && ok) h += ' <span class="muted small">last answer ' + when(ok) + '</span>';
+    if (on && err && (!ok || err.at > ok)) h += ' <span class="warn small">last error ' + when(err.at) + ': ' + esc(err.msg) + '</span>';
+    return h;
+  };
+  const secretPh = (o, what) => o.set ? 'set, ends in ' + o.tail + (o.from === 'env' ? ' (from the environment)' : '') + ' - leave empty to keep it' : 'paste the ' + what;
+  el.innerHTML = `<div class="panel section live-settings">
+    <h2>Live <span class="h2-strong">status</span></h2>
+    <p class="muted small">On a tournament's days the Overview shows <strong>LIVE NOW</strong> and the viewer count next to each Twitch or YouTube link. The server asks Twitch and YouTube with the credentials below, only while someone has the tournament open, and only from ${esc(L.before)} h before each event day's start to ${esc(L.after)} h after it, never once the tournament is finished. Without credentials nothing is asked and nothing is shown. Links must also be on the Allowed links list.</p>
+    <div class="live-state"><div><strong>Twitch</strong> ${state(L.active.twitch, 'twitch')}</div><div><strong>YouTube</strong> ${state(L.active.youtube, 'youtube')}</div></div>
+    <label class="live-cb"><input type="checkbox" id="lvOn"${L.off ? '' : ' checked'}> Show live status on tournament pages</label>
+
+    <h3 class="live-h3">Twitch</h3>
+    <p class="muted small">At <strong>dev.twitch.tv/console</strong> (your Twitch account needs two-factor authentication): Register Your Application, OAuth redirect URL <code>http://localhost</code>, category Website Integration, client type Confidential. Then copy the Client ID and click New Secret. No Twitch user ever logs in: the server uses an app token.</p>
+    <label>Client ID${fromNote(L.twitchIdFrom)}</label>
+    <input type="text" id="lvTwId" maxlength="64" autocomplete="off" spellcheck="false" value="${esc(L.twitchId || '')}" placeholder="e.g. abcdefghijklmnopqrstuvwxyz0123">
+    <label>Client secret</label>
+    <div class="live-row"><input type="password" id="lvTwSecret" maxlength="64" autocomplete="new-password" spellcheck="false" placeholder="${esc(secretPh(L.twitchSecret, 'client secret'))}">
+      ${L.twitchSecret.from === 'here' ? '<button class="btn ghost small" id="lvTwClear" type="button">Remove</button>' : ''}</div>
+    <div class="live-row"><button class="btn small" id="lvTwTest" type="button">Test Twitch</button><span id="lvTwOut" class="small"></span></div>
+
+    <h3 class="live-h3">YouTube</h3>
+    <p class="muted small">In <strong>Google Cloud</strong>: a project, APIs &amp; Services, Library, enable <strong>YouTube Data API v3</strong>; then Credentials, Create credentials, API key, and restrict the key to that API. The free quota is 10,000 units a day: a video link costs 1 unit per check, a channel link 2.</p>
+    <label>API key</label>
+    <div class="live-row"><input type="password" id="lvYtKey" maxlength="100" autocomplete="new-password" spellcheck="false" placeholder="${esc(secretPh(L.ytKey, 'API key'))}">
+      ${L.ytKey.from === 'here' ? '<button class="btn ghost small" id="lvYtClear" type="button">Remove</button>' : ''}</div>
+    <div class="live-row"><button class="btn small" id="lvYtTest" type="button">Test YouTube</button><span id="lvYtOut" class="small"></span></div>
+
+    <h3 class="live-h3">Timing</h3>
+    <div class="live-grid">
+      <label class="live-num"><span>Ask Twitch every <span class="muted">(seconds)</span></span><input type="number" id="lvTwEvery" min="${L.limits.twitchEvery[0]}" max="${L.limits.twitchEvery[1]}" value="${esc(L.twitchEvery)}"></label>
+      <label class="live-num"><span>Ask YouTube every <span class="muted">(seconds)</span></span><input type="number" id="lvYtEvery" min="${L.limits.ytEvery[0]}" max="${L.limits.ytEvery[1]}" value="${esc(L.ytEvery)}"></label>
+      <label class="live-num"><span>Start checking <span class="muted">(hours before a day's start)</span></span><input type="number" id="lvBefore" min="${L.limits.before[0]}" max="${L.limits.before[1]}" value="${esc(L.before)}"></label>
+      <label class="live-num"><span>Stop checking <span class="muted">(hours after a day's start)</span></span><input type="number" id="lvAfter" min="${L.limits.after[0]}" max="${L.limits.after[1]}" value="${esc(L.after)}"></label>
+    </div>
+    <p class="muted small">Defaults: ${L.defaults.twitchEvery} s, ${L.defaults.ytEvery} s, ${L.defaults.before} h before, ${L.defaults.after} h after. A day with no start time counts as that whole UTC day and the night after it.</p>
+    <div style="margin-top:12px"><button class="btn primary" id="lvSave">Save</button></div>
+  </div>`;
+  const $ = id => el.querySelector('#' + id);
+  const after = (r, msg) => { saData.live = r.live; toast(msg); drawSaLive(el); };
+  $('lvSave').onclick = async () => {
+    try {
+      const r = await saPost('live_save', {
+        off: !$('lvOn').checked,
+        twitchId: $('lvTwId').value.trim(),
+        twitchSecret: $('lvTwSecret').value.trim(),
+        ytKey: $('lvYtKey').value.trim(),
+        twitchEvery: $('lvTwEvery').value, ytEvery: $('lvYtEvery').value,
+        before: $('lvBefore').value, after: $('lvAfter').value
+      });
+      after(r, r.changed ? 'Saved' : 'Nothing changed');
+    } catch (e) { toast(e.message, true); }
+  };
+  const clear = (btn, flag, what) => { if (btn) btn.onclick = async () => {
+    if (!confirm('Remove the saved ' + what + '?')) return;
+    try { const r = await saPost('live_save', { [flag]: 1 }); after(r, 'Removed'); } catch (e) { toast(e.message, true); }
+  }; };
+  clear($('lvTwClear'), 'clearTwitchSecret', 'Twitch client secret');
+  clear($('lvYtClear'), 'clearYtKey', 'YouTube API key');
+  const test = (btn, out, which) => { btn.onclick = async () => {
+    btn.disabled = true; out.textContent = 'Asking ' + (which === 'twitch' ? 'Twitch' : 'YouTube') + '...'; out.className = 'small muted';
+    try {
+      const r = await saPost('live_test', { which, twitchId: $('lvTwId').value.trim(), twitchSecret: $('lvTwSecret').value.trim(), ytKey: $('lvYtKey').value.trim() });
+      out.textContent = r.message || (r.ok ? 'OK' : 'Failed');
+      out.className = 'small ' + (r.ok ? 'live-ok' : 'warn');
+    } catch (e) { out.textContent = e.message; out.className = 'small warn'; }
+    btn.disabled = false;
+  }; };
+  test($('lvTwTest'), $('lvTwOut'), 'twitch');
+  test($('lvYtTest'), $('lvYtOut'), 'youtube');
 }
 
 async function saPost(action, body) {

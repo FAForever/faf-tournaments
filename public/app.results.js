@@ -967,12 +967,6 @@ async function drawAdmin(el) {
 
   panel.rewards = `<div class="panel section"><h2>Rewards</h2>
     <p class="muted small">Shown prominently on the Overview tab. Editable at any time.</p>
-    <div class="row" style="justify-content:space-between;align-items:center">
-      <label style="margin:0">Rewards</label>
-      <span class="muted small">Paste a screenshot straight in (e.g. an avatar), or <a href="#" id="aiRwImgBtn">insert an image</a>.</span>
-    </div>
-    ${mdToolbarHTML()}
-    <textarea id="aiRewards" maxlength="2000" rows="5" placeholder="e.g. 1st place: exclusive avatar + 500 credits...">${esc(T.rewards || '')}</textarea>
     <label style="margin-top:10px">Overall cash prize <span class="muted small">(shown as its own box at the top of Rewards)</span></label>
     <div class="prize-row">
       <select id="aiPrizeCur">
@@ -983,6 +977,14 @@ async function drawAdmin(el) {
       </select>
       <input type="number" id="aiPrizeAmt" min="0" step="1" inputmode="numeric" placeholder="Amount" value="${(T.prize && T.prize.amount != null) ? T.prize.amount : ''}">
     </div>
+    <label style="margin-top:14px">By place <span class="muted small">(one row per place: the reward and its cash. Shown like a podium; leave a row empty to skip it)</span></label>
+    <div id="aiPlaces">${placesEditorHTML(T.rewardPlaces || [], T.rewardCur || '')}</div>
+    <div class="row" style="justify-content:space-between;align-items:center;margin-top:12px">
+      <label style="margin:0">Anything else <span class="muted small">(text under the places)</span></label>
+      <span class="muted small">Paste a screenshot straight in (e.g. an avatar), or <a href="#" id="aiRwImgBtn">insert an image</a>.</span>
+    </div>
+    ${mdToolbarHTML()}
+    <textarea id="aiRewards" maxlength="2000" rows="4" placeholder="e.g. Every finalist gets the tournament avatar">${esc(T.rewards || '')}</textarea>
     <input type="file" id="aiRwImgFile" accept="image/*" style="display:none">
     <div style="margin-top:14px"><button class="btn" id="aiRwSave">Save rewards</button></div>
   </div>`;
@@ -1209,9 +1211,11 @@ async function drawAdmin(el) {
   // Info: what players read about the event. Format: how it is played, and while it runs the
   // playoffs and the early end. Signups: who can enter and when. People: the accounts that have a
   // role here, or a restriction.
+  // a proposal's TD (decision 59): what its proposer asked to keep, above the Format panels
+  panel.proposalLock = typeof proposalLockNoticeHTML === 'function' ? (proposalLockNoticeHTML('format') + proposalLockNoticeHTML('maps', true)) : '';
   const order = {
     info: ['share', 'publishing', 'details', 'setup', 'rewards', 'sponsors', 'streams', 'images', 'series', 'category', 'danger'],
-    format: ['format', 'seeding', 'playoffs', 'endEarly', 'ended', 'reporting', 'vetoes', 'fvetoes', 'notes'],
+    format: ['proposalLock', 'format', 'seeding', 'playoffs', 'endEarly', 'ended', 'reporting', 'vetoes', 'fvetoes', 'notes'],
     signups: ['signups', 'rating', 'qualifiers'],
     people: ['organizers', 'casters', 'bans', 'mutes', 'names']
   };
@@ -1621,15 +1625,19 @@ async function drawAdmin(el) {
       await refresh();
     } catch (e) { toast(e.message, true); }
   };
+  // rewards by place (decision 58)
+  const aiPlacesBox = el.querySelector('#aiPlaces .rwp-edit');
+  const aiPlaces = aiPlacesBox ? wirePlacesEditor(aiPlacesBox, { prizeCur: document.getElementById('aiPrizeCur'), prizeAmt: document.getElementById('aiPrizeAmt'), text: aiRwTa }) : null;
   const rwSave = document.getElementById('aiRwSave');
   if (rwSave) rwSave.onclick = async () => {
     try {
-      await api('/api/t/' + T.id + '/edit_info', {
+      const pl = aiPlaces ? aiPlaces.get() : null;
+      await api('/api/t/' + T.id + '/edit_info', Object.assign({
         rewards: aiRwTa.value,
         prizeCurrency: (document.getElementById('aiPrizeCur') || {}).value || '',
         prizeAmount: (document.getElementById('aiPrizeAmt') || {}).value || '',
         admin: adminToken()
-      });
+      }, pl ? { rewardPlaces: pl.rows, rewardCur: pl.rows.some(r => r.amount !== null) ? pl.cur : '' } : {}));
       toast('Rewards saved');
       await refresh();
     } catch (e) { toast(e.message, true); }
