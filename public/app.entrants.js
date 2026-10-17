@@ -1936,8 +1936,13 @@ function openStartConfig() {
   }
 
   // swiss
-  const defR = Math.max(1, R);
   const sp = T.plan || {};
+  // the rounds planned on the hosting form or the Format panel (decision 61), else enough rounds to
+  // find a winner for this field
+  const planR = swissRoundsSet(T);
+  const defR = planR || Math.max(1, R);
+  // each team can meet every other team once: n - 1 rounds, or n with an odd field (a bye each)
+  const freshR = n % 2 ? n : n - 1;
   // Record cuts and stage 2 are decided on the create form / format panel, not here. The
   // dialog reflects them so nobody starts a LotS bracket wondering where the settings went.
   const cutW = parseInt(sp.winCut, 10) || 0;
@@ -1970,6 +1975,7 @@ function openStartConfig() {
     <div id="swRoundsWrap" style="display:${cutsOn ? 'none' : ''}">
       <label>Number of rounds</label>
       <input type="number" id="swRounds" min="1" max="15" value="${defR}" autocomplete="off">
+      <div class="muted small" id="swRoundsNote" style="margin-top:4px"></div>
     </div>
     <label>Each match is</label>
     <select id="swBo"><option value="1"${sp.bo === 1 ? ' selected' : ''}>Bo1</option><option value="3"${sp.bo !== 1 ? ' selected' : ''}>Bo3</option></select>
@@ -1986,6 +1992,19 @@ function openStartConfig() {
     root => {
       const fin = root.querySelector('#swFinal');
       fin.onchange = () => { root.querySelector('#swFinalBoWrap').style.display = fin.checked ? '' : 'none'; };
+      // where the number came from, and a field too small for it (decision 61)
+      const rIn = root.querySelector('#swRounds');
+      const rNote = root.querySelector('#swRoundsNote');
+      const syncRounds = () => {
+        const v = parseInt(rIn.value, 10) || 0;
+        const bits = [];
+        if (planR && v === planR) bits.push('As planned on the Format panel.');
+        if (freshR >= 1 && v > freshR) bits.push(n + ' teams can only play ' + freshR + ' round' + (freshR === 1 ? '' : 's') + ' without someone meeting the same opponent twice.');
+        rNote.textContent = bits.join(' ');
+        rNote.className = 'small ' + (freshR >= 1 && v > freshR ? 'warn' : 'muted');
+      };
+      rIn.addEventListener('input', syncRounds);
+      syncRounds();
       root.querySelector('#cfgCancel').onclick = closeModal; if (typeof lockStartDialog === 'function') lockStartDialog(root);
       root.querySelector('#cfgGo').onclick = () => {
         const cfg = {

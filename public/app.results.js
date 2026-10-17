@@ -579,7 +579,49 @@ function adminBuildTocs(el) {
   });
 }
 
+// The actual winners of an imported tournament, for the Hall of Fame (decision 60). Challonge only
+// knew the entries, so nobody from an import counts until a site admin or a tournament director
+// adds the FAF accounts that won it here. Shown on the Admin tab of imported tournaments only.
+function importWinnersPanelHTML() {
+  const ws = T.hofWinners || [];
+  const champ = (T.teams || []).find(x => x.id === T.championTeamId);
+  return `<div class="panel section hofw-panel"><h2>Winners for the <span class="h2-strong">Hall of Fame</span></h2>
+    <p class="muted small">This tournament was imported from Challonge, which only knows the entries${champ ? ' (the winner: <strong>' + esc(champ.name) + '</strong>)' : ''}, not who played. The Hall of Fame counts only FAF accounts, so add the accounts that won it: each gets a win and an entry. Nobody else from an imported tournament counts.</p>
+    <div class="hofw-list">${ws.length
+      ? ws.map(w => '<span class="hofw-chip">' + esc(w.name) + '<button class="hofw-x" type="button" data-hofwdel="' + esc(w.fafId) + '" title="Remove ' + esc(w.name) + '" aria-label="Remove ' + esc(w.name) + '">&times;</button></span>').join('')
+      : '<span class="muted small">No winners added yet.</span>'}</div>
+    <div class="hofw-add"><input type="text" id="hofwName" maxlength="40" placeholder="FAF name or FAF id" autocomplete="off" spellcheck="false" aria-label="A winner's FAF name or FAF id"><button class="btn small" id="hofwAdd" type="button">Add winner</button></div>
+  </div>`;
+}
+function wireImportWinners(root) {
+  const inp = root.querySelector('#hofwName');
+  const add = root.querySelector('#hofwAdd');
+  if (add) add.onclick = async () => {
+    const q = inp ? inp.value.trim() : '';
+    if (!q) return toast('Enter a FAF name or FAF id', true);
+    add.disabled = true;
+    try {
+      const r = await api('/api/t/' + T.id + '/import_winner_add', { player: q });
+      toast(r.name + ' added - a win in the Hall of Fame');
+      if (inp) inp.value = '';
+      await refresh();
+    } catch (e) { toast(e.message, true); }
+    finally { add.disabled = false; }
+  };
+  if (inp) inp.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); if (add) add.click(); } };
+  root.querySelectorAll('[data-hofwdel]').forEach(b => b.onclick = async () => {
+    try { await api('/api/t/' + T.id + '/import_winner_remove', { fafId: b.dataset.hofwdel }); toast('Removed from the winners'); await refresh(); }
+    catch (e) { toast(e.message, true); }
+  });
+}
+
 async function drawAdmin(el) {
+  // a tournament director on an imported tournament: only its winners (decision 60)
+  if (T.imported && !viewerIsOrganizer()) {
+    if (T.viewer && T.viewer.hofWinners) { el.innerHTML = importWinnersPanelHTML(); wireImportWinners(el); }
+    else el.innerHTML = '<div class="panel"><div class="empty">Organizer rights required.</div></div>';
+    return;
+  }
   let secrets = (_adminSecrets && _adminSecrets.tid === T.id) ? _adminSecrets.data : null;
   if (!secrets) {
     // Only the first draw waits. Every later one (the 4 s poll, the refresh after a save) draws in
@@ -811,6 +853,11 @@ async function drawAdmin(el) {
           </div>`;
         })()}
         <div id="af_pSwiss" style="display:none">
+          <div id="af_swRoundsWrap" style="display:${(p.winCut || p.lossCut) ? 'none' : 'block'}">
+            <label>Number of rounds</label>
+            <select id="af_swrounds">${swissRoundsOptions(p.rounds)}</select>
+            <div class="muted small" style="margin-top:4px">${esc(SWISS_ROUNDS_HINT)}</div>
+          </div>
           <label>Match lengths</label>
           <div class="row" style="gap:10px">
             <div style="flex:1"><div class="muted small">Each match</div><select id="af_swbo"><option value="1"${p.bo === 1 ? ' selected' : ''}>Bo1</option><option value="3"${p.bo !== 1 ? ' selected' : ''}>Bo3</option></select></div>
@@ -1213,8 +1260,9 @@ async function drawAdmin(el) {
   // role here, or a restriction.
   // a proposal's TD (decision 59): what its proposer asked to keep, above the Format panels
   panel.proposalLock = typeof proposalLockNoticeHTML === 'function' ? (proposalLockNoticeHTML('format') + proposalLockNoticeHTML('maps', true)) : '';
+  panel.hofWinners = (T.imported && T.viewer && T.viewer.hofWinners) ? importWinnersPanelHTML() : '';
   const order = {
-    info: ['share', 'publishing', 'details', 'setup', 'rewards', 'sponsors', 'streams', 'images', 'series', 'category', 'danger'],
+    info: ['share', 'publishing', 'hofWinners', 'details', 'setup', 'rewards', 'sponsors', 'streams', 'images', 'series', 'category', 'danger'],
     format: ['proposalLock', 'format', 'seeding', 'playoffs', 'endEarly', 'ended', 'reporting', 'vetoes', 'fvetoes', 'notes'],
     signups: ['signups', 'rating', 'qualifiers'],
     people: ['organizers', 'casters', 'bans', 'mutes', 'names']
@@ -1230,6 +1278,7 @@ async function drawAdmin(el) {
       + order[k].map(n => panel[n] || '').join('') + '</div>').join('');
   el.querySelectorAll('[data-asub]').forEach(b => b.onclick = () => adminShowSub(b.dataset.asub));
   wirePlayoffSetup();
+  wireImportWinners(el);
 
   // Multi-day picker, two-way bound to the native date input beside it (see mountDayPicker).
   let _tdDayPick = null, _tdDayTimes = null;
@@ -1786,6 +1835,8 @@ async function drawAdmin(el) {
       }
       if (g('af_sw2thirdWrap')) g('af_sw2thirdWrap').style.display = (g('af_sw2type') && g('af_sw2type').value === 'double') ? 'none' : 'flex';
       if (g('af_swCutBox')) g('af_swCutBox').style.display = (g('af_swcuts') && g('af_swcuts').checked) ? 'block' : 'none';
+      // record cuts work out their own round count, so the planned number only shows without them
+      if (g('af_swRoundsWrap')) g('af_swRoundsWrap').style.display = (g('af_swcuts') && g('af_swcuts').checked) ? 'none' : 'block';
       if (g('af_sw2Box')) g('af_sw2Box').style.display = (g('af_sw2') && g('af_sw2').checked) ? 'block' : 'none';
       if (g('af_swfinal')) g('af_swfinal').disabled = !!(g('af_sw2') && g('af_sw2').checked);
       if (g('af_stopBox')) g('af_stopBox').style.display = (g('af_stopOn') && g('af_stopOn').checked) ? 'block' : 'none';
@@ -1860,6 +1911,7 @@ async function drawAdmin(el) {
         else if (g('af_bt').value === 'double') body.plan = { wb: g('af_wb').value, wbFinal: g('af_wbf').value, lb: g('af_lb').value, lbFinal: g('af_lbf').value, gf: g('af_gf').value, lbHandicap: g('af_hcap').checked };
         else {
           body.plan = { bo: g('af_swbo').value, final: g('af_swfinal').checked, finalBo: g('af_swfbo').value, fast: g('af_swfast').checked };
+          if (g('af_swrounds')) body.plan.rounds = g('af_swrounds').value;
           const cutsOn = g('af_swcuts') && g('af_swcuts').checked;
           body.plan.winCut = cutsOn ? g('af_swwin').value : 0;
           body.plan.lossCut = cutsOn ? g('af_swloss').value : 0;
@@ -2501,18 +2553,24 @@ async function loadHall(q, page) {
   }
   const players = data.players || [];
   if (!data.all) { body.innerHTML = '<div class="empty">No results yet - win a tournament to get on the board.</div>'; return; }
+  // since when it counts: the first tournament with signups by FAF account (decision 60)
+  const sinceTxt = data.since ? ' - tracking since ' + new Date(data.since + 'T12:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' }) : '';
   const count = data.q
-    ? '<p class="muted small" style="margin:0 0 8px">' + data.total + ' of ' + data.all + ' players match</p>'
-    : '<p class="muted small" style="margin:0 0 8px">' + data.all + ' players, by championships</p>';
+    ? '<p class="muted small hof-count" style="margin:0 0 8px">' + data.total + ' of ' + data.all + ' players match' + sinceTxt + '</p>'
+    : '<p class="muted small hof-count" style="margin:0 0 8px">' + data.all + ' players, by championships' + sinceTxt + '</p>';
   if (!players.length) { body.innerHTML = count + '<div class="empty">No player matches \u201c' + esc(data.q) + '\u201d.</div>'; return; }
   const pager = data.pages > 1 ? `<div class="hof-pager">
       <button class="btn ghost small" data-hofpage="${data.page - 1}"${data.page <= 1 ? ' disabled' : ''}>\u2039 Previous</button>
       <span class="muted small">Page ${data.page} of ${data.pages}</span>
       <button class="btn ghost small" data-hofpage="${data.page + 1}"${data.page >= data.pages ? ' disabled' : ''}>Next \u203a</button>
     </div>` : '';
+  // the tournaments a player won, on the Wins number
+  const wonTitle = p => (p.won && p.won.length) ? ' title="Won: ' + esc(p.won.map(w => w.name).join(', ')) + '"' : '';
   body.innerHTML = count + '<table><thead><tr><th>#</th><th>Player</th><th>Wins</th><th>Entered</th></tr></thead><tbody>' +
-    players.map(p => `<tr><td class="muted">${p.rank}</td><td>${esc(p.name)}</td><td class="mono">${p.wins}</td><td class="mono muted">${p.entered}</td></tr>`).join('') +
-    '</tbody></table>' + pager;
+    players.map(p => `<tr><td class="muted">${p.rank}</td><td>${esc(p.name)}</td><td class="mono"${wonTitle(p)}>${p.wins}</td><td class="mono muted">${p.entered}</td></tr>`).join('') +
+    '</tbody></table>' + pager +
+    '<p class="muted small hof-note">Players with a FAF account: a win for every player on the winning team (1v1 or team), and an entry for everyone who played. ' +
+    'Hover a Wins number for the tournaments. An imported (Challonge) tournament counts only the winners a site admin or tournament director added to it.</p>';
   body.querySelectorAll('[data-hofpage]').forEach(b => b.onclick = () => {
     loadHall(data.q, parseInt(b.dataset.hofpage, 10) || 1);
     try { window.scrollTo(0, 0); } catch (e) {}

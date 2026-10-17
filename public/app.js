@@ -1149,6 +1149,20 @@ function swissPlannedRounds(t, n) {
   const teams = n || (tt.teams || []).length || 0;
   return Math.max(1, Math.ceil(Math.log2(Math.max(2, teams))));
 }
+// The number of rounds a Swiss is planned for before the start (decision 61): set on the hosting
+// form or Admin -> Format, 1-15, or 0 = automatic (worked out at the start from the field).
+function swissRoundsSet(t) {
+  const r = parseInt((((t || T) || {}).plan || {}).rounds, 10);
+  return (r >= 1 && r <= 15) ? r : 0;
+}
+// The choices for it, and what they mean - the same on the hosting form and the Format panel.
+function swissRoundsOptions(sel) {
+  const cur = parseInt(sel, 10) || 0;
+  let h = '<option value="0"' + (cur ? '' : ' selected') + '>Automatic (from the number of teams)</option>';
+  for (let r = 1; r <= 15; r++) h += '<option value="' + r + '"' + (r === cur ? ' selected' : '') + '>' + r + ' round' + (r === 1 ? '' : 's') + '</option>';
+  return h;
+}
+const SWISS_ROUNDS_HINT = 'Automatic plays enough rounds to find a winner (2 for 4 teams, 3 for up to 8, 4 for up to 16), worked out when the stage starts. Pick a number to see those rounds and set their map pools now. The start can still change it.';
 function swissCutLabel(t) {
   const c = swissCutCfg(t);
   if (!c.on) return '';
@@ -1345,7 +1359,14 @@ function planSummary(t) {
   if (t.bracketType === 'single') return 'Bo' + p.early + ' rounds · Bo' + p.semi + ' semifinal · Bo' + p.final + ' final' + third;
   if (t.bracketType === 'double') return 'Winners bracket Bo' + p.wb + ' (final Bo' + p.wbFinal + ') · losers bracket Bo' + p.lb + ' (final Bo' + p.lbFinal + ') · grand final Bo' + p.gf + (p.lbHandicap ? ' (upper finalist starts 1-0 up)' : '');
   const cutTxt = swissCutLabel(t);
-  const parts = ['Bo' + p.bo + ' matches'];
+  const parts = [];
+  // the round count: the one it started with, else the one planned (decision 61); record cuts
+  // derive theirs and say so themselves
+  if (!cutTxt) {
+    const nR = parseInt((t.cfg && t.cfg.rounds) || p.rounds, 10) || 0;
+    if (nR > 0) parts.push(nR + ' round' + (nR === 1 ? '' : 's'));
+  }
+  parts.push('Bo' + p.bo + ' matches');
   if (cutTxt) {
     parts.push(cutTxt);
     if (p.decidingBo) parts.push('Bo' + p.decidingBo + ' when a win qualifies or a loss eliminates');
@@ -2234,7 +2255,9 @@ const SA_ACTION_LABEL = {
   proposal_released: 'Gave a proposal back',
   proposal_unlocked: 'Lifted a proposal lock',
   proposal_dropped: 'Turned a proposal into a draft',
-  proposal_days_changed: 'Changed how long proposals wait'
+  proposal_days_changed: 'Changed how long proposals wait',
+  import_winner_added: 'Added a winner to an imported tournament',
+  import_winner_removed: 'Removed a winner from an imported tournament'
 };
 
 // Render rich text safely (articles, briefing, rewards). Everything is HTML-escaped first,

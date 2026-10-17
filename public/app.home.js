@@ -533,6 +533,11 @@ async function renderHost() {
             </label>
           </div>
           <div id="planSwiss" style="display:none">
+            <div id="pSwRoundsWrap">
+              <label>Number of rounds</label>
+              <select id="pSwRounds">${swissRoundsOptions(0)}</select>
+              <div class="muted small" style="margin-top:4px">${esc(SWISS_ROUNDS_HINT)}</div>
+            </div>
             <label>Match lengths</label>
             <div class="row" style="gap:10px">
               <div style="flex:1"><div class="muted small">Each match</div><select id="pSwBo"><option value="1">Bo1</option><option value="3" selected>Bo3</option></select></div>
@@ -815,6 +820,9 @@ async function renderHost() {
     const on = !!(cuts && cuts.checked);
     box.style.display = on ? '' : 'none';
     s2box.style.display = (st2 && st2.checked) ? '' : 'none';
+    // record cuts work out their own round count, so the planned number only shows without them
+    const roundsWrap = document.getElementById('pSwRoundsWrap');
+    if (roundsWrap) roundsWrap.style.display = on ? 'none' : '';
     // double-elimination playoffs already decide 3rd place in the losers bracket
     const s2third = document.getElementById('pSwS2ThirdWrap');
     const s2type = document.getElementById('pSwS2Type');
@@ -1016,6 +1024,7 @@ async function renderHost() {
     setv('cCategory', 'official');
     const pl = a.plan || {};
     setv('pSwBo', pl.bo); setc('pSwFinal', pl.final); setv('pSwFinalBo', pl.finalBo); setc('pSwFast', pl.fast);
+    setv('pSwRounds', pl.rounds || 0);
     setc('pSwCuts', pl.winCut || pl.lossCut);
     setv('pSwWinCut', pl.winCut || 3); setv('pSwLossCut', pl.lossCut || 3); setv('pSwDecBo', pl.decidingBo || 0);
     setc('pSwStage2', pl.stage2);
@@ -1105,6 +1114,7 @@ async function renderHost() {
     else if (t.bracketType === 'double') { setv('pWb', pl.wb); setv('pWbFinal', pl.wbFinal); setv('pLb', pl.lb); setv('pLbFinal', pl.lbFinal); setv('pGf', pl.gf); setc('pHcap', pl.lbHandicap); }
     else if (t.bracketType === 'swiss') {
       setv('pSwBo', pl.bo); setc('pSwFinal', pl.final); setv('pSwFinalBo', pl.finalBo); setc('pSwFast', pl.fast);
+      setv('pSwRounds', pl.rounds || 0);
       setc('pSwCuts', pl.winCut || pl.lossCut); setv('pSwWinCut', pl.winCut || 3); setv('pSwLossCut', pl.lossCut || 3);
       setv('pSwDecBo', pl.decidingBo || 0);
       setc('pSwStage2', pl.stage2); setv('pSwS2Cut', pl.s2CutTo || 8); setv('pSwS2Type', pl.s2Type || 'single');
@@ -1187,7 +1197,7 @@ async function renderHost() {
     else if (bt === 'double') plan = { wb: pv('pWb'), wbFinal: pv('pWbFinal'), lb: pv('pLb'), lbFinal: pv('pLbFinal'), gf: pv('pGf'), lbHandicap: document.getElementById('pHcap').checked };
     else {
       const ck = id => { const e = document.getElementById(id); return !!(e && e.checked); };
-      plan = { bo: pv('pSwBo'), final: ck('pSwFinal'), finalBo: pv('pSwFinalBo'), fast: ck('pSwFast') };
+      plan = { bo: pv('pSwBo'), final: ck('pSwFinal'), finalBo: pv('pSwFinalBo'), fast: ck('pSwFast'), rounds: pv('pSwRounds') };
       if (ck('pSwCuts')) { plan.winCut = pv('pSwWinCut'); plan.lossCut = pv('pSwLossCut'); plan.decidingBo = pv('pSwDecBo'); }
       if (ck('pSwStage2')) {
         plan.stage2 = 1; plan.s2CutTo = pv('pSwS2Cut'); plan.s2Type = document.getElementById('pSwS2Type').value;
@@ -1604,6 +1614,8 @@ function drawTournament() {
   tabs.push('maps');
   tabs.push('standings');
   if (admin) { tabs.push('admin'); tabs.push('log'); }
+  // a tournament director on an imported tournament: the Admin tab, for its winners only (decision 60)
+  else if (T.imported && T.viewer && T.viewer.hofWinners && !playerViewMode) tabs.push('admin');
   if (!tabs.includes(currentTab)) currentTab = 'overview';
 
   const tabLabel = tb => {

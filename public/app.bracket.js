@@ -861,13 +861,18 @@ function projectedRoundKeys() {
   if (real.length) return { keys: real, projected: false, teams: T.teams.length };
 
   const n = projectedTeamCount();
-  if (n < 2 || T.competition === 'ffa') return { keys: [], projected: true, teams: n };
+  // A Swiss with its rounds planned (a number on the Format panel, or record cuts) knows them
+  // before anyone has signed up (decision 61).
+  const swissKnown = T.bracketType === 'swiss' && T.competition !== 'ffa' && (swissRoundsSet(T) > 0 || swissCutCfg(T).on);
+  if ((n < 2 && !swissKnown) || T.competition === 'ffa') return { keys: [], projected: true, teams: n };
   const keys = [];
   if (T.bracketType === 'swiss') {
-    // swiss round count is chosen at start; ceil(log2(teams)) is the usual default
-    const r = Math.max(log2i(nextPow2(n)), 1);
+    // the same rounds the preview lays out: the planned number, the cuts' own count, or enough
+    // rounds to find a winner for the expected field
+    const r = swissPlannedRounds(T, n);
     for (let i = 1; i <= r; i++) keys.push('sw:' + i);
     if (!T.plan || T.plan.final !== 0) keys.push('gf:1');
+    if (swissKnown) return { keys, projected: true, teams: n, known: true };
   } else {
     const R = log2i(nextPow2(n));
     for (let i = 1; i <= R; i++) keys.push('wb:' + i);
@@ -1093,7 +1098,8 @@ function assignPool(pool) {
     modal(`<h3>Assign "${esc(pool.name)}"</h3>
       <p class="muted small">${T.competition === 'ffa'
         ? 'FFA rounds don\'t use map vetoes.'
-        : 'Not enough signups yet to work out how many rounds there will be. Add players (or set a team limit under <a href="#" data-adminjump="signups" data-adminfocus="su_max">Admin tab \u2192 Signups</a>) and this will fill in.'}</p>
+        : 'Not enough signups yet to work out how many rounds there will be. Add players (or set a team limit under <a href="#" data-adminjump="signups" data-adminfocus="su_max">Admin tab \u2192 Signups</a>'
+          + (T.bracketType === 'swiss' ? ', or the number of rounds under <a href="#" data-adminjump="format" data-adminfocus="af_swrounds">Admin tab \u2192 Format</a>' : '') + ') and this will fill in.'}</p>
       <div class="actions"><button class="btn ghost" id="paClose">Close</button></div>`, root => {
       root.querySelector('#paClose').onclick = closeModal;
     });
@@ -1113,7 +1119,8 @@ function assignPool(pool) {
   }).join('');
   modal(`<h3>Assign "${esc(pool.name)}" to rounds</h3>
     <p class="muted small">Tick the rounds that use this pool. Unticking clears it (that round falls back to the default pool).</p>
-    ${proj.projected ? '<p class="muted small">Planning ahead for <strong>' + proj.teams + ' teams</strong> — these are the rounds you\'ll get. If the entry count changes the bracket may gain or lose a round, so check back before you generate it.</p>' : ''}
+    ${proj.known ? '<p class="muted small">These are the rounds as planned on the Format panel; they do not depend on how many sign up.</p>' : ''}
+    ${(proj.projected && !proj.known) ? '<p class="muted small">Planning ahead for <strong>' + proj.teams + ' teams</strong> - these are the rounds you\'ll get. If the entry count changes the bracket may gain or lose a round, so check back before you generate it.</p>' : ''}
     <div class="pick-rows">${rows}</div>
     <div class="actions"><button class="btn ghost" id="paCancel">Cancel</button><button class="btn primary" id="paSave">Save</button></div>`, root => {
     root.querySelectorAll('.pick-row').forEach(btn => btn.onclick = () => btn.classList.toggle('on'));
@@ -2441,8 +2448,18 @@ function drawSwissPreview(el, n) {
   const sec = document.createElement('div');
   sec.className = 'panel section';
   const rounds = swissPlannedRounds(T, n);
+  // How many rounds, and where that comes from (decision 61): the planned number, or worked out at
+  // the start from the field. Record cuts say their own count elsewhere.
+  const planned = swissRoundsSet(T);
+  const roundsTxt = swissCutCfg(T).on ? ''
+    : planned ? 'Planned: ' + planned + ' round' + (planned === 1 ? '' : 's') + '.'
+    : n >= 2 ? rounds + ' round' + (rounds === 1 ? '' : 's') + ' for ' + n + ' teams, worked out when the stage starts.'
+    : 'The number of rounds is worked out from the number of teams when the stage starts.';
+  const roundsLink = (roundsTxt && viewerIsOrganizer())
+    ? ' <a href="#" data-adminjump="format" data-adminfocus="af_swrounds">' + (planned ? 'Change it' : 'Set the number of rounds') + ' under Admin tab \u2192 Format</a>.' : '';
   sec.innerHTML = `<h2>Swiss <span class="h2-strong">preview</span></h2>
-    <p class="muted small" style="margin:0">${esc(String(n))} teams expected \u00b7 pairings are generated round by round once the tournament starts. Round 1 pairs by seed; later rounds by standings.</p>`;
+    <p class="muted small" style="margin:0">${esc(String(n))} teams expected \u00b7 pairings are generated round by round once the tournament starts. Round 1 pairs by seed; later rounds by standings.</p>
+    ${roundsTxt ? `<p class="small" id="swPrevRounds" style="margin:6px 0 0">${esc(roundsTxt)}${roundsLink}</p>` : ''}`;
   el.appendChild(sec);
 
   // let the organizer set up each round's maps ahead of time
