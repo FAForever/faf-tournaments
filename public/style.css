@@ -1779,6 +1779,14 @@ tr.row-out > td { opacity: .55; }
 .hof-search { margin: 0 0 12px; }
 .hof-search input { width: 100%; max-width: 420px; }
 .hof-pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
+.hof-note { margin: 12px 0 0; }
+/* the winners added to an imported tournament for the Hall of Fame (decision 60) */
+.hofw-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 10px; }
+.hofw-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; border: 1px solid #FFB44766; border-radius: 4px; background: #FFB4470f; font-size: 13px; overflow-wrap: anywhere; }
+.hofw-x { background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 15px; line-height: 1; padding: 0 4px; }
+.hofw-x:hover { color: var(--text); }
+.hofw-add { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.hofw-add input { flex: 1 1 200px; min-width: 0; max-width: 320px; }
 
 /* ---------- Predictions ---------- */
 .pred-prize { margin-top: 12px; padding: 10px 14px; border: 1px solid #ffb44766; background: var(--amber-dim); border-radius: 4px; color: var(--text); font-size: 14px; }

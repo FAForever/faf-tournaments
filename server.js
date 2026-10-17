@@ -47,7 +47,8 @@ const { buildDraft, finishDraftIfDone, finalizeOpenTeams, formTeamsGrouped,
 const { mapById, publicMapView, secretNumbers, revealedSecrets, maskedMapView } = require('./lib/maps');
 // Wire the Swiss progression hook into the match core (see lib/match.js). Must come
 // after the swiss require above, since swissAfterReport is now imported, not hoisted.
-require('./lib/match').setHooks({ swissAfterReport });
+// A result in a fast-pairing Swiss first takes back a repeat the old fast pairing made (decision 62).
+require('./lib/match').setHooks({ swissAfterReport: t => { dropFastRepeats(t); swissAfterReport(t); } });
 require('./lib/swiss').setSwissHooks({ openStagePicks });
 require('./lib/match').setHooks({ afterFinalize: (t) => { autoStopIfReached(t); PRED.stampLocks(t, PRED_CTX); } });
 
@@ -350,6 +351,9 @@ function isImporter(req) {
   const sess = currentSession(req);
   return !!(sess && db.importerAllowed[sess.fafId]);
 }
+// Who may add the actual winners of an imported tournament for the Hall of Fame (decision 60):
+// site admins and the global tournament directors.
+function mayAddImportedWinners(req) { return isSiteAdmin(req) || isDirector(req); }
 
 // ---------- audit log ----------
 // A short, honest record of the things worth being able to answer later: who made this, and
@@ -595,6 +599,12 @@ function cleanSwissExtras(src, prev) {
   // are legal but pointless, so they are left alone rather than "corrected" behind the organizer.
   return out;
 }
+
+// The number of Swiss rounds planned before the start (decision 61): 1-15, or 0 for automatic,
+// which the start turns into enough rounds to find a winner for the field it has. On the plan only
+// when set, so every tournament planned before this keeps exactly the plan it had. Record cuts
+// derive their own count and override it, as they do at the start.
+function cleanSwissRounds(v) { return intIn(v, 1, 15, 0); }
 
 // Turn the stored extras into the t.stage2 record the swiss engine consumes. Returns null
 // when stage 2 is off, which is what clears it on a re-generate.
@@ -1026,6 +1036,44 @@ function matchTouched(m) {
     }
   }
   return false;
+}
+// ---------- fast pairing repeats (decision 62) ----------
+// Fast pairing used to put the two teams who had just played straight back against each other
+// while the others were still playing. A repeat made that way that nobody has started yet (no
+// veto step, no game, no score) is taken back and the free teams are paired again under the fixed
+// rule: on the next result, or the next time the tournament is opened, whichever comes first. A
+// repeat the fixed rule could not avoid is marked (`repeat: 1`) and stays.
+function fastRepeatsToUndo(t) {
+  if (!t || t.bracketType !== 'swiss' || t.status !== 'running' || !t.cfg || !t.cfg.fast) return [];
+  const met = {};
+  for (const m of (t.matches || [])) {
+    if (m.bracket === 'sw' && m.status === 'done' && m.team1 && m.team2) { met[m.team1 + '|' + m.team2] = 1; met[m.team2 + '|' + m.team1] = 1; }
+  }
+  return (t.matches || []).filter(m => m.bracket === 'sw' && m.index === 98 && m.status === 'ready' && !m.repeat
+    && m.team1 && m.team2 && met[m.team1 + '|' + m.team2] && !matchTouched(m));
+}
+function dropFastRepeats(t) {
+  const gone = fastRepeatsToUndo(t);
+  if (!gone.length) return 0;
+  const ids = {};
+  for (const m of gone) ids[m.id] = 1;
+  t.matches = t.matches.filter(m => !ids[m.id]);
+  for (const id of Object.keys(ids)) {
+    // the same tidying as a redo of the playoffs: those rooms and settings can never be reached again
+    if (t.chat) delete t.chat['match:' + id];
+    if (t.chatRev) delete t.chatRev['match:' + id];
+    if (t.chatPings) delete t.chatPings['match:' + id];
+    if (t.poolAssign) delete t.poolAssign['match:' + id];
+  }
+  tpush(t, 'System', 'Took back ' + gone.map(m => tTeamName(t, m.team1) + ' vs ' + tTeamName(t, m.team2)).join(', ')
+    + ': fast pairing had paired them again although they had already played. Nobody had started it, so they get a new opponent instead.');
+  return gone.length;
+}
+// Opening the tournament: take such repeats back and pair whoever is free again.
+function sweepFastRepeats(t) {
+  if (!dropFastRepeats(t)) return false;
+  swissAfterReport(t);
+  return true;
 }
 // The playoffs exist in some form: a pick phase for them, or the bracket itself.
 function playoffsMade(t) {
@@ -1649,7 +1697,7 @@ function planStartConfig(t) {
     return { wb, lb, gf: p.gf || 5, lbHandicap: (t.plan && !t.plan.lbHandicap) ? 0 : 1 };
   }
   const cutsOn = !!(p.winCut || p.lossCut);
-  const c = { rounds: Math.max(1, R), bo: p.bo === 1 ? 1 : 3, final: p.stage2 ? 0 : (p.final === 0 ? 0 : 1), finalBo: p.finalBo || 5, fast: cutsOn ? 0 : (p.fast ? 1 : 0) };
+  const c = { rounds: cleanSwissRounds(p.rounds) || Math.max(1, R), bo: p.bo === 1 ? 1 : 3, final: p.stage2 ? 0 : (p.final === 0 ? 0 : 1), finalBo: p.finalBo || 5, fast: cutsOn ? 0 : (p.fast ? 1 : 0) };
   if (cutsOn) { c.winCut = p.winCut; c.lossCut = p.lossCut; c.decidingBo = parseInt(p.decidingBo, 10) || 0; }
   if (p.stage2) {
     c.stage2 = 1; c.s2CutTo = parseInt(p.s2CutTo, 10) || 8; c.s2Type = p.s2Type || 'single';
@@ -2483,6 +2531,8 @@ function publicView(t) {
       out: x.out || null,
       finalRank: x.finalRank || null
     })),
+    // the winners added by hand for the Hall of Fame (decision 60), on an imported tournament only
+    hofWinners: t.imported ? (t.hofWinners || []).map(w => ({ fafId: w.fafId, name: w.name })) : undefined,
     draft: t.draft,
     matches: t.matches,
     championTeamId: tournamentChampion(t),
@@ -3298,6 +3348,8 @@ async function handleAPI(req, res, url) {
         plan = { wb: bo(pb.wb, 3), wbFinal: bo(pb.wbFinal, 3), lb: bo(pb.lb, 3), lbFinal: bo(pb.lbFinal, 3), gf: bo(pb.gf, 5), lbHandicap: pb.lbHandicap ? 1 : 0 };
       } else {
         plan = Object.assign({ bo: (parseInt(pb.bo, 10) === 1) ? 1 : 3, final: pb.final ? 1 : 0, finalBo: bo(pb.finalBo, 5), fast: pb.fast ? 1 : 0 }, cleanSwissExtras(pb, null));
+        const planRounds = cleanSwissRounds(pb.rounds);
+        if (planRounds) plan.rounds = planRounds;
       }
     } else {
       teamSize = intIn(b.teamSize, 1, 3, 1);
@@ -4274,23 +4326,45 @@ async function handleAPI(req, res, url) {
     // win counts for every player on it - that is what a player's tally means. With divisions the
     // tournament's win is the top division's. ?q= finds a player by name (part of it) or by exact
     // FAF id, ?page= pages through 100 at a time; `rank` is always the place on the whole board.
-    const players = {};   // fafId -> { fafId, name, wins, entered }
+    // Only FAF accounts count, so it tracks from the first tournament with signups by FAF account
+    // (`since`). An imported (Challonge) tournament counts only the winners a site admin or a
+    // tournament director added on its Admin tab (decision 60); `won` lists each player's wins.
+    const players = {};   // fafId -> { fafId, name, wins, entered, won }
+    let since = null;
+    const rowFor = (fid, name) => {
+      if (!players[fid]) players[fid] = { fafId: fid, name, wins: 0, entered: 0, won: [] };
+      return players[fid];
+    };
     for (const t of Object.values(db.tournaments)) {
       if (t.published === false || t.archived) continue;
+      if (t.imported) {
+        for (const w of (t.hofWinners || [])) {
+          if (!w || !w.fafId) continue;
+          const r = rowFor(String(w.fafId), w.name);
+          r.entered++;
+          r.name = w.name;
+          if (t.status === 'finished') { r.wins++; r.won.push({ id: t.id, name: t.name }); }
+        }
+        continue;
+      }
+      let linked = false;
       for (const p of (t.players || [])) {
         if (!p.fafId) continue;
-        if (!players[p.fafId]) players[p.fafId] = { fafId: p.fafId, name: p.name, wins: 0, entered: 0 };
-        players[p.fafId].entered++;
-        players[p.fafId].name = p.name;
+        linked = true;
+        const r = rowFor(p.fafId, p.name);
+        r.entered++;
+        r.name = p.name;
       }
+      if (linked && t.createdAt && (since === null || t.createdAt < since)) since = t.createdAt;
       const champId = t.status === 'finished' ? tournamentChampion(t) : null;
       const champ = champId ? (t.teams || []).find(x => x.id === champId) : null;
       if (champ) {
         for (const pid of (champ.playerIds || [])) {
           const p = (t.players || []).find(x => x.id === pid);
           if (p && p.fafId) {
-            if (!players[p.fafId]) players[p.fafId] = { fafId: p.fafId, name: p.name, wins: 0, entered: 0 };
-            players[p.fafId].wins++;
+            const r = rowFor(p.fafId, p.name);
+            r.wins++;
+            r.won.push({ id: t.id, name: t.name });
           }
         }
       }
@@ -4305,7 +4379,8 @@ async function handleAPI(req, res, url) {
     const pages = Math.max(1, Math.ceil(hits.length / PER));
     let page = parseInt(url.searchParams.get('page'), 10) || 1;
     page = Math.min(Math.max(1, page), pages);
-    return json(res, 200, { players: hits.slice((page - 1) * PER, page * PER), total: hits.length, all: all.length, page, pages, perPage: PER, q });
+    return json(res, 200, { players: hits.slice((page - 1) * PER, page * PER), total: hits.length, all: all.length, page, pages, perPage: PER, q,
+      since: since ? new Date(since).toISOString().slice(0, 10) : null });
   }
 
   if (parts.length === 2 && parts[1] === 'articles' && method === 'GET') {
@@ -4531,6 +4606,7 @@ async function handleAPI(req, res, url) {
       if (sweepPoolPublishes(t)) dirty = true;   // reveal any pool whose scheduled time has passed
       if (syncFafName(t, req)) dirty = true;     // they renamed on FAF since signing up
       if (sweepPicks(t)) dirty = true;           // a pick clock ran out while nobody was looking
+      if (sweepFastRepeats(t)) dirty = true;     // a repeat the old fast pairing made (decision 62)
       if (t.proposal && t.proposal.state === 'proposed') sweepProposals();   // its time with the TD team ran out
       if (dirty) saveDB();
       const view = publicView(t);
@@ -4687,7 +4763,9 @@ async function handleAPI(req, res, url) {
         // map prep is narrower than organizer rights - the client must not offer a Maps tab
         // that every action inside would refuse
         maps: canManageMaps(t, req, { admin: tok }) ? 1 : 0,
-        mapsView: canSeeMapPrep(t, tok, req) ? 1 : 0
+        mapsView: canSeeMapPrep(t, tok, req) ? 1 : 0,
+        // adding the actual winners of an imported tournament (decision 60)
+        hofWinners: (t.imported && mayAddImportedWinners(req)) ? 1 : 0
       };
       // Hide prep from non-organizers: unpublished maps and unpublished pools.
       // Exception: a map that's already on screen somewhere (in a live veto or a round's
@@ -4747,8 +4825,10 @@ async function handleAPI(req, res, url) {
     }
 
     // imported tournaments are display-only: only GET and site-admin delete are allowed, plus the
-    // publishing steps (with approvals an import arrives as a draft, decision 51)
-    if (t.imported && method === 'POST' && sub !== 'delete' && sub !== 'edit_date' && !/^publish_(request|withdraw|approve|reject)$/.test(sub)) {
+    // publishing steps (with approvals an import arrives as a draft, decision 51) and adding its
+    // actual winners for the Hall of Fame (decision 60)
+    if (t.imported && method === 'POST' && sub !== 'delete' && sub !== 'edit_date' && !/^publish_(request|withdraw|approve|reject)$/.test(sub)
+      && !/^import_winner_(add|remove)$/.test(sub)) {
       return bad(res, 'Imported tournaments are read-only.');
     }
     // Proposals (decision 59). One waiting for the TD team cannot change, so what a director takes
@@ -4909,6 +4989,40 @@ async function handleAPI(req, res, url) {
     // allow up to ~8MB so map image uploads (base64 of a 5MB file ≈ 6.7MB) fit; the real
     // per-image 5MB cap is enforced when decoding in saveMapImage.
     const b = await readBody(req, 8 * 1024 * 1024);
+
+    // The actual winners of an imported tournament, for the Hall of Fame (decision 60). Challonge
+    // only knew the entries, so nobody from an import counts until a site admin or a tournament
+    // director adds the FAF accounts that won it: verified against FAF, never a free-typed name.
+    if (sub === 'import_winner_add' || sub === 'import_winner_remove') {
+      if (!t.imported) return bad(res, 'Only an imported tournament gets its winners added by hand');
+      if (!mayAddImportedWinners(req)) return json(res, 403, { error: 'Only site admins and tournament directors can add the winners of an imported tournament' });
+      const list = Array.isArray(t.hofWinners) ? t.hofWinners : [];
+      if (sub === 'import_winner_remove') {
+        const w = list.find(x => String(x.fafId) === String(b.fafId == null ? '' : b.fafId).trim());
+        if (!w) return bad(res, 'That account is not one of the winners');
+        t.hofWinners = list.filter(x => x !== w);
+        if (!t.hofWinners.length) delete t.hofWinners;
+        saveDB();
+        tlog(t, req, b.admin, 'removed ' + w.name + ' from the winners (Hall of Fame)');
+        audit(req, 'import_winner_removed', { tournamentId: t.id, tournamentName: t.name, detail: w.name + ' (' + w.fafId + ')' });
+        return json(res, 200, { ok: true });
+      }
+      if (list.length >= 8) return bad(res, 'At most 8 winners');
+      const q = cleanName(String(b.player == null ? '' : b.player), 40);
+      if (!q) return bad(res, 'Enter a FAF name or FAF id');
+      const token = await fafValidToken(currentSession(req));
+      if (!token) return json(res, 409, { error: 'Looking up a FAF account needs your FAF login. Log out and back in, then retry.', needsRelogin: 1 });
+      let found;
+      try { found = await fafResolve(q, token); } catch (e) { return bad(res, 'FAF could not be reached - try again in a moment'); }
+      if (found && found.error) return bad(res, found.error);
+      if (!found) return bad(res, fafNotFound(q));
+      if (list.some(x => String(x.fafId) === String(found.fafId))) return bad(res, found.name + ' is already one of the winners');
+      t.hofWinners = list.concat([{ fafId: String(found.fafId), name: found.name, by: actorOf(req, b.admin).name || '', at: Date.now() }]);
+      saveDB();
+      tlog(t, req, b.admin, 'added ' + found.name + ' as a winner (Hall of Fame)');
+      audit(req, 'import_winner_added', { tournamentId: t.id, tournamentName: t.name, detail: found.name + ' (' + found.fafId + ')' });
+      return json(res, 200, { ok: true, fafId: String(found.fafId), name: found.name });
+    }
 
     if (sub === 'reseed') {
       if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
@@ -6875,6 +6989,9 @@ async function handleAPI(req, res, url) {
           t.plan = { wb: bo(pb.wb, op.wb || 3), wbFinal: bo(pb.wbFinal, op.wbFinal || 3), lb: bo(pb.lb, op.lb || 3), lbFinal: bo(pb.lbFinal, op.lbFinal || 3), gf: bo(pb.gf, op.gf || 5), lbHandicap: pb.lbHandicap !== undefined ? (pb.lbHandicap ? 1 : 0) : (op.lbHandicap ? 1 : 0) };
         } else {
           t.plan = Object.assign({ bo: pb.bo !== undefined ? ((parseInt(pb.bo, 10) === 1) ? 1 : 3) : (op.bo || 3), final: pb.final !== undefined ? (pb.final ? 1 : 0) : (op.final !== undefined ? op.final : 1), finalBo: bo(pb.finalBo, op.finalBo || 5), fast: pb.fast !== undefined ? (pb.fast ? 1 : 0) : (op.fast ? 1 : 0) }, cleanSwissExtras(pb, op));
+          // the planned number of rounds (decision 61): kept when not sent, removed by "automatic"
+          const planRounds = cleanSwissRounds(pb.rounds !== undefined ? pb.rounds : op.rounds);
+          if (planRounds) t.plan.rounds = planRounds;
         }
         t.ffaCfg = null;
         // divisions only exist for single/double elimination
@@ -7858,7 +7975,7 @@ async function handleAPI(req, res, url) {
           // last is (winCut-1) wins plus (lossCut-1) losses plus the game that decides it.
           const cutRounds = swissCutRounds(ex.winCut, ex.lossCut);
           t.cfg = {
-            rounds: cutRounds || intIn(c.rounds, 1, 15, defR),
+            rounds: cutRounds || intIn(c.rounds, 1, 15, cleanSwissRounds((t.plan || {}).rounds) || defR),
             bo: (parseInt(c.bo, 10) === 1) ? 1 : 3,
             final: c.final ? 1 : 0,
             finalBo: BO_OK.indexOf(parseInt(c.finalBo, 10)) >= 0 ? parseInt(c.finalBo, 10) : 5,
