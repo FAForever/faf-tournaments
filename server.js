@@ -8802,7 +8802,7 @@ const MIME = {
 };
 
 // path -> gzipped buffer (or null if compression failed). Bounded by the number of files in
-// public/, which is fixed at 7.
+// public/.
 const GZ_CACHE = new Map();
 
 function serveStatic(req, res, url) {
@@ -8813,11 +8813,21 @@ function serveStatic(req, res, url) {
   fs.readFile(file, (err, data) => {
     if (err) { res.writeHead(404); return res.end('not found'); }
     if (file.endsWith('index.html')) data = data.toString().replace(/__V__/g, BOOT);
+    // The page asks for its scripts and stylesheet as ?v=<BOOT>, which changes at every start, so a
+    // browser may keep those as long as it likes and a new tab need not fetch them again: an update
+    // brings new addresses (decision 63). Only the version this server puts in the page is kept: any
+    // other one (an old page, or the other server during an update) is no-store as before, so a
+    // copy of the wrong file can never be kept under the new address. `private` keeps them out of
+    // Cloudflare and any other shared cache, so a cache in front that ignores the ?v= can never hand
+    // out an old file after an update. The page itself is never kept.
+    const keep = /\.(js|css)$/.test(file) && url.searchParams.get('v') === BOOT;
     const h = {
       'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
-      'Cache-Control': 'no-store'
+      'Cache-Control': keep ? 'private, max-age=31536000, immutable' : 'no-store'
     };
-    // The client pulls ~550 KB of JS/CSS on every load. gzip takes that to ~140 KB. The container
+    // gzip or plain is chosen by what the browser accepts: a cache that keeps the file must know
+    if (keep) h['Vary'] = 'Accept-Encoding';
+    // The client pulls ~550 KB of JS/CSS the first time it loads a version. gzip takes that to ~140 KB. The container
     // re-clones the repo on start, so these files cannot change while the process is alive -
     // compress each one once and serve the cached buffer from then on.
     if (/\bgzip\b/.test(String((req.headers && req.headers['accept-encoding']) || '')) && /\.(js|css|html|svg)$/.test(file)) {

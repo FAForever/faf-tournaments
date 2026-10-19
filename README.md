@@ -28,6 +28,20 @@ Zero runtime dependencies: plain Node.js (built-in `http` only), JSON file stora
 - **Each Swiss match shows its score group** (`2-1`, `1-2`, or `2-1 vs 1-2` for a floated pairing),
   and each round is listed best group first. It is the record the players brought *into* that round,
   not their current one - once round 4 is played everyone in it is 2-2.
+- **A Swiss overview on the Rounds tab** (Bracket once the playoffs exist), laid out like the
+  spreadsheet organizers used to keep: a column per round, its matches grouped by the record the teams
+  brought into it (best on top; a pairing across two records, `2-1 vs 1-2`, is its own group between
+  the two, with a dashed edge), byes, and each winner in green. With record cuts the teams that reach
+  one leave into **Qualified** and **Eliminated** boxes beside the round they would have played next
+  (at 3/3 the 3-0s and 0-3s beside round 4, the 3-1s and 1-3s beside round 5, the 3-2s and 2-3s after
+  it); with a set number of rounds the last column holds every team's **final record**, and those who
+  went on to the final or the playoffs are green (a Swiss with neither shows its champion's trophy).
+  Swiss-only and two-stage events alike: once the playoffs exist it sits under "Swiss stage", below
+  them. A match opens its details (click, Enter or Space), a name its team. On a wide screen the panel
+  grows past the page column (centred), so a five-round stage fits at once; on a smaller screen or a
+  phone the grid scrolls sideways inside its panel. In streamer mode it goes no further than the
+  results on screen: it stops at the first round with a hidden result (a later column's groups would
+  give it away), and its boxes count only the rounds before that one.
 - **Every planned round gets a map-pool slot**, including rounds not yet opened, so the next round's
   pool can be set before it is played. With record cuts the planned count is derived (3/3 is five
   rounds); it used to fall back to log2 of the field and show four.
@@ -578,6 +592,17 @@ Plain `http` server, no framework, JSON file storage. The code is split into sma
 The tournament page polls a full snapshot every 4 seconds, so three measures keep that cheap. All are transparent - no page looks or behaves differently:
 
 - **gzip.** API responses over 1 KB and static JS/CSS are gzipped via Node's built-in `zlib` (no dependency). A 64-player bracket snapshot goes from ~24 KB to ~3.5 KB; the client bundle from ~550 KB to ~140 KB. Static files are compressed once and cached in memory, since the container re-clones on start and they cannot change while the process is alive.
+- **Scripts and the stylesheet are kept by the browser.** The page asks for them as `?v=<the
+  server's start time>`, which changes at every start, so they are served `private, max-age=31536000,
+  immutable`: a new tab takes them from the browser's cache instead of fetching ~140 KB again, and an
+  update brings new addresses. Only the version the running server puts in its page is kept; any
+  other version (an open old page, or the other server during an update), the page itself and the
+  API stay as before. `private` keeps them out of Cloudflare and any other shared cache, so a cache
+  in front that ignores the `?v=` can never hand out an old file after an update.
+- **The first page waits for every script.** It is drawn once the login check has answered and every
+  script on the page has run (DOMContentLoaded). It used to be drawn on the login check alone, so a
+  page opened in a new tab could be drawn while a later script was still on its way, and stayed blank
+  until F5.
 - **ETag / 304.** Successful GETs carry an ETag hashed from the response body, so a poll that finds nothing changed (the common case) returns an empty 304. This needs `Cache-Control: private, no-cache` rather than `no-store`, which still forces revalidation on every use, so nothing stale is ever shown. The tag is computed from the response built for *that* viewer, so an organizer and a spectator can never share a cache entry.
 - **Chat panels are independent instances.** `mountChat()` returns a self-contained panel with its own room, history, `since` cursor, reply state and poll timer, registered in `_chatInstances`. This used to be module-level state, so a second mount silently killed the first - fine when only one chat could be on screen, impossible once a chat can sit in the dock while another is open. Two consequences worth knowing: everything inside a panel is addressed by **class, not id** (two panels on screen would otherwise fight over the same nodes), and a panel whose host has left the DOM **reaps itself on its next tick**, which also fixed a long-standing leak where closing a chat popup with Escape or a backdrop click left its interval polling forever. `stopChatPoll()` still exists and still tears down every transient panel on redraw, but deliberately spares the one in the dock.
 - **Hidden tabs stand down.** The 4-second tournament poll and the chat poll skip while `document.hidden`, and fire immediately on `visibilitychange` so returning to the tab never shows a stale bracket. The 30-second alert poll deliberately keeps running in the background, so someone waiting on a veto turn still gets the banner.
@@ -675,7 +700,7 @@ With FAF login on, do this once after deploy: log in with FAF, open `/siteadmin`
 
 Overwrite the changed files on GitHub (the web UI upload works; the folder structure in an update zip matches the repo), then restart the container - it re-clones on start. On FAF's cluster the upload alone is enough: it goes live by itself (see *On FAF's cluster* above). Update zips may include files under `lib/`; make sure those land in the repo's `lib/` folder, not the root.
 
-If updates do not appear after a restart: static files are served with no-cache headers, but a reverse proxy in front (e.g. Nginx Proxy Manager) may cache CSS/JS itself. Turn OFF any "Cache Assets" option on the proxy host, then hard-refresh once (Ctrl+Shift+R). Favicons cache aggressively - reopen the tab if the icon looks stale.
+If updates do not appear after a restart: the page and every older version of the scripts are served no-store, and the current scripts carry a new `?v=` after every start, but a reverse proxy in front (e.g. Nginx Proxy Manager) may cache CSS/JS itself. Turn OFF any "Cache Assets" option on the proxy host, then hard-refresh once (Ctrl+Shift+R). Favicons cache aggressively - reopen the tab if the icon looks stale.
 
 ---
 

@@ -2650,7 +2650,18 @@ function handleLoginParam() {
 }
 
 applyScale();
-refreshFafAuth().then(() => { handleLoginParam(); route(); });
+// The first page waits until every script on it has run (decision 63). The login check starts at
+// once, but the page used to be drawn the moment it answered: with the later scripts still on
+// their way (every page load fetches them) it called functions that did not exist yet and stayed
+// blank. DOMContentLoaded fires after the last of these classic scripts has run.
+{
+  const authReady = refreshFafAuth();
+  const scriptsReady = new Promise(r => {
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', r, { once: true });
+    else r();
+  });
+  Promise.all([authReady, scriptsReady]).then(() => { handleLoginParam(); route(); });
+}
 
 // ---------------------------------------------------------------------------
 // Stats tab — a public wrap-up shown once a tournament is finished. Everything
