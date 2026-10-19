@@ -2015,3 +2015,52 @@ label.cal-toggle {
   padding: 9px 16px; font-size: 13px; text-align: center; line-height: 1.45;
 }
 .save-warn strong { color: #fff; }
+
+/* ---- the Swiss stage as a grid (decision 64) ---- */
+/* On a wide screen the overview may grow past the page column, up to the screen's width and centred
+   on it (an elimination bracket uses the whole width too), so a five-round stage fits at once. */
+.swgrid-panel { width: max-content; min-width: 100%; max-width: calc(100vw - 68px); position: relative; left: 50%; transform: translateX(-50%); }
+.swgrid { overflow-x: auto; overflow-y: hidden; max-width: 100%; padding: 4px 2px 12px; }
+.swgrid-inner { display: flex; gap: 26px; width: max-content; align-items: stretch; }
+.swcol { display: flex; flex-direction: column; width: 232px; flex: 0 0 auto; }
+.swcol-title { margin-bottom: 8px; }
+.swcol-body { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 16px; }
+.swgroup { display: flex; flex-direction: column; gap: 8px; padding-left: 10px; border-left: 2px solid var(--blue); }
+.swgroup-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.swrec { font-family: var(--display); font-size: 14px; font-weight: 700; letter-spacing: 1px; color: var(--text); }
+.swbo { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.swgroup.cross { border-left-style: dashed; }
+.swbye { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 6px 10px; font-size: 13.5px;
+  background: var(--panel2); border: 1px dashed var(--line-solid); border-radius: 4px; }
+.swbye-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; cursor: pointer; }
+.swresult { border: 1px solid var(--line-solid); border-radius: 4px; background: var(--panel2); padding: 6px 10px 8px; }
+.swresult.q { border-color: #6fcf8e8c; background: #6fcf8e17; }
+.swresult.e { border-color: #e2564a8c; background: #e2564a17; }
+.swresult-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+.swres-label { font-family: var(--display); font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); }
+.swresult.q .swres-label { color: var(--green); }
+.swresult.e .swres-label { color: var(--red); }
+.swresult-team { font-size: 13.5px; padding: 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.swresult-team:hover, .swbye-name:hover { color: var(--amber); }
+.swresult-team.through { color: var(--green); font-weight: 600; }
+@media (max-width: 720px) {
+  .swcol { width: 208px; }
+  .swgrid-inner { gap: 18px; }
+}
+.swmatch { position: relative; background: var(--panel2); border: 1px solid var(--line-solid); border-radius: 4px; overflow: hidden; cursor: pointer; transition: border-color .15s, box-shadow .15s; }
+.swmatch:hover, .swmatch:focus-visible { border-color: var(--amber); outline: none; }
+.swmatch.ready { border-color: #ffb44766; }
+.swmatch.live { border-color: #5c9ee877; box-shadow: 0 0 12px #5c9ee81f; }
+.swrow { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 5px 10px; font-size: 13.5px; }
+.swrow + .swrow { border-top: 1px solid var(--line-solid); }
+.swname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.swscore { font-family: var(--mono); font-size: 12.5px; color: var(--muted); flex: 0 0 auto; }
+.swrow.winner { background: #6fcf8e12; }
+.swrow.winner .swname { color: var(--green); font-weight: 600; }
+.swrow.winner .swscore { color: var(--green); }
+.swlive { position: absolute; top: 3px; right: 30px; font-family: var(--mono); font-size: 9.5px; font-weight: 700; color: var(--blue); letter-spacing: 1px; }
+.swmatch.notplayed { opacity: .4; border-color: var(--line-solid); }
+.swmatch.notplayed::after {
+  content: 'not played'; position: absolute; right: 8px; bottom: 3px;
+  font-family: var(--mono); font-size: 9px; letter-spacing: .5px; color: var(--muted); text-transform: uppercase;
+}

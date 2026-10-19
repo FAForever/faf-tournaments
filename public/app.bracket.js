@@ -1936,12 +1936,14 @@ function drawBracket(el, division) {
       sep.className = 'division-header';
       sep.innerHTML = '<h2 style="margin:22px 0 10px">Swiss stage</h2>';
       el.appendChild(sep);
+      drawSwissGrid(el);
       drawSwissRounds(el);
       alignBracketSections(el);
       for (const f of connectorRedraws) f();
       return;
     }
     drawSwissRound1Editor(el);
+    drawSwissGrid(el);
     return drawSwissRounds(el);
   }
 
@@ -2930,6 +2932,180 @@ function drawSwissRound1Editor(el) {
       toast('Round 1 re-drawn'); await refresh();
     } catch (e) { toast(e.message, true); }
   };
+}
+
+// ---- the Swiss stage as a grid (decision 64) ----
+// What organizers used to keep in a spreadsheet: one column per round, the matches grouped by the
+// record their teams brought into it (best first), and the teams that are through or out leaving
+// into boxes. With win and loss marks they sit at the head and foot of the column the team would
+// have played in next ("3-0 Qualified", "0-3 Eliminated"); with a set number of rounds the stage
+// ends in a column of final records. Swiss-only and two-stage events alike. In streamer mode it
+// only goes as far as the results on screen: a later column's groups would give the hidden ones away.
+function swissGridModel() {
+  const ms = (T.matches || []).filter(m => m.bracket === 'sw').sort((a, b) => (a.round - b.round) || (a.index - b.index));
+  const rounds = ms.reduce((x, m) => Math.max(x, m.round || 0), 0);
+  const recKey = r => r.w + '-' + r.l;
+  const better = (a, b) => (b.w - a.w) || (a.l - b.l);
+  // streamer mode: the first round with a hidden result is the last one drawn, and the boxes only
+  // count the rounds before it
+  let hiddenFrom = 0;
+  if (streamerMode) {
+    const hidden = ms.filter(m => m.status === 'done' && !revealedMatches.has(m.id)).map(m => m.round);
+    if (hidden.length) hiddenFrom = Math.min.apply(null, hidden);
+  }
+  const lastRound = hiddenFrom || rounds;
+  const cols = {};
+  const col = c => (cols[c] = cols[c] || { c, round: 0, groups: {}, results: [] });
+  for (let r = 1; r <= lastRound; r++) {
+    const before = swissRecordsBefore(r);
+    const c = col(r - 1);
+    c.round = r;
+    for (const m of ms.filter(x => x.round === r)) {
+      const ids = [m.team1, m.team2].filter(x => x && x !== 'BYE');
+      if (!ids.length) continue;
+      // the group is the records the two brought: "1-1", or "2-0 vs 1-1" when a group above had a
+      // team left over; that one sits between the two groups, where the round lists below put it
+      const recs = ids.map(id => before[id] || { w: 0, l: 0 }).sort(better);
+      const hi = recs[0], lo = recs[recs.length - 1];
+      const k = recKey(hi) === recKey(lo) ? recKey(hi) : recKey(hi) + ' vs ' + recKey(lo);
+      const g = c.groups[k] = c.groups[k] || { key: k, hi, lo, cross: k !== recKey(hi), items: [] };
+      g.items.push({ m, bye: ids.length === 1 || m.status === 'bye' });
+    }
+  }
+  // who has left the stage and on which record: the box goes in the column of the games played
+  const cuts = swissCutCfg(T);
+  const now = swissRecordsBefore(hiddenFrom || (rounds + 1));
+  const nRounds = parseInt((T.cfg || {}).rounds, 10) || 0;
+  const finished = !cuts.on && !hiddenFrom && nRounds > 0
+    && !ms.some(m => m.status !== 'done' && m.status !== 'bye')
+    && (T.teams || []).every(tm => { const r = now[tm.id]; return !!r && r.w + r.l >= nRounds; });
+  const order = Array.isArray(T.swissOrder) ? T.swissOrder : [];
+  const rank = id => { const i = order.indexOf(id); return i < 0 ? 999 + (teamSeed(id) || 0) : i; };
+  const boxes = {};
+  for (const tm of (T.teams || [])) {
+    const r = now[tm.id];
+    if (!r) continue;
+    let kind = '';
+    if (cuts.on) kind = (cuts.win && r.w >= cuts.win) ? 'q' : ((cuts.loss && r.l >= cuts.loss) ? 'e' : '');
+    else if (finished) kind = 'f';
+    if (!kind) continue;
+    const k = kind + ':' + recKey(r);
+    const b = boxes[k] = boxes[k] || { kind, w: r.w, l: r.l, teams: [] };
+    b.teams.push(tm.id);
+  }
+  for (const b of Object.values(boxes)) { b.teams.sort((x, y) => rank(x) - rank(y)); col(b.w + b.l).results.push(b); }
+  // after the Swiss: who went on to the final or the playoffs (a stage with set rounds marks them)
+  const through = new Set();
+  if (finished) {
+    for (const m of (T.matches || [])) {
+      if (m.bracket === 'sw' || m.bracket === 'ffa') continue;
+      for (const id of [m.team1, m.team2]) if (id && id !== 'BYE') through.add(id);
+    }
+  }
+  return { cols: Object.values(cols).sort((a, b) => a.c - b.c), hiddenFrom, through, finished, cuts };
+}
+// One match in the grid: two lines, the winner in green with the score, the rest on its details
+// popup (players, veto, chat, replays, report or correct). Streamer mode hides the result, as on
+// the bracket, unless that match was revealed.
+function swissGridMatchHTML(m) {
+  const masked = streamerMode && !revealedMatches.has(m.id);
+  const row = (tid, score) => {
+    const win = !masked && m.winner && m.winner === tid;
+    const ff = m.forfeit && tid === m.forfeit && score != null && score < 0;
+    const sc = masked ? '' : (ff ? 'FF' : (score != null && score >= 0 ? String(score) : ''));
+    const seed = teamSeed(tid);
+    return '<div class="swrow' + (win ? ' winner' : '') + '"><span class="swname" title="' + esc(teamName(tid)) + '">'
+      + (seed ? '<span class="seedtag">' + seed + '</span>' : '') + esc(bracketLabel(tid)) + '</span><span class="swscore">' + sc + '</span></div>';
+  };
+  // as on the bracket: a hidden match reads as still to play, and one an early stop left unplayed is dimmed
+  const state = (masked ? 'ready' : m.status) + (neverPlayed(m, T) ? ' notplayed' : '');
+  return '<div class="swmatch ' + esc(state) + '" data-swm="' + esc(m.id) + '" role="button" tabindex="0" title="' + esc(mLabelFull(m)) + (neverPlayed(m, T) ? ' - not played' : ' - details') + '">'
+    + row(m.team1, m.score1) + row(m.team2, m.score2)
+    + ((!masked && m.status === 'live') ? '<span class="swlive">LIVE</span>' : '') + '</div>';
+}
+function drawSwissGrid(el) {
+  if (!(T.matches || []).some(m => m.bracket === 'sw')) return;
+  const model = swissGridModel();
+  const sec = document.createElement('div');
+  sec.className = 'panel section swgrid-panel';
+  sec.innerHTML = '<h2>Swiss <span class="h2-strong">overview</span></h2>'
+    + '<p class="muted small" style="margin:0 0 10px">Each column is a round: teams play others on the same record, the best record on top.'
+    + (model.cuts.on ? ' ' + esc(swissCutLabel(T)) + '.' : '') + '</p>';
+  const wrap = document.createElement('div');
+  wrap.className = 'swgrid';
+  const inner = document.createElement('div');
+  inner.className = 'swgrid-inner';
+  const lone = !(T.matches || []).some(m => m.bracket !== 'sw' && m.bracket !== 'ffa');
+  const champ = (lone && !model.hiddenFrom && T.status === 'finished' && T.championTeamId) ? T.championTeamId : null;
+  for (const c of model.cols) {
+    const colEl = document.createElement('div');
+    colEl.className = 'swcol';
+    colEl.dataset.col = String(c.c);
+    const head = document.createElement('div');
+    head.className = 'bcol-title swcol-title';
+    head.textContent = c.round ? 'Round ' + c.round : 'After round ' + c.c;
+    colEl.appendChild(head);
+    const body = document.createElement('div');
+    body.className = 'swcol-body';
+    // best record first; a pairing across two records between its two groups
+    const cmp = (a, b) => (b.w - a.w) || (a.l - b.l);
+    const entries = Object.values(c.groups).map(g => ({ g, hi: g.hi, lo: g.lo }))
+      .concat(c.results.map(b => ({ b, hi: b, lo: b })));
+    entries.sort((x, y) => cmp(x.hi, y.hi) || cmp(x.lo, y.lo) || ((x.g ? 0 : 1) - (y.g ? 0 : 1)));
+    for (const e of entries) {
+      if (e.g) {
+        const g = e.g;
+        const box = document.createElement('div');
+        box.className = 'swgroup' + (g.cross ? ' cross' : '');
+        box.dataset.rec = g.key;
+        if (g.cross) box.title = 'Paired across two records: a group above had a team left over';
+        const bos = Array.from(new Set(g.items.filter(i => !i.bye).map(i => parseInt(i.m.bo, 10)).filter(b => b > 0))).sort((a, b) => a - b);
+        box.innerHTML = '<div class="swgroup-head"><span class="swrec">' + esc(g.key) + '</span>'
+          + (bos.length ? '<span class="swbo">' + bos.map(b => 'Bo' + b).join(' / ') + '</span>' : '') + '</div>';
+        // the matches in the order they were drawn, a bye last
+        const items = g.items.slice().sort((a, b) => ((a.bye ? 1 : 0) - (b.bye ? 1 : 0)) || ((a.m.index || 0) - (b.m.index || 0)));
+        for (const it of items) {
+          if (it.bye) {
+            const tid = (it.m.team1 && it.m.team1 !== 'BYE') ? it.m.team1 : it.m.team2;
+            const row = document.createElement('div');
+            row.className = 'swbye';
+            row.innerHTML = '<span class="swbye-name" data-teamid="' + esc(tid) + '">' + esc(bracketLabel(tid)) + '</span><span class="muted small">bye, a free win</span>';
+            box.appendChild(row);
+            continue;
+          }
+          box.insertAdjacentHTML('beforeend', swissGridMatchHTML(it.m));
+        }
+        body.appendChild(box);
+      } else {
+        const b = e.b;
+        const box = document.createElement('div');
+        box.className = 'swresult ' + b.kind;
+        box.dataset.rec = b.w + '-' + b.l;
+        const label = b.kind === 'q' ? 'Qualified' : (b.kind === 'e' ? 'Eliminated' : 'Final record');
+        box.innerHTML = '<div class="swresult-head"><span class="swrec">' + b.w + '-' + b.l + '</span><span class="swres-label">' + label + '</span></div>'
+          + b.teams.map(tid => '<div class="swresult-team' + (model.through.has(tid) ? ' through' : '') + '" data-teamid="' + esc(tid) + '" title="' + esc(teamName(tid)) + '">'
+            + esc(bracketLabel(tid)) + (tid === champ ? ' <span title="Champion">\u{1F3C6}</span>' : '') + '</div>').join('');
+        body.appendChild(box);
+      }
+    }
+    colEl.appendChild(body);
+    inner.appendChild(colEl);
+  }
+  wrap.appendChild(inner);
+  sec.appendChild(wrap);
+  const notes = [];
+  if (model.through.size) notes.push('Green: through to ' + (T.stage2 ? 'the playoffs' : 'the final') + '.');
+  if (model.hiddenFrom) notes.push('Streamer mode: later rounds show once the results of round ' + model.hiddenFrom + ' are revealed.');
+  if (notes.length) sec.insertAdjacentHTML('beforeend', '<p class="muted small" style="margin:6px 0 0">' + esc(notes.join(' ')) + '</p>');
+  sec.querySelectorAll('.swresult-team[data-teamid], .swbye-name[data-teamid]').forEach(x => {
+    x.onclick = () => showTeamPopup(x.dataset.teamid);
+  });
+  sec.querySelectorAll('[data-swm]').forEach(x => {
+    const open = () => { const m = T.matches.find(y => y.id === x.dataset.swm); if (m) showMatchDetails(m); };
+    x.onclick = open;
+    x.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } };
+  });
+  el.appendChild(sec);
 }
 
 function drawSwissRounds(el) {
