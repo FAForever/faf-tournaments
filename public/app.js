@@ -844,17 +844,21 @@ function rewardPlacesHTML(rows, cur) {
   }).join('') + '</div>';
 }
 // Lines such as "1st - Champion avatar + $160" or "2. Faction face (80 EUR)" in old free text,
-// turned into rows. Whatever is not a place line stays as text.
+// turned into rows. Whatever is not a place line stays as text. `parts` keeps the text's order:
+// place lines in a row (blank lines between them do not count) are one group, and the text around
+// a group stays where it was, so a heading over its places ("### Kings") stays over them.
 function parsePlacesFromText(text) {
   const lines = String(text || '').split('\n');
-  const rows = [], rest = [];
+  const rows = [], rest = [], parts = [];
   let cur = '';
+  let since = [];   // the lines since the last place line
+  const tidy = x => x.replace(/^\s*(?:\*\*|__)\s*$/gm, '').replace(/\n{3,}/g, '\n\n').replace(/^\s+|\s+$/g, '');
   const head = /^\s*(?:\*\*|__)?\s*#?\s*(\d{1,3})(?:\s*(?:st|nd|rd|th))?(?:\s*place)?\s*(?:[-:.)=\u2013\u2014]+)\s*(.+)$/i;
   const cash = /(?:^|\s)(?:\+|&|and|plus|,)?\s*\(?\s*(?:([$\u20ac\u20bd])\s*(\d[\d,]*(?:\.\d+)?)|(\d[\d,]*(?:\.\d+)?)\s*([$\u20ac\u20bd]|usd|eur|rub|dollars?|euros?))\s*\)?\s*(?:\*\*|__)?\s*$/i;
   const curOf = c => { c = String(c || '').toLowerCase(); return (c === '$' || c === 'usd' || c.indexOf('dollar') === 0) ? 'USD' : (c === '\u20ac' || c === 'eur' || c.indexOf('euro') === 0) ? 'EUR' : (c === '\u20bd' || c === 'rub') ? 'RUB' : ''; };
   for (const line of lines) {
     const m = head.exec(line);
-    if (!m) { rest.push(line); continue; }
+    if (!m) { rest.push(line); since.push(line); continue; }
     let body = m[2].replace(/\*\*|__/g, '').trim();
     let amount = '';
     const c = cash.exec(body);
@@ -863,11 +867,22 @@ function parsePlacesFromText(text) {
       cur = cur || curOf(c[1] || c[4]);
       body = body.slice(0, c.index).replace(/[\s+&,]+$/, '').replace(/\s+(?:and|plus)$/i, '').trim();
     }
-    rows.push({ place: String(parseInt(m[1], 10)), text: body, amount });
+    const row = { place: String(parseInt(m[1], 10)), text: body, amount };
+    rows.push(row);
+    const between = tidy(since.join('\n'));
+    const last = parts[parts.length - 1];
+    if (last && last.rows && !between) last.rows.push(row);
+    else {
+      if (between) parts.push({ text: between });
+      parts.push({ rows: [row] });
+    }
+    since = [];
   }
+  const tail = tidy(since.join('\n'));
+  if (tail) parts.push({ text: tail });
   // what is left of the text, without the bold markers that wrapped the place lines
   const left = rest.join('\n').replace(/^\s*(?:\*\*|__)\s*$/gm, '').replace(/^\s+|\s+$/g, '');
-  return { rows, rest: left, cur };
+  return { rows, rest: left, cur, parts, groups: parts.filter(x => x.rows).length };
 }
 function placeRowHTML(r) {
   r = r || {};
@@ -908,7 +923,10 @@ function wirePlacesEditor(box, opts) {
     const any = rows.some(r => r.amount !== '');
     box.querySelector('.rwpSum').textContent = any ? 'Total ' + formatPrize({ currency: curSel.value, amount: total() }) : '';
     box.querySelector('.rwpUseSum').hidden = !(any && o.prizeAmt);
-    box.querySelector('.rwpImport').hidden = !(o.text && !rows.length && parsePlacesFromText(o.text.value).rows.length);
+    // Places in more than one group (under headings such as Kings and Princes) stay in the text,
+    // which draws each group under its heading: this list has no headings and would merge them.
+    const inText = o.text ? parsePlacesFromText(o.text.value) : null;
+    box.querySelector('.rwpImport').hidden = !(inText && !rows.length && inText.rows.length && inText.groups === 1);
   };
   const nextPlace = () => {
     const nums = Array.from(rowsEl.querySelectorAll('.rwpPlace')).map(i => parseInt(i.value, 10)).filter(n => isFinite(n));
@@ -933,7 +951,7 @@ function wirePlacesEditor(box, opts) {
   };
   box.querySelector('.rwpImport').onclick = () => {
     const p = parsePlacesFromText(o.text.value);
-    if (!p.rows.length) return;
+    if (!p.rows.length || p.groups > 1) return;
     rowsEl.innerHTML = p.rows.map(placeRowHTML).join('');
     if (p.cur) curSel.value = p.cur;
     else if (o.prizeCur && o.prizeCur.value) curSel.value = o.prizeCur.value;

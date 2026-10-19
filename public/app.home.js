@@ -2064,12 +2064,13 @@ function drawOverview(el) {
   let placesCur = rewardPlacesCur(T);
   // Rewards written as text before there were places ("1st - Champion avatar + $160", a line per
   // place) are drawn the same way, until an organizer turns them into places on the Admin tab.
-  // Two place lines at least: one numbered line alone may be anything.
+  // Two place lines at least: one numbered line alone may be anything. They are drawn where they
+  // are in the text, so a heading over a group of places (Kings, Princes) stays over it.
+  let textParts = null;
   if (!places.length && rewardsText) {
     const parsed = parsePlacesFromText(rewardsText);
     if (parsed.rows.length >= 2) {
-      places = parsed.rows;
-      rewardsText = parsed.rest;
+      textParts = parsed.parts;
       placesCur = parsed.cur || (prize && prize.currency) || 'USD';
     }
   }
@@ -2084,8 +2085,9 @@ function drawOverview(el) {
       </div>` : '';
     const rw = (rewardsText || prize || places.length) ? `<div class="panel section rewards-panel"><h2>Rewards</h2>
       ${prizeCell}
-      ${places.length ? rewardPlacesHTML(places, placesCur) : ''}
-      ${rewardsText ? '<div class="ic-body reward-body">' + renderArticleBody(rewardsText) + '</div>' : ''}</div>` : '';
+      ${textParts
+        ? textParts.map(x => (x.rows ? rewardPlacesHTML(x.rows, placesCur) : '<div class="ic-body reward-body">' + renderArticleBody(x.text) + '</div>')).join('')
+        : (places.length ? rewardPlacesHTML(places, placesCur) : '') + (rewardsText ? '<div class="ic-body reward-body">' + renderArticleBody(rewardsText) + '</div>' : '')}</div>` : '';
     const sp = T.sponsors ? `<div class="panel section sponsors-panel"><h2>Sponsors</h2>
       <div class="ic-body reward-body">${renderArticleBody(T.sponsors)}</div></div>` : '';
     html += `<div class="rw-sp-row">${rw}${sp}</div>`;
