@@ -2064,3 +2064,11 @@ label.cal-toggle {
   content: 'not played'; position: absolute; right: 8px; bottom: 3px;
   font-family: var(--mono); font-size: 9px; letter-spacing: .5px; color: var(--muted); text-transform: uppercase;
 }
+
+/* ---- long names without spaces (decision 66) ----
+   A map generator seed as a map's name or description has nowhere to break, so it ran out of its
+   card, its popup, the pool thumbnails, a round's pool line, a Swiss round's match line, the games
+   table and the veto's confirm button. It breaks anywhere instead, as chat, news and reward text
+   already do. */
+.mapdb-name, .mapdb-desc, .map-desc, .modal h3, .pool-thumb-name, .maprow, .vgt td.vgt-map .veto-map, .btn.veto-go { overflow-wrap: anywhere; }
+.pick-row .pr-name, .qitem .qmaps { min-width: 0; overflow-wrap: anywhere; }

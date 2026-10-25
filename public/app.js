@@ -22,6 +22,7 @@ let playerViewMode = (() => { try { return localStorage.getItem('faf_player_view
 function setPlayerViewMode(on) {
   playerViewMode = !!on;
   try { localStorage.setItem('faf_player_view', playerViewMode ? '1' : '0'); } catch (e) {}
+  applyPlayerMapView();
 }
 // Bracket labels: show each team's players instead of the team name. Personal, per browser.
 let showPlayerNames = (() => { try { return localStorage.getItem('faf_show_players') === '1'; } catch (e) { return false; } })();
@@ -301,8 +302,12 @@ function mapName(id) {
 }
 // Which "Hidden Map N" a map is, for the organizer who can see the real name and still needs to
 // know what the players are calling it. Same rule as the server: position among the secret maps
-// in database order. Only meaningful to a viewer who gets the unfiltered list, i.e. map prep.
+// in database order. Only meaningful to a viewer who gets the unfiltered list, i.e. map prep. A
+// masked map carries its number in its name, which is the server's: a player's list can lack a
+// secret map before it (an unpublished one), and the card then said two different numbers.
 function secretNoOf(id) {
+  const mo = mapObj(id);
+  if (mo && mo.masked) { const k = /(\d+)$/.exec(mo.name || ''); return k ? parseInt(k[1], 10) : 0; }
   let n = 0;
   for (const m of (T.mapDb || [])) {
     if (!m.secret) continue;
@@ -310,6 +315,42 @@ function secretNoOf(id) {
     if (m.id === id) return n;
   }
   return 0;
+}
+// "View as player" and the maps (decision 66). Whoever does map prep gets the maps unredacted from
+// the server; a player gets them the way the tournament view and lib/maps.js hand them out: no prep
+// (an unpublished map only when it is on screen somewhere - a veto, a round, a published pool - and
+// no unpublished pool), and every secret map not going to be played yet as "Hidden Map N" without
+// its picture, description or spec. "View as player" is a display filter, so the page does the same
+// to the lists it was sent, and switching it off puts them back. Runs whenever the tournament
+// arrives (after its snapshot is taken, so polling still compares what the server sent) and when
+// the view is switched.
+function applyPlayerMapView() {
+  if (!T) return;
+  const served = T._mapsServed;
+  if (served) { T.mapDb = served.mapDb; T.mapPools = served.mapPools; }
+  if (!(playerViewMode && T.viewer && T.viewer.mapsView)) return;
+  if (!served) Object.defineProperty(T, '_mapsServed', { value: { mapDb: T.mapDb, mapPools: T.mapPools }, configurable: true, writable: true });
+  const db = T.mapDb || [], pools = T.mapPools || [];
+  const onBan = !!(T.veto && T.veto.revealBans);
+  const inPlay = {}, revealed = {};
+  for (const m of (T.matches || [])) {
+    const v = m && m.veto;
+    if (v) {
+      for (const id of (v.remaining || [])) inPlay[id] = 1;
+      for (const x of (v.banned || [])) if (x && x.map) { inPlay[x.map] = 1; if (onBan) revealed[x.map] = 1; }
+      for (const g of (v.picks || [])) if (g && g.map) { inPlay[g.map] = 1; revealed[g.map] = 1; }
+      if (v.decider && v.decider.map) { inPlay[v.decider.map] = 1; revealed[v.decider.map] = 1; }
+    }
+    for (const g of ((m && m.games) || [])) if (g && g.map) revealed[g.map] = 1;
+  }
+  for (const key of Object.keys(T.maps || {})) for (const id of (T.maps[key] || [])) { inPlay[id] = 1; revealed[id] = 1; }
+  for (const p of pools) if (p.published) for (const id of (p.mapIds || [])) inPlay[id] = 1;
+  const no = {};
+  let n = 0;
+  for (const m of db) if (m.secret) no[m.id] = ++n;
+  T.mapDb = db.filter(m => m.published || inPlay[m.id]).map(m => ((!m.secret || revealed[m.id]) ? m
+    : { id: m.id, name: 'Hidden Map ' + (no[m.id] || '?'), image: null, description: '', spec: null, published: m.published ? 1 : 0, secret: 1, masked: 1 }));
+  T.mapPools = pools.filter(p => p.published);
 }
 // A map the server masked has no picture to show and never will until it is played, so the tile
 // says so instead of the generic "no image" - which would read as an organizer who forgot one.

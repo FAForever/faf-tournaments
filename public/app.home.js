@@ -1387,6 +1387,7 @@ async function renderTournament() {
   drawTopbar(viewerIsOrganizer() ? 'ORGANIZER' : (T.viewer && T.viewer.caster ? 'CASTER' : ''));
   maybeAutoStreamerMode();
   lastSnapshot = JSON.stringify(T);
+  applyPlayerMapView();
   drawTournament();
   maybePromptOrganizerClaim();
   maybePromptLateSignup();
@@ -1410,6 +1411,7 @@ async function pollOnce() {
     if (snap === lastSnapshot) return;                           // nothing changed
     T = fresh;
     lastSnapshot = snap;
+    applyPlayerMapView();
     // Fresh data may open or close chats in the dock (a match became ready, a result was
     // confirmed, someone pinged). Before the early return below, which skips the redraw.
     if (typeof dockSync === 'function') dockSync();
@@ -2242,7 +2244,7 @@ function fillQueue(el, matches, withReport) {
       if (m.status === 'live') inner += `<span class="livechip">LIVE</span>`;
     }
     const maps = mapsFor(m.bracket, poolRoundOf(m.bracket, m.round, m.division));
-    if (maps.length) inner += `<span class="mono small muted" title="Maps">${esc(maps.map((mp, i) => 'G' + (i + 1) + ': ' + mapName(mp)).join(' · '))}</span>`;
+    if (maps.length) inner += `<span class="qmaps mono small muted" title="Maps">${esc(maps.map((mp, i) => 'G' + (i + 1) + ': ' + mapName(mp)).join(' · '))}</span>`;
     const showBtn = !T.imported && withReport && (m.status === 'done' ? viewerIsAdmin() : canReportMatch(m));
     if (showBtn) inner += `<button class="btn amber small" data-m="${m.id}">Report</button>`;
     div.innerHTML = inner;

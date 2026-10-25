@@ -2468,6 +2468,7 @@ function openMatchChat(m) {
 async function refresh() {
   await loadTournament();
   lastSnapshot = JSON.stringify(T);
+  applyPlayerMapView();
   redrawInPlace();
 }
 
