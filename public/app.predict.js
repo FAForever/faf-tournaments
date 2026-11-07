@@ -262,7 +262,8 @@ function predStageHTML(stage, data, viewing) {
     const total = stage.total || (c ? c.need : 0);
     const dirty = predDirty(stage);
     const dist = stage.kind === 'records' ? predSwissDist((stage.teams || []).length, stage.plan || {}) : null;
-    const fill = stage.kind === 'bracket' ? 'Higher seed wins every match' : (stage.kind === 'records' && dist ? 'Fill in by seed' : '');
+    // (a bracket stage had "Higher seed wins every match": taken out, decision 67)
+    const fill = (stage.kind === 'records' && dist) ? 'Fill in by seed' : '';
     h += `<div class="pred-actions">
       <button class="btn amber" data-psave${made ? '' : ' disabled'}>Save prediction</button>
       ${fill ? '<button class="btn ghost small" data-pfill>' + esc(fill) + '</button>' : ''}
@@ -455,22 +456,7 @@ function wirePredictions(el, data, stage) {
     if (fill) fill.onclick = () => {
       const p = picks();
       for (const k of Object.keys(p)) delete p[k];
-      if (stage.kind === 'bracket') {
-        // the better seed of the two teams that get there; a later match only knows its teams
-        // once the earlier ones are picked, so walk again until nothing is left open
-        const ps = stage.positions || [];
-        for (let guard = 0; guard < 64; guard++) {
-          const c = predCascade(ps, p);
-          let added = 0;
-          for (const pos of ps) {
-            const o = c.occ[pos.k];
-            if (!o || o[0] == null || o[1] == null || o[0] === 'BYE' || o[1] === 'BYE' || p[pos.k]) continue;
-            p[pos.k] = predSeedOf(stage, o[0]) <= predSeedOf(stage, o[1]) ? o[0] : o[1];
-            added++;
-          }
-          if (!added) break;
-        }
-      } else if (stage.kind === 'records') {
+      if (stage.kind === 'records') {
         const dist = predSwissDist((stage.teams || []).length, stage.plan || {});
         if (!dist) return;
         const teams = (stage.teams || []).map(id => (T.teams || []).find(x => x.id === id)).filter(Boolean).sort((a, b) => (a.seed || 0) - (b.seed || 0));

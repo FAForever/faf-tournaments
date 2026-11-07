@@ -1,7 +1,7 @@
 // ----- bracket / rounds -----
 
 function mapRows(maps) {
-  return maps.map((id, i) => '<div class="maprow"><span class="mapg">GAME ' + (i + 1) + '</span><span>' + esc(mapName(id)) + '</span></div>').join('');
+  return maps.map((id, i) => '<div class="maprow"><span class="mapg">GAME ' + (i + 1) + '</span><span>' + mapNameLink(id) + '</span></div>').join('');
 }
 
 // Popup showing a pool's maps as thumbnails — a cutout of the Maps-tab pool card, used when a
@@ -82,7 +82,7 @@ function mapsLine(bracket, round, el) {
     else if (poolMaps.length > 3) {
       sub = '<div class="maprow mapsub"><button type="button" class="btn ghost small mapblock-showpool">Show pool (' + poolMaps.length + ' maps)</button></div>';
     } else {
-      sub = '<div class="maprow mapsub">' + poolMaps.map(id => esc(mapName(id))).join(', ') + '</div>';
+      sub = '<div class="maprow mapsub">' + poolMaps.map(id => mapNameLink(id)).join(', ') + '</div>';
     }
     div.innerHTML = '<div class="mapblock-head"><span>MAP POOL</span>' + (admin ? '<a href="#">change</a>' : '') + '</div>' +
       (shown

@@ -356,11 +356,21 @@ function applyPlayerMapView() {
 // says so instead of the generic "no image" - which would read as an organizer who forgot one.
 function mapNoImgLabel(m) { return (m && m.masked) ? 'HIDDEN' : 'no image'; }
 
+// Is there anything to show in a map's popup: a picture, the spawns or a description? A secret
+// map that is still hidden has none of them.
+function mapHasInfo(m) { return !!(m && (m.image || m.description || mapSpecLines(m).length)); }
+// A map's name that opens its popup (picture, spawns, description) when it has any (decision 67:
+// the map names in a round's map pool on the Bracket tab, and in the score popups).
+function mapNameLink(id) {
+  const m = mapObj(id);
+  const name = m ? m.name : (id || '');
+  return mapHasInfo(m) ? '<span class="maplink" data-map-info="' + esc(id) + '" title="Show the map">' + esc(name) + '</span>' : esc(name);
+}
 // a clickable map chip that opens the map's image/description (if any)
 function mapChip(id, cls) {
   const m = mapObj(id);
   const name = m ? m.name : (id || '');
-  const hasInfo = m && (m.image || m.description);
+  const hasInfo = mapHasInfo(m);
   return '<span class="veto-map ' + (cls || '') + (hasInfo ? ' has-info' : '') + '"' + (hasInfo ? ' data-map-info="' + esc(id) + '"' : '') + '>' + esc(name) + '</span>';
 }
 // ---------- structured map spec ----------

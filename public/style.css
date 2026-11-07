@@ -2072,3 +2072,7 @@ label.cal-toggle {
    already do. */
 .mapdb-name, .mapdb-desc, .map-desc, .modal h3, .pool-thumb-name, .maprow, .vgt td.vgt-map .veto-map, .btn.veto-go { overflow-wrap: anywhere; }
 .pick-row .pr-name, .qitem .qmaps { min-width: 0; overflow-wrap: anywhere; }
+
+/* ---- a map's name that opens its popup (decision 67) ---- */
+.maplink { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+.maplink:hover { color: var(--amber); text-decoration-style: solid; }
