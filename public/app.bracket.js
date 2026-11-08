@@ -1786,6 +1786,7 @@ function bracketColumns(el, bracket, title, gfMatch, division) {
   if (title) sec.innerHTML = `<div class="bsection-title ${bracket}">${esc(title)}</div>`;
   const wrap = document.createElement('div');
   wrap.className = 'bracket';
+  wrap.dataset.pan = bracket + (division ? '-' + division : '');
   const inner = document.createElement('div');
   inner.className = 'binner';
   for (let r = 1; r <= rounds; r++) {
@@ -1880,6 +1881,103 @@ function alignBracketSections(el) {
     t.style.width = w + 'px';
     t.style.maxWidth = '100%';
   }
+}
+
+// ---- dragging a wide bracket sideways (decision 68) ----
+// A big bracket, and the Swiss overview, is wider than the screen and scrolls inside its own box,
+// whose scrollbar sits under the last match, often a screen or more further down. Holding the left
+// mouse button on it and moving the mouse now moves it left and right with the mouse. It moves the
+// box's own scroll position, which the browser keeps between the two ends, so the bracket can never
+// be dragged off screen; up and down stay the page's. Only while there is something to scroll (the
+// hand cursor), only from the bracket itself (not from a button, link, field or select, nor the
+// box's edge and scrollbar), with no modifier key, and only with a mouse: a finger already swipes
+// it. A press that moves less than PAN_SLOP px sideways stays a click; once it has moved the
+// bracket, letting go does not click what is under the mouse.
+const PAN_BOXES = '.bracket, .swgrid';
+const PAN_NOT_FROM = 'a[href], button, input, select, textarea, label, [contenteditable]';
+const PAN_SLOP = 5;
+let _pan = null;           // { box, key, x, last, to, on } from the press to the release
+let _panSwallow = false;   // the click that follows a drag
+let _panView = '';         // the tournament and tab the boxes on screen were drawn for
+function panCanScroll(box) { return box.scrollWidth - box.clientWidth > 1; }
+// The boxes on the page, each with a key that a redraw keeps: its data-pan, numbered in order.
+function panBoxes() {
+  const seen = {};
+  return Array.from(document.querySelectorAll('#app .bracket, #app .swgrid')).map(box => {
+    const k = box.dataset.pan || 'box';
+    seen[k] = (seen[k] || 0) + 1;
+    return { box, key: k + '#' + seen[k] };
+  });
+}
+function panStop(swallowClick) {
+  const p = _pan;
+  _pan = null;
+  if (!p || !p.on) return;
+  document.documentElement.classList.remove('panning');
+  if (swallowClick) { _panSwallow = true; setTimeout(() => { _panSwallow = false; }, 0); }
+}
+document.addEventListener('mouseover', e => {
+  const box = e.target && e.target.closest ? e.target.closest(PAN_BOXES) : null;
+  if (box) box.classList.toggle('can-pan', panCanScroll(box));
+});
+document.addEventListener('mousedown', e => {
+  if (_pan) panStop(false);
+  if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+  const t = e.target;
+  const box = t && t.closest ? t.closest(PAN_BOXES) : null;
+  // a press on the box itself is on its edge or its scrollbar: the bracket is what is inside it
+  if (!box || t === box || t.closest(PAN_NOT_FROM) || !panCanScroll(box)) return;
+  const mine = panBoxes().find(x => x.box === box);
+  _pan = { box, key: mine ? mine.key : '', x: e.clientX, last: e.clientX, to: box.scrollLeft, on: false };
+});
+document.addEventListener('mousemove', e => {
+  const p = _pan;
+  if (!p) return;
+  if (e.buttons === 0) { panStop(false); return; }   // let go where no mouseup reached the page
+  if (!p.on) {
+    if (Math.abs(e.clientX - p.x) < PAN_SLOP) return;
+    p.on = true;
+    document.documentElement.classList.add('panning');
+    const sel = window.getSelection ? window.getSelection() : null;
+    if (sel && sel.removeAllRanges) sel.removeAllRanges();
+  }
+  // the poll redrew the page: carry on with the new box, which kept the position (panRestore)
+  if (!p.box.isConnected) {
+    const now = p.key ? panBoxes().find(x => x.key === p.key) : null;
+    if (!now) { panStop(false); return; }
+    p.box = now.box;
+  }
+  const box = p.box;
+  if (Math.abs(box.scrollLeft - p.to) > 1.5) p.to = box.scrollLeft;   // moved by something else
+  p.to = Math.max(0, Math.min(box.scrollWidth - box.clientWidth, p.to - (e.clientX - p.last)));
+  p.last = e.clientX;
+  box.scrollLeft = p.to;
+  e.preventDefault();   // the move is the drag's: no text selection, no dragging of the text under it
+});
+document.addEventListener('mouseup', e => { if (e.button === 0 && _pan) panStop(true); });
+window.addEventListener('blur', () => { if (_pan) panStop(false); });
+// a press on selected text would start the browser's own drag of that text instead
+document.addEventListener('dragstart', e => { if (_pan) e.preventDefault(); });
+window.addEventListener('click', e => {
+  if (!_panSwallow) return;
+  _panSwallow = false;
+  e.preventDefault();
+  e.stopPropagation();
+}, true);
+// The sideways place of every box survives a redraw of the same tab: the poll redraws the page
+// whenever anything changed (a score, a veto step, a chat message), and every redraw used to put
+// the bracket back at its first round. drawTournament() takes the places before it draws and puts
+// them back after.
+function panPositions() {
+  if (!T || _panView !== T.id + '|' + currentTab) return null;
+  const pos = {};
+  for (const x of panBoxes()) if (x.box.scrollLeft > 0) pos[x.key] = x.box.scrollLeft;
+  return { view: _panView, pos };
+}
+function panRestore(saved) {
+  _panView = T ? T.id + '|' + currentTab : '';
+  if (!saved || saved.view !== _panView) return;
+  for (const x of panBoxes()) if (saved.pos[x.key]) x.box.scrollLeft = saved.pos[x.key];
 }
 
 function drawBracket(el, division) {
@@ -2181,6 +2279,7 @@ function drawBracketPreview(el, division) {
     sec.innerHTML = title ? `<div class="bsection-title ${cls}">${esc(title)}</div>` : '';
     const wrap = document.createElement('div');
     wrap.className = 'bracket';
+    wrap.dataset.pan = 'preview-' + (cls || 'wb');
     const inner = document.createElement('div');
     inner.className = 'binner';
     return { sec, wrap, inner };
@@ -3033,6 +3132,7 @@ function drawSwissGrid(el) {
     + (model.cuts.on ? ' ' + esc(swissCutLabel(T)) + '.' : '') + '</p>';
   const wrap = document.createElement('div');
   wrap.className = 'swgrid';
+  wrap.dataset.pan = 'swiss';
   const inner = document.createElement('div');
   inner.className = 'swgrid-inner';
   const lone = !(T.matches || []).some(m => m.bracket !== 'sw' && m.bracket !== 'ffa');

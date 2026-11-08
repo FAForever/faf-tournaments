@@ -1579,6 +1579,8 @@ function turnBannerHTML() {
 }
 
 function drawTournament() {
+  // where each wide bracket was scrolled to, put back after the redraw (decision 68)
+  const panSaved = typeof panPositions === 'function' ? panPositions() : null;
   setTitle(T && T.name);
   // flag the browser tab too, so it's noticeable when the site isn't in focus
   if (T && myTurnInfo()) document.title = '\u25cf ' + document.title;
@@ -1758,6 +1760,7 @@ function drawTournament() {
   // The chat dock follows the data and the open tab (it hides on the Chat tab), and the redraw
   // has just rebuilt every "keep open on the right" button: repaint them all.
   if (typeof dockSync === 'function') dockSync();
+  if (typeof panRestore === 'function') panRestore(panSaved);
 }
 
 // ----- overview -----

@@ -2076,3 +2076,9 @@ label.cal-toggle {
 /* ---- a map's name that opens its popup (decision 67) ---- */
 .maplink { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
 .maplink:hover { color: var(--amber); text-decoration-style: solid; }
+
+/* ---- dragging a wide bracket sideways (decision 68) ---- */
+/* The hand shows where a press drags (the bracket inside its box, not the box's edge or scrollbar),
+   and only while there is something to scroll; names and buttons keep their own pointer. */
+.bracket.can-pan > .binner, .swgrid.can-pan > .swgrid-inner { cursor: grab; }
+html.panning, html.panning * { cursor: grabbing !important; -webkit-user-select: none !important; user-select: none !important; }
