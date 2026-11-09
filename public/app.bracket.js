@@ -1883,23 +1883,27 @@ function alignBracketSections(el) {
   }
 }
 
-// ---- dragging a wide bracket sideways (decision 68) ----
-// A big bracket, and the Swiss overview, is wider than the screen and scrolls inside its own box,
-// whose scrollbar sits under the last match, often a screen or more further down. Holding the left
-// mouse button on it and moving the mouse now moves it left and right with the mouse. It moves the
-// box's own scroll position, which the browser keeps between the two ends, so the bracket can never
-// be dragged off screen; up and down stay the page's. Only while there is something to scroll (the
-// hand cursor), only from the bracket itself (not from a button, link, field or select, nor the
-// box's edge and scrollbar), with no modifier key, and only with a mouse: a finger already swipes
-// it. A press that moves less than PAN_SLOP px sideways stays a click; once it has moved the
-// bracket, letting go does not click what is under the mouse.
+// ---- dragging a big bracket with the mouse (decisions 68 and 69) ----
+// A big bracket, and the Swiss overview, is wider than the screen and scrolls sideways inside its
+// own box, whose scrollbar sits under the last match, often a screen or more further down; a tall
+// one runs far below the window. Holding the left mouse button on it and moving the mouse moves it
+// with the mouse in every direction: sideways by the box's own scroll position (68), up and down by
+// the page's (69). The browser keeps both between their two ends, so the bracket can never be
+// dragged off screen. Only while there is something to move (the hand cursor), only from the
+// bracket itself (not from a button, link, field or select, nor the box's edge and scrollbar), with
+// no modifier key, and only with a mouse: a finger already swipes it. A press that moves less than
+// PAN_SLOP px stays a click; once it has moved the bracket, letting go does not click what is under
+// the mouse.
 const PAN_BOXES = '.bracket, .swgrid';
 const PAN_NOT_FROM = 'a[href], button, input, select, textarea, label, [contenteditable]';
 const PAN_SLOP = 5;
-let _pan = null;           // { box, key, x, last, to, on } from the press to the release
+let _pan = null;           // { box, key, x, y, last, lastY, to, toY, on } from the press to the release
 let _panSwallow = false;   // the click that follows a drag
 let _panView = '';         // the tournament and tab the boxes on screen were drawn for
 function panCanScroll(box) { return box.scrollWidth - box.clientWidth > 1; }
+function panPage() { return document.scrollingElement || document.documentElement; }
+function panPageMax() { const d = panPage(); return Math.max(0, d.scrollHeight - d.clientHeight); }
+function panCanMove(box) { return panCanScroll(box) || panPageMax() > 1; }
 // The boxes on the page, each with a key that a redraw keeps: its data-pan, numbered in order.
 function panBoxes() {
   const seen = {};
@@ -1918,7 +1922,7 @@ function panStop(swallowClick) {
 }
 document.addEventListener('mouseover', e => {
   const box = e.target && e.target.closest ? e.target.closest(PAN_BOXES) : null;
-  if (box) box.classList.toggle('can-pan', panCanScroll(box));
+  if (box) box.classList.toggle('can-pan', panCanMove(box));
 });
 document.addEventListener('mousedown', e => {
   if (_pan) panStop(false);
@@ -1926,16 +1930,16 @@ document.addEventListener('mousedown', e => {
   const t = e.target;
   const box = t && t.closest ? t.closest(PAN_BOXES) : null;
   // a press on the box itself is on its edge or its scrollbar: the bracket is what is inside it
-  if (!box || t === box || t.closest(PAN_NOT_FROM) || !panCanScroll(box)) return;
+  if (!box || t === box || t.closest(PAN_NOT_FROM) || !panCanMove(box)) return;
   const mine = panBoxes().find(x => x.box === box);
-  _pan = { box, key: mine ? mine.key : '', x: e.clientX, last: e.clientX, to: box.scrollLeft, on: false };
+  _pan = { box, key: mine ? mine.key : '', x: e.clientX, y: e.clientY, last: e.clientX, lastY: e.clientY, to: box.scrollLeft, toY: window.scrollY, on: false };
 });
 document.addEventListener('mousemove', e => {
   const p = _pan;
   if (!p) return;
   if (e.buttons === 0) { panStop(false); return; }   // let go where no mouseup reached the page
   if (!p.on) {
-    if (Math.abs(e.clientX - p.x) < PAN_SLOP) return;
+    if (Math.max(Math.abs(e.clientX - p.x), Math.abs(e.clientY - p.y)) < PAN_SLOP) return;
     p.on = true;
     document.documentElement.classList.add('panning');
     const sel = window.getSelection ? window.getSelection() : null;
@@ -1950,8 +1954,14 @@ document.addEventListener('mousemove', e => {
   const box = p.box;
   if (Math.abs(box.scrollLeft - p.to) > 1.5) p.to = box.scrollLeft;   // moved by something else
   p.to = Math.max(0, Math.min(box.scrollWidth - box.clientWidth, p.to - (e.clientX - p.last)));
-  p.last = e.clientX;
   box.scrollLeft = p.to;
+  // up and down move the page (decision 69), the same way: from a target kept between the top and
+  // the bottom, picked up again when something else scrolled it (the wheel, a redraw)
+  if (Math.abs(window.scrollY - p.toY) > 1.5) p.toY = window.scrollY;
+  p.toY = Math.max(0, Math.min(panPageMax(), p.toY - (e.clientY - p.lastY)));
+  if (Math.abs(window.scrollY - p.toY) > 0.5) window.scrollTo(window.scrollX, p.toY);
+  p.last = e.clientX;
+  p.lastY = e.clientY;
   e.preventDefault();   // the move is the drag's: no text selection, no dragging of the text under it
 });
 document.addEventListener('mouseup', e => { if (e.button === 0 && _pan) panStop(true); });
