@@ -1844,18 +1844,26 @@ function bracketColumns(el, bracket, title, gfMatch, division) {
     head.className = 'bcol-title';
     head.textContent = 'GRAND FINAL';
     col.appendChild(head);
-    if (viewToken() && gfMatch.status !== 'live' && gfMatch.status !== 'done' && !(Array.isArray(gfMatch.games) && gfMatch.games.length)) {
+    // The same Bo line as every round: a select while the length can change, else the length
+    // (decision 70). The grand final used to drop the line once it was under way or played, which put
+    // its map pool and its match a line higher than every other column's.
+    if (viewToken()) {
       const boWrap = document.createElement('div');
       boWrap.className = 'bcol-bo';
-      boWrap.innerHTML = 'Bo <select class="bcol-bo-sel">' + [1, 3, 5, 7].map(v => '<option value="' + v + '"' + (v === gfMatch.bo ? ' selected' : '') + '>Bo' + v + '</option>').join('') + '</select>';
-      const sel = boWrap.querySelector('select');
-      sel.onchange = async () => {
-        try {
-          await api('/api/t/' + T.id + '/set_round_bo', { bracket: 'gf', round: 1, bo: parseInt(sel.value, 10), division: division || null, admin: adminToken() });
-          toast('Grand Final set to Bo' + sel.value);
-          await refresh();
-        } catch (e) { toast(e.message, true); sel.value = gfMatch.bo; }
-      };
+      if (gfMatch.status !== 'live' && gfMatch.status !== 'done' && !(Array.isArray(gfMatch.games) && gfMatch.games.length)) {
+        boWrap.innerHTML = 'Bo <select class="bcol-bo-sel">' + [1, 3, 5, 7].map(v => '<option value="' + v + '"' + (v === gfMatch.bo ? ' selected' : '') + '>Bo' + v + '</option>').join('') + '</select>';
+        const sel = boWrap.querySelector('select');
+        sel.onchange = async () => {
+          try {
+            await api('/api/t/' + T.id + '/set_round_bo', { bracket: 'gf', round: 1, bo: parseInt(sel.value, 10), division: division || null, admin: adminToken() });
+            toast('Grand Final set to Bo' + sel.value);
+            await refresh();
+          } catch (e) { toast(e.message, true); sel.value = gfMatch.bo; }
+        };
+      } else {
+        boWrap.className = 'bcol-bo muted';
+        boWrap.textContent = 'Bo' + gfMatch.bo;
+      }
       col.appendChild(boWrap);
     }
     mapsLine('gf', 1, col);

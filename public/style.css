@@ -2082,3 +2082,9 @@ label.cal-toggle {
    and only while there is something to move; names and buttons keep their own pointer. */
 .bracket.can-pan > .binner, .swgrid.can-pan > .swgrid-inner { cursor: grab; }
 html.panning, html.panning * { cursor: grabbing !important; -webkit-user-select: none !important; user-select: none !important; }
+
+/* ---- the columns of a bracket line up (decision 70) ---- */
+/* A round's Bo line is a select while its length can change and plain text after: both are one
+   height now (the select was 2.5 px taller), so the map pools and matches under them line up. */
+.bcol-bo { display: flex; align-items: center; justify-content: center; gap: 4px; height: 20px; }
+.bcol-bo select { height: 20px; }
