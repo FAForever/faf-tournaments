@@ -430,7 +430,7 @@ async function renderHost() {
         <div style="display:flex;gap:8px"><input type="date" id="cCiDate" style="flex:1"><input type="time" id="cCiTime" style="width:130px"></div>
         <label>Description (rules, schedule)</label>
         <span class="muted small">Paste a screenshot straight in, or <a href="#" id="cDescImgBtn">insert an image</a>.</span>
-        <input type="file" id="cDescImgFile" accept="image/*" style="display:none">
+        <input type="file" id="cDescImgFile" accept="image/*" multiple style="display:none">
         ${mdToolbarHTML()}
         <textarea id="cDesc" maxlength="20000" rows="6" placeholder="Sunday 19:00 CEST. Check-in in Discord... (supports **bold**, headings, lists, links)"></textarea>
         <label>Lobby options</label>
@@ -449,12 +449,12 @@ async function renderHost() {
         <div id="cPlaces">${placesEditorHTML([], '')}</div>
         <label>Other rewards <span class="muted small">(optional - text under the places)</span></label>
         <span class="muted small">Paste a screenshot straight in (e.g. an avatar), or <a href="#" id="cRwImgBtn">insert an image</a>.</span>
-        <input type="file" id="cRwImgFile" accept="image/*" style="display:none">
+        <input type="file" id="cRwImgFile" accept="image/*" multiple style="display:none">
         ${mdToolbarHTML()}
         <textarea id="cRewards" maxlength="2000" rows="3" placeholder="e.g. Every finalist gets the tournament avatar"></textarea>
         <label>Sponsors <span class="muted small">(optional)</span></label>
         <span class="muted small">Paste a screenshot straight in, or <a href="#" id="cSpImgBtn">insert an image</a>.</span>
-        <input type="file" id="cSpImgFile" accept="image/*" style="display:none">
+        <input type="file" id="cSpImgFile" accept="image/*" multiple style="display:none">
         ${mdToolbarHTML()}
         <textarea id="cSponsors" maxlength="2000" rows="3" placeholder="Powered by [YourSponsor](https://...)"></textarea>
         <label>Livestream links <span class="muted small">(optional)</span></label>
@@ -1307,6 +1307,17 @@ function formHasFocus() {
   return a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT') && app.contains(a);
 }
 
+// Text changed on the Admin tab and not saved yet (decision 71). A redraw builds the fields again
+// from the saved tournament and drops it: an image inserted into Rewards went missing when the next
+// one was picked before saving (the first upload changed the tournament, the click on "insert an
+// image" took the focus off the field, the poll redrew), and both showed under the Briefing.
+const _textEdited = new WeakSet();
+document.addEventListener('input', e => { const f = e.target; if (f && f.tagName === 'TEXTAREA') _textEdited.add(f); }, true);
+function adminHasUnsavedText() {
+  if (currentTab !== 'admin') return false;
+  return Array.from(app.querySelectorAll('textarea')).some(f => _textEdited.has(f) && f.value !== f.defaultValue);
+}
+
 async function loadTournament() {
   const tok = viewToken();
   T = await api('/api/t/' + tourneyId() + (tok ? '?token=' + encodeURIComponent(tok) : ''));
@@ -1404,6 +1415,7 @@ async function pollOnce() {
   const modalRoot = document.getElementById('modalRoot');
   if (modalRoot.innerHTML && !modalRoot.querySelector('[data-veto-live]')) return;
   if (formHasFocus()) return;                                    // user is typing
+  if (adminHasUnsavedText()) return;                             // until it is saved (or put back)
   try {
     const tok = viewToken();
     const fresh = await api('/api/t/' + tourneyId() + (tok ? '?token=' + encodeURIComponent(tok) : ''));
