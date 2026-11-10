@@ -1002,7 +1002,7 @@ async function drawAdmin(el) {
     </div>
     ${mdToolbarHTML()}
     <textarea id="aiDesc" maxlength="20000" rows="8">${esc(T.description || '')}</textarea>
-    <input type="file" id="aiDescImgFile" accept="image/*" style="display:none">
+    <input type="file" id="aiDescImgFile" accept="image/*" multiple style="display:none">
     <label style="margin-top:12px">Lobby options</label>
     ${mdToolbarHTML()}
     <textarea id="aiLobby" maxlength="20000" rows="6">${esc(T.lobbyOptions || '')}</textarea>
@@ -1032,7 +1032,7 @@ async function drawAdmin(el) {
     </div>
     ${mdToolbarHTML()}
     <textarea id="aiRewards" maxlength="2000" rows="4" placeholder="e.g. Every finalist gets the tournament avatar">${esc(T.rewards || '')}</textarea>
-    <input type="file" id="aiRwImgFile" accept="image/*" style="display:none">
+    <input type="file" id="aiRwImgFile" accept="image/*" multiple style="display:none">
     <div style="margin-top:14px"><button class="btn" id="aiRwSave">Save rewards</button></div>
   </div>`;
 
@@ -1043,7 +1043,7 @@ async function drawAdmin(el) {
     </div>
     ${mdToolbarHTML()}
     <textarea id="aiSponsors" maxlength="2000" rows="5" placeholder="e.g. Powered by [YourSponsor](https://sponsor.example) \u2014 thanks for the prize pool!">${esc(T.sponsors || '')}</textarea>
-    <input type="file" id="aiSpImgFile" accept="image/*" style="display:none">
+    <input type="file" id="aiSpImgFile" accept="image/*" multiple style="display:none">
     <div style="margin-top:14px"><button class="btn" id="aiSpSave">Save sponsors</button></div>
   </div>`;
 

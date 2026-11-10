@@ -2393,7 +2393,9 @@ function renderArticleBody(text) {
   s = s.replace(/^## (.*)$/gm, '<span class="art-h2">$1</span>');
   s = s.replace(/^# (.*)$/gm, '<span class="art-h1">$1</span>');
   s = s.replace(/^- (.*)$/gm, '<span class="art-li">$1</span>');
-  s = s.replace(/(<\/span>|<img[^>]*>)\n/g, '$1');
+  // Images are inline (decision 71): the ones on one line sit next to each other, and the line
+  // break after an image is kept, so the next line starts under it as written.
+  s = s.replace(/(<\/span>)\n/g, '$1');
   return s;
 }
 
@@ -2441,32 +2443,64 @@ function wireMdToolbar(root, ta) {
 
 // Wire a textarea so pasted images (and an optional file-picker button) upload via
 // `uploader(dataUrl) -> {url}` and insert an ![image](url) token at the cursor.
+// Decision 71: several at once (a pick of several files, or a paste of several), uploaded one after
+// the other so they land in that order. An image inserted right after another joins its line, and
+// images on one line sit next to each other; anywhere else an image gets a line of its own. The
+// caret stays right after it, so the next one joins too.
 function wireImagePaste(ta, uploader, imgBtn, fileInput) {
-  const insertAtCursor = (txt) => {
-    const s = ta.selectionStart, e = ta.selectionEnd;
-    ta.value = ta.value.slice(0, s) + txt + ta.value.slice(e);
-    ta.selectionStart = ta.selectionEnd = s + txt.length;
-    ta.dispatchEvent(new Event('input'));
-    ta.focus();
+  // The field in the page now. A redraw while the file dialog was open (the tournament changed)
+  // builds a new one with the same id; the image goes there, not into the old one, which is gone.
+  let cur = ta;
+  const live = () => {
+    const t = (cur.id && document.getElementById(cur.id)) || cur;
+    if (t !== cur) {
+      if (t.value === cur.value) { t.selectionStart = cur.selectionStart; t.selectionEnd = cur.selectionEnd; }
+      else t.selectionStart = t.selectionEnd = t.value.length;
+      cur = t;
+    }
+    return cur;
   };
-  const uploadImage = async (file) => {
-    if (!file) return;
-    try {
-      const dataUrl = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error('Could not read image')); r.readAsDataURL(file); });
-      const d = await uploader(dataUrl);
-      insertAtCursor('\n![image](' + d.url + ')\n');
-      toast('Image added');
-    } catch (err) { toast(err.message, true); }
+  const insertImage = (url) => {
+    const t = live();
+    const v = t.value, s = t.selectionStart, e = t.selectionEnd;
+    const before = v.slice(0, s), after = v.slice(e), tok = '![image](' + url + ')';
+    let lead, trail;
+    if (/!\[[^\]]*\]\([^)\s]+\)[ \t]*$/.test(before)) { lead = /[ \t]$/.test(before) ? '' : ' '; trail = after && !/^\s/.test(after) ? ' ' : ''; }
+    else { lead = before && !/\n$/.test(before) ? '\n' : ''; trail = after && !/^\n/.test(after) ? '\n' : ''; }
+    t.value = before + lead + tok + trail + after;
+    t.selectionStart = t.selectionEnd = before.length + lead.length + tok.length;
+    t.dispatchEvent(new Event('input', { bubbles: true }));
+    t.focus();
+  };
+  const readFile = (file) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error('Could not read image')); r.readAsDataURL(file); });
+  let queue = Promise.resolve();
+  const uploadImages = (files) => {
+    files = Array.from(files || []).filter(Boolean);
+    if (!files.length) return queue;
+    queue = queue.then(async () => {
+      let n = 0;
+      for (const file of files) {
+        try { const d = await uploader(await readFile(file)); insertImage(d.url); n++; }
+        catch (err) { toast(err.message + (files.length > 1 ? ' (' + n + ' of ' + files.length + ' added)' : ''), true); return; }
+      }
+      toast(n === 1 ? 'Image added' : n + ' images added');
+    });
+    return queue;
   };
   ta.addEventListener('paste', e => {
-    const items = (e.clipboardData && e.clipboardData.items) || [];
-    for (const it of items) {
-      if (it.type && it.type.indexOf('image/') === 0) { const f = it.getAsFile(); if (f) { e.preventDefault(); uploadImage(f); return; } }
+    const cd = e.clipboardData;
+    let files = Array.from((cd && cd.files) || []).filter(f => f.type && f.type.indexOf('image/') === 0);
+    if (!files.length) {
+      // no file list: the first image the clipboard holds, as before
+      for (const it of Array.from((cd && cd.items) || [])) {
+        if (it.type && it.type.indexOf('image/') === 0) { const f = it.getAsFile(); if (f) { files = [f]; break; } }
+      }
     }
+    if (files.length) { e.preventDefault(); uploadImages(files); }
   });
   if (imgBtn && fileInput) {
     imgBtn.onclick = e => { e.preventDefault(); fileInput.click(); };
-    fileInput.onchange = () => { uploadImage(fileInput.files[0]); fileInput.value = ''; };
+    fileInput.onchange = () => { const files = Array.from(fileInput.files || []); fileInput.value = ''; uploadImages(files); };
   }
 }
 
