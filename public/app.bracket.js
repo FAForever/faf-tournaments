@@ -56,7 +56,9 @@ function showPoolPopup(pool) {
   });
 }
 
-function mapsLine(bracket, round, el) {
+// `bo`: the length the bracket preview shows for this round (decision 72). Before the start there
+// are no matches to read it from, and the preview's own per-round choices are what counts.
+function mapsLine(bracket, round, el, bo) {
   if (T.imported) return;
   // assigning a pool to a round is a map action, so it follows map access, not organizer rights
   const admin = viewerCanMaps();
@@ -105,7 +107,7 @@ function mapsLine(bracket, round, el) {
   div.innerHTML = '<div class="mapblock-head"><span>MAP POOL</span>' + (admin ? '<a href="#">edit</a>' : '') + '</div>' +
     (maps.length ? mapRows(maps) : '<div class="maprow muted">no maps set</div>');
   const a = div.querySelector('a');
-  if (a) a.onclick = e => { e.preventDefault(); editMaps(bracket, round); };
+  if (a) a.onclick = e => { e.preventDefault(); editMaps(bracket, round, bo); };
   el.appendChild(div);
 }
 
@@ -179,10 +181,12 @@ function projectedBoFor(bracket, round) {
   return plan.bo || 1;
 }
 
-function editMaps(bracket, round) {
+function editMaps(bracket, round, bo) {
   const existing = mapsFor(bracket, round);
   const roundMatches = T.matches.filter(m => m.bracket === bracket && m.round === round);
-  const maxBo = roundMatches.length ? Math.max.apply(null, roundMatches.map(m => m.bo)) : projectedBoFor(bracket, round);
+  // Before the start: the length the preview shows for the round (its per-round Bo when set on the
+  // Bracket tab, decision 72), else the plan's.
+  const maxBo = roundMatches.length ? Math.max.apply(null, roundMatches.map(m => m.bo)) : (bo || projectedBoFor(bracket, round));
   const count = Math.max(maxBo, existing.length, 1);
   const db = (T.mapDb || []);
   if (db.length === 0) {
@@ -2381,7 +2385,7 @@ function drawBracketPreview(el, division) {
     h.textContent = colLabel('wb', r, R);
     col.appendChild(h);
     if (canEditBo) col.appendChild(previewBoSelect(T.bracketType === 'double' ? 'wb' : 'rounds', r - 1, boForRound(r)));
-    mapsLine('wb', poolRoundOf('wb', r, one), col);
+    mapsLine('wb', poolRoundOf('wb', r, one), col, boForRound(r));
     const mc = document.createElement('div');
     mc.className = 'bcol-matches';
     if (r === 1) {
@@ -2422,7 +2426,7 @@ function drawBracketPreview(el, division) {
     h.textContent = 'GRAND FINAL';
     col.appendChild(h);
     if (canEditBo) col.appendChild(previewBoSelect('gf', 0, plan.gf || 5));
-    mapsLine('gf', 1, col);
+    mapsLine('gf', 1, col, plan.gf || 5);
     const mc = document.createElement('div');
     mc.className = 'bcol-matches';
     const gfbox = previewBox(feederText('gf:1:0', 1, { txt: 'Winner of winners bracket', tbd: true }),
@@ -2459,7 +2463,7 @@ function drawBracketPreview(el, division) {
         const lbFb = q === lbRounds ? (plan.lbFinal || 3) : (plan.lb || 3);
         const lbBo = listBo(plan.lbList, q - 1, lbFb, true);
         if (canEditBo) col.appendChild(previewBoSelect('lb', q - 1, lbBo));
-        mapsLine('lb', poolRoundOf('lb', q, one), col);
+        mapsLine('lb', poolRoundOf('lb', q, one), col, lbBo);
         const mc = document.createElement('div');
         mc.className = 'bcol-matches';
         const count = lbCountAt(q);
