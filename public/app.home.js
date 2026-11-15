@@ -1321,6 +1321,7 @@ function adminHasUnsavedText() {
 async function loadTournament() {
   const tok = viewToken();
   T = await api('/api/t/' + tourneyId() + (tok ? '?token=' + encodeURIComponent(tok) : ''));
+  noteServerClock(T);
 }
 
 // Organizer links no longer exist - co-organizers are added by FAF name in the Organizers panel.
@@ -1397,7 +1398,7 @@ async function renderTournament() {
   }
   drawTopbar(viewerIsOrganizer() ? 'ORGANIZER' : (T.viewer && T.viewer.caster ? 'CASTER' : ''));
   maybeAutoStreamerMode();
-  lastSnapshot = JSON.stringify(T);
+  lastSnapshot = tSnap(T);
   applyPlayerMapView();
   drawTournament();
   maybePromptOrganizerClaim();
@@ -1419,7 +1420,8 @@ async function pollOnce() {
   try {
     const tok = viewToken();
     const fresh = await api('/api/t/' + tourneyId() + (tok ? '?token=' + encodeURIComponent(tok) : ''));
-    const snap = JSON.stringify(fresh);
+    noteServerClock(fresh);
+    const snap = tSnap(fresh);
     if (snap === lastSnapshot) return;                           // nothing changed
     T = fresh;
     lastSnapshot = snap;
@@ -1490,12 +1492,14 @@ function myTurnInfo() {
     }
   }
   // 1. captain's draft pick
-  if (T.status === 'draft' && T.draft && T.draft.order && !T.draft.waiting) {
+  if (T.status === 'draft' && T.draft && T.draft.order && !T.draft.waiting && !T.draft.voting) {
     const turnTeam = T.draft.order[T.draft.current];
     if (turnTeam && myTeam && turnTeam === myTeam) {
-      return { text: "It's your pick — choose a player for your team.", tab: 'teams', cta: 'Go to the draft' };
+      return { text: "It's your pick - choose a player for your team.", tab: draftTabKey(T.draft.division || 0), cta: 'Go to the draft' };
     }
   }
+  // 1. a captain vote this player has not voted in yet (decision 74)
+  if (typeof capVoteTurn === 'function') { const cv = capVoteTurn(); if (cv) return cv; }
   // 1. anyone: you were @mentioned in a chat
   if ((T.myMentionCount || 0) > 0) {
     const n = T.myMentionCount;
@@ -1604,6 +1608,17 @@ function drawTournament() {
   const steps = ['Signups', midStep, lastStep, 'Results'];
 
   const tabs = ['overview', 'news', 'chat', 'players', 'teams', 'bracket'];
+  // A captains draft: its players and its draft on one tab (decision 73), and with divisions one
+  // tab per division once the draft starts (King draft, Prince draft; King teams, Prince teams)
+  const merged = draftMergedT();
+  if (merged) {
+    tabs.splice(tabs.indexOf('players'), 1);
+    if (divisionsOnT() && T.status !== 'signup') {
+      for (let d = T.divisions; d >= 2; d--) tabs.splice(tabs.indexOf('teams') + 1, 0, draftTabKey(d));
+    }
+    if (currentTab === 'players') { currentTab = 'teams'; syncTabURL(); }
+  }
+  if (isDraftTab(currentTab) && currentTab !== 'teams' && !tabs.includes(currentTab)) { currentTab = 'teams'; syncTabURL(); }
   // King / Prince: one bracket tab per division
   if (divisionsOnT()) for (let d = 2; d <= T.divisions; d++) tabs.push(divisionTab(d));
   // Vetoes tab appears once the bracket is running and vetoes are enabled - EITHER kind.
@@ -1638,6 +1653,7 @@ function drawTournament() {
     if (tb === 'news') return 'News';
     if (tb === 'chat') return 'Chat';
     if (tb === 'log') return 'Log';
+    if (merged && isDraftTab(tb)) return draftTabLabel(draftTabDivision(tb));
     if (tb === 'teams' && T.status === 'draft') return 'Draft';
     if (isBracketTab(tb) && divisionsOnT()) return divisionNameOf(tabDivision(tb)) + ' bracket';
     if (tb === 'bracket') return bracketTabName(T);
@@ -1759,6 +1775,7 @@ function drawTournament() {
   else if (currentTab === 'chat') drawChatTab(body);
   else if (currentTab === 'log') drawTlog(body);
   else if (currentTab === 'players') drawPlayers(body);
+  else if (merged && isDraftTab(currentTab)) drawDraftTab(body, draftTabDivision(currentTab));
   else if (currentTab === 'teams') drawTeams(body);
   else if (isBracketTab(currentTab)) drawBracket(body, divisionsOnT() ? tabDivision(currentTab) : 0);
   else if (currentTab === 'matches') drawMatchesTab(body);
@@ -2131,11 +2148,17 @@ function drawOverview(el) {
 
   if (T.status === 'draft' && T.draft) {
     const divName = (T.draft.division && divisionsOnT()) ? divisionNameOf(T.draft.division) : '';
-    if (T.draft.waiting) {
-      html += `<div class="draft-turn">${esc(divName)} draft next - the organizer is choosing its captains. Follow it in the <a href="#" data-goto="teams">Draft</a> tab.</div>`;
+    // the tab the draft is on (decision 73: with divisions, one per division)
+    const dTab = draftTabKey(T.draft.division || 0);
+    const dLbl = draftMergedT() ? draftTabLabel(T.draft.division || 0) : 'Draft';
+    const cv = (typeof capVoteNow === 'function') ? capVoteNow() : null;
+    if (cv) {
+      html += `<div class="draft-turn">${divName ? esc(divName) + ' captain vote' : 'Captain vote'} ${cv.state === 'done' ? 'is over - the draft starts when the organizer starts it' : 'in progress - captain ' + ((cv.round ? cv.round.seat : 0) + 1) + ' of ' + cv.cfg.count}. Follow it in the <a href="#" data-goto="${dTab}">${esc(dLbl)}</a> tab.</div>`;
+    } else if (T.draft.waiting) {
+      html += `<div class="draft-turn">${esc(divName)} draft next - the organizer is choosing its captains. Follow it in the <a href="#" data-goto="${dTab}">${esc(dLbl)}</a> tab.</div>`;
     } else {
       const turnTeam = teamName(T.draft.order[T.draft.current]);
-      html += `<div class="draft-turn">${divName ? esc(divName) + ' draft' : 'Draft'} in progress - <strong>${esc(turnTeam)}</strong> is on the clock. Follow it in the <a href="#" data-goto="teams">Draft</a> tab.</div>`;
+      html += `<div class="draft-turn">${divName ? esc(divName) + ' draft' : 'Draft'} in progress - <strong>${esc(turnTeam)}</strong> is on the clock. Follow it in the <a href="#" data-goto="${dTab}">${esc(dLbl)}</a> tab.</div>`;
     }
   }
 
