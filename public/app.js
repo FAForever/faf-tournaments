@@ -8,6 +8,16 @@ let T = null;
 let currentTab = 'overview';
 let pollTimer = null;
 let lastSnapshot = '';
+// What the poll compares to see whether anything changed: the tournament without the server's
+// clock (decision 74), which is new in every response and would redraw the page each time.
+function tSnap(x) { return JSON.stringify(x, (k, v) => (k === 'serverNow' ? undefined : v)); }
+// The server's clock minus this browser's, from the latest response that carries it (the server
+// sends it only while a vote round's clock runs): countdowns run on the server's time, so a wrong
+// clock here cannot make a vote look open or closed when it is not.
+let _srvSkew = 0;
+function noteServerClock(x) { if (x && x.serverNow) _srvSkew = x.serverNow - Date.now(); }
+function srvNow() { return Date.now() + _srvSkew; }
+function fmtClock(ms) { const s = Math.max(0, Math.ceil(ms / 1000)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
 // Personal "streamer mode": hides match results and who's eliminated on THIS browser only, so a
 // caster can reveal on stream. Persisted locally; never sent to the server or seen by others.
 let streamerMode = (() => { try { return localStorage.getItem('faf_streamer_mode') === '1'; } catch (e) { return false; } })();
@@ -240,7 +250,7 @@ function myToken() { return adminToken() || capToken(); }
 // `?streamer=<token>` share link; it is a FAF-account role now, so there is nothing to carry.
 function viewToken() { return myToken(); }
 
-const VALID_TABS = ['overview', 'news', 'chat', 'players', 'teams', 'bracket', 'bracket2', 'bracket3', 'bracket4', 'matches', 'stats', 'maps', 'vetoes', 'standings', 'predictions', 'admin', 'log'];
+const VALID_TABS = ['overview', 'news', 'chat', 'players', 'teams', 'teams2', 'teams3', 'teams4', 'bracket', 'bracket2', 'bracket3', 'bracket4', 'matches', 'stats', 'maps', 'vetoes', 'standings', 'predictions', 'admin', 'log'];
 let pendingOrganizerClaim = null; // { id, token } — set when an ?admin= link is opened
 function captureTokensFromURL() {
   const id = tourneyId();
@@ -1058,6 +1068,12 @@ function divisionNameOf(d, t) {
 function divisionChampionOf(d, t) { t = t || T; return ((t && t.divisionChampions) || [])[d - 1] || null; }
 function divisionTeamsOf(d, t) { t = t || T; return ((t && t.teams) || []).filter(x => (x.division || 0) === d); }
 function divisionTab(d) { return d <= 1 ? 'bracket' : 'bracket' + d; }
+// A captains draft has one tab for its players and its draft (decision 73), and with divisions one
+// per division once the draft starts: 'teams' is the first (or only) one, 'teams2' the second...
+function draftMergedT(t) { t = t || T; return !!t && t.formation === 'draft'; }
+function draftTabKey(d) { return (d > 1 && divisionsOnT()) ? 'teams' + d : 'teams'; }
+function isDraftTab(tab) { return /^teams[2-4]?$/.test(tab || ''); }
+function draftTabDivision(tab) { const m = /^teams([2-4])$/.exec(tab || ''); return m ? parseInt(m[1], 10) : (divisionsOnT() ? 1 : 0); }
 function isBracketTab(tab) { return /^bracket[2-4]?$/.test(tab || ''); }
 function tabDivision(tab) { const m = /^bracket([2-4])$/.exec(tab || ''); return m ? parseInt(m[1], 10) : 1; }
 // The tab a match is shown on.

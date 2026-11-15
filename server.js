@@ -45,6 +45,8 @@ const { ffaCreateRound, ffaAfterReport, ffaRank } = require('./lib/ffa');
 const { buildDraft, finishDraftIfDone, finalizeOpenTeams, formTeamsGrouped,
         divisionCaptainCfg, divisionPool, startNextDivision, splitIntoDivisions, draftable, draftNoShows } = require('./lib/teams');
 const { mapById, publicMapView, secretNumbers, revealedSecrets, maskedMapView } = require('./lib/maps');
+// Captains chosen by a vote of the players, one captain at a time (decision 74).
+const CAPVOTE = require('./lib/capvote');
 // Wire the Swiss progression hook into the match core (see lib/match.js). Must come
 // after the swiss require above, since swissAfterReport is now imported, not hoisted.
 // A result in a fast-pairing Swiss first takes back a repeat the old fast pairing made (decision 62).
@@ -714,13 +716,59 @@ function noteDraftChain(t, divBefore) {
   const d = t.draft;
   if (!d || !d.division || !(d.division > (divBefore || 0)) || t.status !== 'draft') return;
   const prev = divisionName(t, d.division - 1), next = divisionName(t, d.division);
-  if (d.waiting) {
+  // by vote (decision 74): said here, before the vote's own messages (sweepCapVote starts it)
+  if (d.voting || d.voteNext || (d.waiting && divisionCaptainCfg(t, d.division).mode === 'vote')) {
+    tpush(t, 'System', 'The ' + prev + ' draft is complete. The ' + next + ' captains are chosen by vote of the players left'
+      + (CAPVOTE.voteCfgOf(t, d.division).autoStart ? '.' : ', once the organizer starts it.'));
+  } else if (d.waiting) {
     tpush(t, 'System', 'The ' + prev + ' draft is complete. The ' + next + ' draft is waiting for its captains to be chosen.');
   } else if (d.auto) {
     const caps = divisionTeams(t, d.division).map(tm => { const p = playerById(t, tm.captainId); return p ? p.name : tm.name; });
     tpush(t, 'System', 'The ' + prev + ' draft is complete. The ' + next + ' draft starts now, captained by '
       + caps.join(', ') + ' (the ' + caps.length + ' highest rated of the players left).');
   }
+}
+
+// What a captain vote did (lib/capvote.js), for the log. Round counts are public once a round is
+// over; a ballot is never logged.
+function capVoteWho(t, id) { const p = id ? playerById(t, id) : null; return p ? p.name : '?'; }
+function capVoteLabel(t, v) { return (v.division && divisionsOn(t) ? divisionName(t, v.division) + ' captain vote' : 'Captain vote'); }
+function noteVoteEvents(t, events) {
+  for (const e of events) {
+    const v = e.v;
+    if (e.kind === 'started') {
+      tpush(t, 'System', capVoteLabel(t, v) + ' started: ' + v.cfg.count + ' captains, one at a time, ' + v.cfg.minutes + ' minute' + (v.cfg.minutes === 1 ? '' : 's') + ' each. '
+        + v.voterIds.length + ' player' + (v.voterIds.length === 1 ? '' : 's') + ' vote; ' + v.candidateIds.length + ' can be voted for' + (v.cfg.live ? ' (votes shown live)' : '') + '.');
+    } else if (e.kind === 'seat') {
+      const r = e.res, of = ' of ' + v.cfg.count + ': ';
+      const n = r.counts[r.winner] || 0;
+      const why = r.how === 'votes' ? n + ' of ' + r.votes + ' vote' + (r.votes === 1 ? '' : 's')
+        : r.how === 'tie' ? 'tied on ' + n + ' vote' + (n === 1 ? '' : 's') + ', the higher rating wins'
+        : r.how === 'none' ? 'nobody voted, so the highest rated candidate'
+        : r.how === 'only' ? 'the only candidate left'
+        : 'no candidate left, so the highest rated player left';
+      tpush(t, 'System', capVoteLabel(t, v) + ', captain ' + (r.seat + 1) + of + capVoteWho(t, r.winner) + ' (' + why + ').');
+    } else if (e.kind === 'done') {
+      if (!v.cfg.autoDraft) tpush(t, 'System', capVoteLabel(t, v) + ' is over: ' + v.seats.map(id => capVoteWho(t, id)).join(', ') + '. The draft starts when the organizer starts it.');
+    } else if (e.kind === 'drafting') {
+      tpush(t, 'System', 'The captains are ' + v.seats.map(id => capVoteWho(t, id)).join(', ') + ' (by vote, in seed order). The draft starts now.');
+    } else if (e.kind === 'failedBack') {
+      tpush(t, 'System', capVoteLabel(t, v) + " stopped: there was nobody left for a captain's place. "
+        + (v.division > 1 ? 'The organizer chooses how the ' + divisionName(t, v.division) + ' captains are picked.' : 'Signups are open again.'));
+    } else if (e.kind === 'autoFail') {
+      tpush(t, 'System', 'The ' + divisionName(t, e.division) + ' captain vote could not start: ' + e.error + '. The organizer chooses how to go on.');
+    } else if (e.kind === 'seatFreed') {
+      tpush(t, 'System', capVoteLabel(t, v) + ': captain ' + (e.seat + 1) + ' left the tournament, so that place is voted again.');
+    }
+  }
+}
+// Apply the vote clock to t (closing what ran out, starting what follows); true if anything changed.
+function sweepCapVote(t) {
+  if (!t.capVotes && !(t.draft && t.draft.voteNext)) return false;
+  const ev = CAPVOTE.sweep(t, Date.now());
+  if (!ev.length) return false;
+  noteVoteEvents(t, ev);
+  return true;
 }
 
 // ---------- predictions ----------
@@ -2541,6 +2589,7 @@ function publicView(t) {
     fveto: t.fveto ? { enabled: t.fveto.enabled ? 1 : 0, bans: t.fveto.bans, picks: t.fveto.picks } : null,
     captainMode: t.captainMode || 'manual',
     captainCount: t.captainCount || 0,
+    voteCfg: (() => { const c = CAPVOTE.voteCfgOf(t, 1); delete c.include; delete c.exclude; return c; })(),
     divisions: t.divisions || 0,
     // the names in use (King, Prince... or the organizer's own), and the custom ones as typed
     divisionNames: DIVISION_DEFAULT_NAMES.map((x, i) => divisionName(t, i + 1)),
@@ -2548,7 +2597,11 @@ function publicView(t) {
     // each division's champion, division 1 first (null until its final is won)
     divisionChampions: divisionsOn(t) ? Array.from({ length: t.divisions }, (x, i) => divisionChampion(t, i + 1)) : null,
     // how the captains of division 2 and below are chosen
-    divCaptains: divisionsOn(t) ? Array.from({ length: t.divisions - 1 }, (x, i) => Object.assign({ division: i + 2 }, divisionCaptainCfg(t, i + 2))) : null,
+    divCaptains: divisionsOn(t) ? Array.from({ length: t.divisions - 1 }, (x, i) => {
+      const vc = CAPVOTE.voteCfgOf(t, i + 2);
+      delete vc.include; delete vc.exclude; delete vc.count;
+      return Object.assign({ division: i + 2 }, divisionCaptainCfg(t, i + 2), { vote: vc });
+    }) : null,
     // division drafts already finished, so the page can offer to take back their last pick
     draftDone: (t.draftDone || []).map(d => ({ division: d.division || 0, picks: d.current || 0 })),
     imported: t.imported || false,
@@ -4420,7 +4473,7 @@ async function handleAPI(req, res, url) {
         // organizer: signup requests waiting for review
         if (Array.isArray(t.organizerFafIds) && t.organizerFafIds.indexOf(sess.fafId) >= 0) {
           const nReq = (t.players || []).filter(p => p.pending).length;
-          if (nReq) out.push({ tId: t.id, tName: t.name, type: 'requests', tab: 'players', text: nReq + ' signup request' + (nReq === 1 ? ' awaits' : 's await') + ' your review' });
+          if (nReq) out.push({ tId: t.id, tName: t.name, type: 'requests', tab: t.formation === 'draft' ? 'teams' : 'players', text: nReq + ' signup request' + (nReq === 1 ? ' awaits' : 's await') + ' your review' });
         }
         if (!meP) continue;
         // score submissions awaiting MY team's confirmation
@@ -4441,9 +4494,18 @@ async function handleAPI(req, res, url) {
           const n = capTeam.joinRequests.length;
           out.push({ tId: t.id, tName: t.name, type: 'join', tab: 'teams', text: n + ' player' + (n === 1 ? '' : 's') + ' want to join ' + capTeam.name });
         }
-        // captains-draft pick on the clock
+        // captains-draft pick on the clock (on the tab of the division that drafts, decision 73)
+        const draftTab = (t.draft && t.draft.division > 1 && divisionsOn(t)) ? 'teams' + t.draft.division : 'teams';
         if (t.status === 'draft' && t.draft && t.draft.order && capTeam && t.draft.order[t.draft.current] === capTeam.id) {
-          out.push({ tId: t.id, tName: t.name, type: 'draft', tab: 'teams', text: "It's your pick in the captains draft" });
+          out.push({ tId: t.id, tName: t.name, type: 'draft', tab: draftTab, text: "It's your pick in the captains draft" });
+        }
+        // a captain vote (decision 74) this player has not voted in yet this round
+        if (t.status === 'draft' && t.draft && t.draft.voting) {
+          if (sweepCapVote(t)) saveDB();
+          const cvv = CAPVOTE.currentVote(t);
+          if (cvv && cvv.state === 'open' && cvv.round && cvv.voterIds.indexOf(meP.id) >= 0 && !cvv.round.ballots[meP.id]) {
+            out.push({ tId: t.id, tName: t.name, type: 'vote', tab: draftTab, text: 'Vote for captain ' + (cvv.round.seat + 1) + ' of ' + cvv.cfg.count });
+          }
         }
         // map-veto step
         if (capTeam && Array.isArray(t.matches)) {
@@ -4481,7 +4543,7 @@ async function handleAPI(req, res, url) {
         }
         // the same for a 1v1 or solo FFA player (decision 53) and a captains-draft player (54)
         if ((t.formation === 'solo' || t.formation === 'draft') && !meP.pending && !meP.checkedIn && checkInOpenNow(t) && Date.now() < t.checkInDeadline) {
-          out.push({ tId: t.id, tName: t.name, type: 'checkin', tab: 'players',
+          out.push({ tId: t.id, tName: t.name, type: 'checkin', tab: t.formation === 'draft' ? 'teams' : 'players',
             text: 'Check in before the deadline, or you are left out of the ' + (t.formation === 'draft' ? 'draft' : 'bracket') });
         }
       }
@@ -4598,6 +4660,8 @@ async function handleAPI(req, res, url) {
     const t = getT(parts[2]);
     if (!t) return json(res, 404, { error: 'Tournament not found' });
     const sub = parts[3] || '';
+    // a captain vote runs on the server's clock (decision 74): close whatever ran out before anything else
+    if (sweepCapVote(t)) saveDB();
 
     if (method === 'GET' && !sub) {
       const tok = url.searchParams.get('token');
@@ -4651,6 +4715,27 @@ async function handleAPI(req, res, url) {
       if (sess && sess.fafId) {
         const mine = t.players.find(p => p.fafId === sess.fafId);
         if (mine) signedUpId = mine.id;
+      }
+      // Captain votes (decision 74): what this viewer may see of them, and the server's clock for
+      // the countdown, only while a round's clock runs: it differs on every request, so it would turn
+      // every unchanged poll's empty 304 into a full answer (the ETag is the body's hash). An
+      // organizer also gets who would vote and be voted for if a vote started now.
+      const runningVote = CAPVOTE.currentVote(t);
+      if (runningVote && runningVote.state === 'open' && runningVote.round) view.serverNow = Date.now();
+      const cv = CAPVOTE.viewFor(t, signedUpId);
+      if (cv) view.capVotes = cv;
+      if (organizer && t.formation === 'draft') {
+        const prev = {};
+        const nDiv = divisionsOn(t) ? t.divisions : 0;
+        for (let d = nDiv ? 1 : 0; d <= (nDiv || 0); d++) {
+          if (d > 1 && !(t.status === 'draft' && t.draft && t.draft.waiting && t.draft.division === d)) continue;
+          if (d <= 1 && t.status !== 'signup') continue;
+          const L = CAPVOTE.voteLists(t, d);
+          prev[CAPVOTE.vkey(d)] = { voters: L.voters.map(p => p.id), candidates: L.candidates.map(p => p.id),
+            include: L.cfg.include.filter(id => playerById(t, id)), exclude: L.cfg.exclude.filter(id => playerById(t, id)),
+            problems: L.problems, error: CAPVOTE.voteStartError(t, d, L) };
+        }
+        view.votePreview = prev;
       }
       // how many chat rooms have an unread @mention for this viewer (for the CHAT tab badge)
       view.myMentionCount = (sess && sess.fafId && t.userPings && t.userPings[sess.fafId])
@@ -5825,6 +5910,9 @@ async function handleAPI(req, res, url) {
         // resignation of an undrafted player mid-draft
         t.players = t.players.filter(x => x.id !== p.id);
         t.subs = (t.subs || []).filter(pid => pid !== p.id);
+        // in a captain vote (decision 74): their vote goes, so do the votes for them, and a
+        // captain already elected frees the place for another round
+        if (t.capVotes) noteVoteEvents(t, CAPVOTE.playerRemoved(t, p.id, Date.now()));
         if (t.status === 'draft' && t.draft && !t.draft.done) {
           // if fewer players remain than scheduled picks, trim the tail of the pick order
           // (only players the draft can take count: not those the check-in left out)
@@ -5834,6 +5922,7 @@ async function handleAPI(req, res, url) {
           const divBefore = t.draft.division || 0;
           finishDraftIfDone(t);
           noteDraftChain(t, divBefore);
+          sweepCapVote(t);
         }
       } else {
         return bad(res, 'Players already on a team can\u2019t be removed \u2014 use Edit to substitute them instead');
@@ -7696,6 +7785,7 @@ async function handleAPI(req, res, url) {
         t.teams = []; t.draft = null; t.subs = [];
         t.draftDone = null;
         t.plannedR1 = null;
+        t.capVotes = null;   // a captain vote (decision 74) starts again from scratch
         // the ready check is applied again when the draft restarts (decision 54); check-ins stay
         for (const p of t.players) { p.teamId = null; delete p.noShow; }
         tlog(t, req, b.admin, 'reopened signups (teams reset)');
@@ -7710,6 +7800,16 @@ async function handleAPI(req, res, url) {
       if (a === 'set_captain_mode') {
         if (t.formation !== 'draft') return bad(res, 'This tournament does not use a draft');
         const dv = parseInt(b.division, 10) || 0;
+        // a vote is cast by FAF login (decision 74); without it there is no knowing who votes
+        if (b.mode === 'vote' && !FAF_OAUTH_ON) return bad(res, 'Voting for captains needs FAF login, which is off on this site');
+        // the vote's own settings, cleaned; checked before anything is stored
+        let voteSet = null;
+        if (b.vote && typeof b.vote === 'object') {
+          const prevVote = dv > 1 ? (((t.divCaptains || {})[dv] || {}).vote || {}) : (t.voteCfg || {});
+          const cv = CAPVOTE.cleanVoteCfg(b.vote, prevVote);
+          if (cv.error) return bad(res, cv.error);
+          voteSet = cv.cfg;
+        }
         if (dv > 1) {
           // Division 2 and below: how their captains are chosen when the division above finishes.
           if (!divisionsOn(t) || dv > t.divisions) return bad(res, 'This tournament has no ' + divisionName(t, dv) + ' division');
@@ -7718,26 +7818,113 @@ async function handleAPI(req, res, url) {
           if (!open) return bad(res, 'The ' + divisionName(t, dv) + ' draft has already started');
           t.divCaptains = t.divCaptains || {};
           const c = Object.assign({}, t.divCaptains[dv] || {});
-          if (b.mode !== undefined) c.mode = b.mode === 'manual' ? 'manual' : 'rating';
+          if (b.mode !== undefined) c.mode = b.mode === 'manual' ? 'manual' : b.mode === 'vote' ? 'vote' : 'rating';
           if (b.count !== undefined) {
             const n = parseInt(b.count, 10);
             if (!isFinite(n) || n < 2 || n > 64) return bad(res, 'Number of captains must be between 2 and 64');
             c.count = n;
           }
+          if (voteSet) c.vote = voteSet;
           t.divCaptains[dv] = c;
           saveDB();
           const cfg = divisionCaptainCfg(t, dv);
           return json(res, 200, { ok: true, division: dv, mode: cfg.mode, count: cfg.count });
         }
         if (t.status !== 'signup') return bad(res, 'Draft already started');
-        if (b.mode !== undefined) t.captainMode = b.mode === 'rating' ? 'rating' : 'manual';
+        if (b.mode !== undefined) t.captainMode = b.mode === 'rating' ? 'rating' : b.mode === 'vote' ? 'vote' : 'manual';
         if (b.count !== undefined) {
           const n = parseInt(b.count, 10);
           if (!isFinite(n) || n < 2 || n > 64) return bad(res, 'Number of captains must be between 2 and 64');
           t.captainCount = n;
         }
+        if (voteSet) t.voteCfg = voteSet;
         saveDB();
         return json(res, 200, { ok: true, mode: t.captainMode || 'manual', count: t.captainCount || 0 });
+      }
+
+      // ---- captains by vote (decision 74) ----
+      // Before the vote starts: give a candidate's place to another player, chosen by hand (or
+      // undo every such change). The first division while signups are open; a later one while it
+      // waits for the organizer, when its players are known.
+      if (a === 'vote_swap') {
+        if (t.formation !== 'draft') return bad(res, 'This tournament does not use a draft');
+        const dv = divisionsOn(t) ? Math.max(1, parseInt(b.division, 10) || 1) : 0;
+        const open = dv <= 1 ? t.status === 'signup' : (t.status === 'draft' && t.draft && t.draft.waiting && t.draft.division === dv);
+        if (!open) return bad(res, 'The candidates can only be changed before the vote starts');
+        const where = dv > 1 ? ((t.divCaptains = t.divCaptains || {})[dv] = t.divCaptains[dv] || {}) : null;
+        const stored = Object.assign({}, dv > 1 ? (where.vote || {}) : (t.voteCfg || {}));
+        if (b.reset) { stored.include = []; stored.exclude = []; }
+        else {
+          const r = CAPVOTE.swapCandidate(t, dv, String(b.out || ''), String(b.in || ''));
+          if (r.error) return bad(res, r.error);
+          stored.include = r.include; stored.exclude = r.exclude;
+          tlog(t, req, b.admin, 'put ' + capVoteWho(t, b.in) + ' in the captain vote instead of ' + capVoteWho(t, b.out));
+        }
+        if (dv > 1) where.vote = stored; else t.voteCfg = stored;
+        saveDB();
+        return json(res, 200, { ok: true });
+      }
+      // Start the vote: the first division closes signups (and applies the ready check, as a draft
+      // start does); a later division starts from its waiting state.
+      if (a === 'start_vote') {
+        if (t.formation !== 'draft') return bad(res, 'This tournament does not use a draft');
+        if (!FAF_OAUTH_ON) return bad(res, 'Voting for captains needs FAF login, which is off on this site');
+        const waitingVoteDiv = (t.status === 'draft' && t.draft && t.draft.waiting) ? t.draft.division : 0;
+        if (t.status !== 'signup' && !waitingVoteDiv) return bad(res, 'The draft has already started');
+        const dv = waitingVoteDiv || (divisionsOn(t) ? 1 : 0);
+        if (divisionCaptainCfg(t, dv || 1).mode !== 'vote') return bad(res, 'Set the captains to be chosen by vote first');
+        const noShows = waitingVoteDiv ? [] : draftNoShows(t);
+        const ev = [];
+        const err = CAPVOTE.startVote(t, dv, Date.now(), ev);
+        if (err) return bad(res, err);
+        if (!waitingVoteDiv) {
+          for (const p of t.players) delete p.noShow;
+          for (const p of noShows) p.noShow = 1;
+          if (noShows.length) {
+            tpush(t, 'System', noShows.length + ' player' + (noShows.length === 1 ? ' had' : 's had') + ' not checked in and ' + (noShows.length === 1 ? 'is' : 'are')
+              + ' left out of the draft: ' + noShows.map(p => p.name).join(', ') + '.');
+          }
+        }
+        tlog(t, req, b.admin, dv > 1 ? 'started the ' + divisionName(t, dv) + ' captain vote' : 'closed signups & started the captain vote');
+        noteVoteEvents(t, ev);
+        sweepCapVote(t);
+        saveDB();
+        return json(res, 200, { ok: true });
+      }
+      // The organizer's controls on the running vote: pause, resume, add minutes, end this round
+      // now, cancel the whole vote (the first division back to signups, a later one waiting).
+      if (a === 'vote_ctl') {
+        const op = String(b.op || '');
+        const v = CAPVOTE.currentVote(t);
+        if (!v) return bad(res, 'No captain vote is running');
+        const lbl = capVoteLabel(t, v);
+        if (op === 'cancel') {
+          const err = CAPVOTE.cancelVote(t);
+          if (err) return bad(res, err);
+          tlog(t, req, b.admin, 'cancelled the ' + lbl.toLowerCase() + (v.division > 1 ? '' : ' (signups are open again)'));
+          saveDB();
+          return json(res, 200, { ok: true });
+        }
+        const ev = [];
+        const err = CAPVOTE.controlVote(t, op, Date.now(), b.minutes, ev, b.round);
+        if (err) return bad(res, err);
+        const what = op === 'pause' ? 'paused the ' : op === 'resume' ? 'resumed the ' : op === 'add' ? 'added ' + (parseInt(b.minutes, 10) || 0) + ' min to the ' : 'ended this round of the ';
+        tlog(t, req, b.admin, what + lbl.toLowerCase());
+        noteVoteEvents(t, ev);
+        sweepCapVote(t);
+        saveDB();
+        return json(res, 200, { ok: true });
+      }
+      // The vote is over and waits for the draft to be started by hand: give an elected captain's
+      // place to another player (someone who does not want to captain).
+      if (a === 'vote_seat') {
+        const v = CAPVOTE.currentVote(t);
+        const was = v ? v.seats[parseInt(b.seat, 10)] : null;
+        const err = CAPVOTE.replaceSeat(t, b.seat, String(b.in || ''));
+        if (err) return bad(res, err);
+        tlog(t, req, b.admin, 'made ' + capVoteWho(t, b.in) + ' captain ' + ((parseInt(b.seat, 10) || 0) + 1) + ' instead of ' + capVoteWho(t, was) + ' (after the vote)');
+        saveDB();
+        return json(res, 200, { ok: true });
       }
 
       // A division waiting for its captains (the one above has finished drafting).
@@ -7759,7 +7946,22 @@ async function handleAPI(req, res, url) {
 
       if (a === 'start_draft') {
         if (t.formation !== 'draft') return bad(res, 'This tournament does not use a draft');
+        // captains by vote (decision 74): the draft starts from the vote's result, once it is over
+        const curVote = CAPVOTE.currentVote(t);
+        if (curVote) {
+          if (curVote.state !== 'done') return bad(res, 'The captain vote is still running');
+          const ev = [];
+          const err = CAPVOTE.startDraftFrom(t, curVote, ev);
+          if (err) return bad(res, err);
+          tlog(t, req, b.admin, 'started the ' + (curVote.division && divisionsOn(t) ? divisionName(t, curVote.division) + ' ' : '') + 'draft with the captains of the vote');
+          noteVoteEvents(t, ev);
+          saveDB();
+          return json(res, 200, { ok: true });
+        }
         if (t.status !== 'signup' && !waitingDiv) return bad(res, 'Draft already started');
+        if (divisionCaptainCfg(t, waitingDiv || 1).mode === 'vote' && !b.captainIds) {
+          return bad(res, 'The captains are chosen by vote: start the vote instead');
+        }
         // Division 1 opens the draft (and closes signups); a waiting division is started on its own.
         const div = waitingDiv || (divisionsOn(t) ? 1 : 0);
         const cfg = div > 1 ? divisionCaptainCfg(t, div) : { mode: t.captainMode === 'rating' ? 'rating' : 'manual', count: t.captainCount || 0 };
@@ -8190,10 +8392,26 @@ async function handleAPI(req, res, url) {
       return json(res, 200, { ok: true, changed, skipped });
     }
 
+    // A vote for a captain (decision 74): the voter is the logged-in FAF account's own signup,
+    // never an id from the request, so nobody can vote for anyone else. `round` is the round the
+    // vote was meant for: one arriving after that round closed is refused, not moved on.
+    if (sub === 'cap_vote') {
+      const sess = currentSession(req);
+      if (!sess || !sess.fafId) return json(res, 401, { error: 'Log in with FAF to vote' });
+      const me = t.players.find(p => p.fafId === sess.fafId);
+      if (!me) return json(res, 403, { error: 'You are not one of the voters' });
+      const cand = b.candidateId == null || b.candidateId === '' ? null : String(b.candidateId);
+      const err = CAPVOTE.castVote(t, me.id, cand, b.round, Date.now());
+      if (err) return bad(res, err);
+      saveDB();
+      return json(res, 200, { ok: true });
+    }
+
     if (sub === 'pick') {
       if (t.status !== 'draft' || !t.draft) return bad(res, 'No draft in progress');
       const d = t.draft;
       if (d.waiting) return bad(res, 'The ' + divisionName(t, d.division) + ' draft has not started yet - its captains are still to be chosen');
+      if (d.voting) return bad(res, 'The captains are still being voted for');
       if (d.current >= d.order.length) return bad(res, 'Draft is complete');
       const turnTeamId = d.order[d.current];
       const admin = isAdmin(t, b.token, req) || isOrganizer(t, req);
@@ -8214,6 +8432,7 @@ async function handleAPI(req, res, url) {
       tlog(t, req, b.token, tTeamName(t, team.id) + ' drafted ' + p.name);
       finishDraftIfDone(t);
       noteDraftChain(t, d.division || 0);
+      sweepCapVote(t);   // the next division's captains by vote: its vote starts now (decision 74)
       saveDB();
       return json(res, 200, { ok: true });
     }
@@ -8234,6 +8453,7 @@ async function handleAPI(req, res, url) {
           for (const pid of tm.playerIds) { const pl = playerById(t, pid); if (pl) pl.teamId = null; }
         }
         t.teams = t.teams.filter(x => (x.division || 0) !== dv);
+        if (t.capVotes) delete t.capVotes[CAPVOTE.vkey(dv)];   // its captain vote too (decision 74)
         t.pendingCaptains = [];
         t.draftDone.pop();
         delete prevDraft.done;

@@ -1774,6 +1774,7 @@ tr.row-out > td { opacity: .55; }
 .div-draft { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line-solid); }
 .div-draft-h { font-family: var(--display); font-size: 13px; letter-spacing: 1px; text-transform: uppercase; color: var(--amber); margin: 14px 0 6px; }
 .div-draft .div-draft-h { margin-top: 0; }
+.dt-upcoming .div-draft { margin-top: 0; padding-top: 0; border-top: 0; }
 
 /* ---------- Hall of Fame ---------- */
 .hof-search { margin: 0 0 12px; }
@@ -2088,3 +2089,41 @@ html.panning, html.panning * { cursor: grabbing !important; -webkit-user-select:
    height now (the select was 2.5 px taller), so the map pools and matches under them line up. */
 .bcol-bo { display: flex; align-items: center; justify-content: center; gap: 4px; height: 20px; }
 .bcol-bo select { height: 20px; }
+
+/* decision 73: a captains draft on one tab - the list under the teams switches between the
+   player pool (the substitutes after the draft) and every player */
+.dt-switch { display: flex; flex-wrap: wrap; gap: 0; margin: 4px 0 10px; }
+.dt-sw { font-family: var(--display); font-size: 12px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted);
+  background: var(--panel2); border: 1px solid var(--line-solid); padding: 6px 14px; cursor: pointer; }
+.dt-sw + .dt-sw { border-left: none; }
+.dt-sw:first-child { border-radius: 4px 0 0 4px; }
+.dt-sw:last-child { border-radius: 0 4px 4px 0; }
+.dt-sw:only-child { border-radius: 4px; }
+.dt-sw:hover { color: var(--text); }
+.dt-sw.on { color: var(--amber); border-color: var(--amber); background: var(--amber-dim); }
+.dt-sw.on + .dt-sw { border-left: 1px solid var(--line-solid); }
+.dt-sw + .dt-sw.on { border-left: 1px solid var(--amber); }
+
+/* decision 74: the captain vote */
+.capvote { border-left: 4px solid var(--amber); }
+.cv-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.cv-head h2 { margin: 0; }
+.cv-clock { font-family: var(--mono); font-size: 26px; color: var(--amber); letter-spacing: 1px; }
+.cv-clock.low { color: var(--red); }
+.cv-clock.paused { font-size: 16px; color: var(--muted); }
+.cv-me { margin: 8px 0 10px; }
+.cv-me strong { color: var(--amber); }
+.cv-cands td { vertical-align: middle; }
+.cv-row-mine td { background: var(--amber-dim); }
+.cv-mine { color: var(--amber); font-family: var(--display); font-size: 12px; letter-spacing: 1px; text-transform: uppercase; }
+.cv-live { font-size: 12px; }
+.cv-n { display: inline-block; min-width: 22px; font-family: var(--mono); color: var(--amber); }
+.cv-voter { display: inline-block; margin: 1px 4px 1px 0; padding: 0 6px; border: 1px solid var(--line-solid); border-radius: 3px; background: var(--panel2); color: var(--text); }
+.cv-ctl { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line-solid); }
+.cv-elected { margin: 6px 0 4px; padding-left: 22px; }
+.cv-elected li { margin: 3px 0; }
+.cv-rounds { margin-top: 8px; }
+.cv-rounds summary { cursor: pointer; }
+.cv-rounds ol { margin: 6px 0 0; padding-left: 22px; font-size: 13px; }
+.cv-preview { margin-top: 6px; max-width: 520px; }
+.cv-preview td { padding: 4px 8px; }

@@ -68,6 +68,7 @@ function drawPlayers(el) {
     } else {
       const helpText = T.competition === 'ffa' && T.teamSize === 1 ? 'Every player enters solo. Lobbies are grouped automatically.'
             : (T.formation === 'draft' && T.checkInDeadline) ? 'Check in on the day of the tournament: the captains, and the players they draft, come from the players who checked in.'
+            : (T.formation === 'draft' && T.captainMode === 'vote') ? 'Once signups close, the players vote for the captains, one captain at a time; then the captains draft their teams.'
             : T.formation === 'draft' ? 'The organizer picks captains from the player list once signups close, then captains draft their teams.'
             : T.formation === 'open' ? 'After signing up here, go to the Teams tab to create or join a team.'
             : (T.formation === 'premade' && T.teamSize > 1) ? 'Sign up and enter your team name. Teammates enter the exact same name to be grouped together. You can also set or change it later on the Teams tab.'
@@ -1152,20 +1153,35 @@ function divisionDraftIntro() {
     + (n > 2 ? ', and so on down' : '') + '. Set how each division\u2019s captains are chosen below.';
 }
 // How each later division's captains are chosen. The top division's are set with the controls above.
-function laterDivisionsHTML() {
+// `only`: just that division (the tab of a division whose turn has not come yet, decision 73).
+function laterDivisionsHTML(only) {
   let h = '';
   for (let d = 2; d <= (T.divisions || 0); d++) {
+    if (only && d !== only) continue;
     const c = (T.divCaptains || []).find(x => x.division === d) || { mode: 'rating', count: 0 };
+    const vc = c.vote || {};
     h += `<div class="div-draft">
       <h3 class="div-draft-h">${esc(divisionNameOf(d))} captains</h3>
       <div class="row" style="gap:10px;align-items:flex-end;flex-wrap:wrap">
         <div style="flex:2;min-width:220px"><div class="muted small">Chosen when the ${esc(divisionNameOf(d - 1))} draft ends</div>
           <select data-divmode="${d}">
-            <option value="rating"${c.mode !== 'manual' ? ' selected' : ''}>The highest rated of the players left (automatic)</option>
+            <option value="rating"${c.mode !== 'manual' && c.mode !== 'vote' ? ' selected' : ''}>The highest rated of the players left (automatic)</option>
             <option value="manual"${c.mode === 'manual' ? ' selected' : ''}>I pick them myself at that point</option>
+            ${fafAuth.enabled || c.mode === 'vote' ? '<option value="vote"' + (c.mode === 'vote' ? ' selected' : '') + '>The players left vote for them</option>' : ''}
           </select></div>
         <div style="width:160px${c.mode === 'manual' ? ';display:none' : ''}" data-divnumwrap="${d}"><div class="muted small">How many captains</div>
           <input type="number" min="2" max="64" data-divnum="${d}" value="${c.count || ''}" placeholder="e.g. 4"></div>
+      </div>
+      <div data-divvotewrap="${d}" style="${c.mode === 'vote' ? '' : 'display:none'}">
+        <div class="cv-fields" style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;margin-top:10px">
+          <div><div class="muted small">Who votes: the top</div><input type="number" min="1" max="999" data-dvk="${d}:voters" value="${vc.voters > 0 ? vc.voters : ''}" placeholder="everyone left" style="width:120px"> <span class="muted small">of the players left</span></div>
+          <div><div class="muted small">Who can be voted for: the top</div><input type="number" min="2" max="999" data-dvk="${d}:candidates" value="${vc.candidates || ''}" placeholder="e.g. 8" style="width:110px"> <span class="muted small">of the players left</span></div>
+          <div><div class="muted small">Minutes per captain</div><input type="number" min="1" max="60" data-dvk="${d}:minutes" value="${vc.minutes || 5}" style="width:90px"></div>
+        </div>
+        <label class="prop-cb" style="margin-top:8px"><input type="checkbox" data-dvk="${d}:live"${vc.live ? ' checked' : ''}> Show votes live</label>
+        <label class="prop-cb"><input type="checkbox" data-dvk="${d}:autoStart"${vc.autoStart === 0 ? '' : ' checked'}> Start the vote as soon as the ${esc(divisionNameOf(d - 1))} draft is over (off: you start it, and can replace a candidate first)</label>
+        <label class="prop-cb"><input type="checkbox" data-dvk="${d}:autoDraft"${vc.autoDraft === 0 ? '' : ' checked'}> Start the draft as soon as the vote is over</label>
+        <p class="muted small">Only the players nobody has drafted vote and can be voted for.</p>
       </div>
       <div class="muted small" data-divhint="${d}" style="margin-top:6px"></div>
     </div>`;
@@ -1183,11 +1199,13 @@ function wireLaterDivisions(root) {
   const pool = (ci && ci.applies) ? ci.inn.length : T.players.filter(p => !p.pending).length;
   const topCount = () => {
     const sel = document.getElementById('capMode');
-    if (sel && sel.value === 'rating') return parseInt((document.getElementById('capNum') || {}).value, 10) || 0;
+    if (sel && (sel.value === 'rating' || sel.value === 'vote')) return parseInt((document.getElementById('capNum') || {}).value, 10) || 0;
     return Object.keys(F.capSel || {}).length;
   };
   const paint = () => {
-    let left = pool - topCount() * per;
+    // during a draft (a division's tab before its turn, decision 73): what the one drafting now leaves
+    const during = (T.status === 'draft' && typeof playersLeftAfterCurrent === 'function') ? playersLeftAfterCurrent() : null;
+    let left = during != null ? during : pool - topCount() * per;
     for (let d = 2; d <= (T.divisions || 0); d++) {
       const modeEl = root.querySelector('[data-divmode="' + d + '"]');
       const numEl = root.querySelector('[data-divnum="' + d + '"]');
@@ -1196,10 +1214,13 @@ function wireLaterDivisions(root) {
       if (!modeEl) continue;
       const manual = modeEl.value === 'manual';
       if (wrap) wrap.style.display = manual ? 'none' : '';
+      const vw = root.querySelector('[data-divvotewrap="' + d + '"]');
+      if (vw) vw.style.display = modeEl.value === 'vote' ? '' : 'none';
       const k = manual ? 0 : (parseInt(numEl && numEl.value, 10) || 0);
       const leftHere = Math.max(0, left);
       if (hint) {
         if (manual) hint.textContent = leftHere + ' would be left for it. You choose its captains from them when the ' + divisionNameOf(d - 1) + ' draft ends.';
+        else if (modeEl.value === 'vote') hint.textContent = leftHere + ' would be left for it' + (k >= 2 ? '; they vote for its ' + k + ' captains.' : '. Enter how many captains it gets.');
         else if (k < 2) hint.textContent = leftHere + ' would be left for it. Enter how many captains it gets, or it waits for you to choose them.';
         else hint.innerHTML = esc(leftHere + ' would be left for it (' + k + ' teams of ' + per + ' need ' + (k * per) + ').')
           + (leftHere < k ? ' <span class="warn">Not enough for ' + k + ' captains - it will wait for you instead.</span>' : '');
@@ -1216,11 +1237,22 @@ function wireLaterDivisions(root) {
       const body = { action: 'set_captain_mode', division: d, mode: modeEl.value, admin: adminToken() };
       const n = parseInt(numEl && numEl.value, 10);
       if (isFinite(n) && n >= 2) body.count = n;
+      if (modeEl.value === 'vote') {
+        // the vote's settings for this division (decision 74)
+        const vo = {};
+        root.querySelectorAll('[data-dvk^="' + d + ':"]').forEach(i => {
+          const k = i.dataset.dvk.split(':')[1];
+          if (i.type === 'checkbox') vo[k] = i.checked ? 1 : 0;
+          else { const x = parseInt(i.value, 10); if (k === 'voters') vo[k] = isFinite(x) ? x : 0; else if (isFinite(x)) vo[k] = x; }
+        });
+        body.vote = vo;
+      }
       api('/api/t/' + T.id + '/phase', body).catch(e => toast(e.message, true));
     }, 400);
   };
   for (const m of modes) m.onchange = () => { paint(); save(parseInt(m.dataset.divmode, 10)); };
   root.querySelectorAll('[data-divnum]').forEach(n => { n.oninput = () => { paint(); save(parseInt(n.dataset.divnum, 10)); }; });
+  root.querySelectorAll('[data-dvk]').forEach(i => { const d = parseInt(i.dataset.dvk, 10); const go = () => { paint(); save(d); }; i.addEventListener('input', go); i.addEventListener('change', go); });
   paint();
   return paint;
 }
@@ -1239,20 +1271,22 @@ function waitingDivisionHTML(admin) {
       <label>How are captains chosen?</label>
       <select id="capMode">
         <option value="manual"${c.mode === 'manual' ? ' selected' : ''}>I pick them myself</option>
-        <option value="rating"${c.mode !== 'manual' ? ' selected' : ''}>Top N by rating of the players left (automatic)</option>
+        <option value="rating"${c.mode !== 'manual' && c.mode !== 'vote' ? ' selected' : ''}>Top N by rating of the players left (automatic)</option>
+        ${fafAuth.enabled || c.mode === 'vote' ? '<option value="vote"' + (c.mode === 'vote' ? ' selected' : '') + '>The players left vote for them</option>' : ''}
       </select>
       <div id="capRatingWrap" style="${c.mode !== 'manual' ? '' : 'display:none'}">
         <label style="margin-top:12px">How many captains</label>
         <input type="number" id="capNum" min="2" max="64" step="1" value="${c.count || ''}" placeholder="e.g. 4" style="max-width:160px">
-        <div id="capPreview" class="cap-count"></div>
+        <div id="capRatingNote" style="${c.mode === 'vote' ? 'display:none' : ''}"><div id="capPreview" class="cap-count"></div></div>
       </div>
+      <div id="capVoteBox" style="${c.mode === 'vote' ? '' : 'display:none'}">${voteFieldsHTML(c.vote)}</div>
       <div id="capManualWrap" style="${c.mode === 'manual' ? '' : 'display:none'}">
         <p class="muted small" style="margin-top:12px">Mark who the captains are in the list below.</p>
         <div class="pool" id="capPool"></div>
         <div id="capCount" class="cap-count"></div>
       </div>
       <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn amber" id="startDraft">Start the ${esc(nm)} draft</button>
+        <button class="btn amber" id="startDraft" data-lvote="Start the ${esc(nm)} captain vote" data-ldraft="Start the ${esc(nm)} draft">${c.mode === 'vote' ? 'Start the ' + esc(nm) + ' captain vote' : 'Start the ' + esc(nm) + ' draft'}</button>
         ${lastDone && lastDone.picks ? '<button class="btn ghost" id="undoPickBtn">\u21b6 Undo the last ' + esc(prev) + ' pick</button>' : ''}
       </div></div>`;
   } else {
@@ -1279,7 +1313,134 @@ function shownSeed(team) {
   return i >= 0 ? i + 1 : team.seed;
 }
 
-function drawTeams(el) {
+// The draft's turn line: who picks, and the undo the viewer may make.
+function draftTurnHTML(admin) {
+  const d = T.draft;
+  const turnTeamId = d.order[d.current];
+  // the team that made the most recent pick (authoritative: previous slot in the pick order)
+  const lastTeamId = d.current > 0 ? d.order[d.current - 1] : null;
+  let canUndo = false, undoName = '', undoLabel = '';
+  if (lastTeamId) {
+    undoName = teamName(lastTeamId);
+    if (admin) canUndo = true;                                             // organizer: anytime
+    else if (T.viewer && T.viewer.teamId === lastTeamId) canUndo = true;   // captain: only if they were last to pick
+    undoLabel = 'Undo ' + undoName + '\u2019s last pick';
+  } else if (admin && d.division && (T.draftDone || []).some(x => x.picks > 0)) {
+    // nobody has picked in this division yet: the last pick made was the division above's
+    canUndo = true;
+    undoLabel = 'Undo the last ' + divisionNameOf(d.division - 1) + ' pick';
+  }
+  const divLbl = (d.division && divisionsOnT()) ? '<strong>' + esc(divisionNameOf(d.division)) + ' draft</strong> \u00b7 ' : '';
+  return `<div class="draft-turn">${divLbl}Pick ${d.current + 1} of ${d.order.length} - <strong>${esc(teamName(turnTeamId))}</strong> is picking.
+      ${capToken() && !admin ? '<span class="muted small"> If it\u2019s your team\u2019s turn, the pick buttons below work for you.</span>' : ''}
+      ${canUndo ? '<button class="btn ghost small" id="undoPickBtn" style="margin-left:10px">\u21b6 ' + esc(undoLabel) + '</button>' : ''}
+    </div>`;
+}
+function draftPickOrderHTML() {
+  const d = T.draft;
+  const orderChips = d.order.map((tid, i) => {
+    const cls = i < d.current ? 'po-done' : i === d.current ? 'po-now' : '';
+    return `<span class="po-chip ${cls}"><span class="po-num">${i + 1}</span>${esc(teamName(tid))}</span>`;
+  }).join('');
+  return `<div class="panel section"><h2>Pick order</h2><div class="pickorder">${orderChips}</div></div>`;
+}
+function draftPoolPanelHTML(admin, head) {
+  return `<div class="panel section">${head || '<h2>Player pool</h2>'}<div class="pool" id="draftPool"></div>${draftNoShowsHTML(admin)}</div>`;
+}
+// The team cards: one grid per division (only division `only` when given), or one grid.
+function teamGridsHTML(only) {
+  let html = '';
+  if (T.teams.length) {
+    if (divisionsOnT() && T.teams.some(x => x.division)) {
+      // one grid per division, top division first
+      for (let dv = 1; dv <= T.divisions; dv++) {
+        if (only && dv !== only) continue;
+        const k = divisionTeamsOf(dv).length;
+        if (k) html += `<div class="panel section"><h2>${esc(divisionNameOf(dv))} <span class="h2-strong">(${k})</span></h2><div class="teamgrid" data-tgrid="${dv}"></div></div>`;
+      }
+      const loose = T.teams.filter(x => !((x.division || 0) >= 1 && (x.division || 0) <= T.divisions)).length;
+      if (loose && !only) html += `<div class="panel section"><h2>Not in a division <span class="h2-strong">(${loose})</span></h2><div class="teamgrid" data-tgrid="0"></div></div>`;
+    } else {
+      html += `<div class="panel section"><h2>${T.teamSize === 1 ? 'Entrants' : 'Teams'}</h2><div class="teamgrid" id="tGrid" data-tgrid="all"></div></div>`;
+    }
+  }
+  return html;
+}
+// The substitutes (standby on a solo field): everyone not on a team once teams are made.
+function subsPanelHTML() {
+  let html = '';
+  if (T.subs && T.subs.length) {
+    const subPs = T.subs.map(id => T.players.find(p => p.id === id)).filter(Boolean)
+      .sort((a, b) => (a.noShow ? 1 : 0) - (b.noShow ? 1 : 0) || (b.rating || 0) - (a.rating || 0));
+    const anyR = subPs.some(p => p.rating != null);
+    const soloStandby = T.formation === 'solo';   // on a solo field these are the players who did not check in
+    html += `<div class="panel section"><h2>${soloStandby ? 'Standby' : 'Substitutes'} <span class="h2-strong">(${subPs.length})</span></h2>
+      ${soloStandby ? '<p class="muted small">Had not checked in when the entrants were locked, so they are not in the bracket. An organizer can still bring one in as a replacement (Players tab).</p>' : ''}
+      <table><thead><tr><th style="width:40px">#</th><th>Name</th>${anyR ? '<th style="width:90px">Rating</th>' : ''}</tr></thead><tbody>` +
+      subPs.map((p, i) => `<tr><td class="mono muted">${i + 1}</td><td>${esc(p.name)}${p.fafId ? ' <span class="idbadge verified">\u2713</span>' : ''}${p.noShow ? ' <span class="idbadge late ci-badge" title="Had not checked in when the draft started">did not check in</span>' : ''}${p.discord ? ' <span class="dctag" title="Discord \u2014 reach this player here">\uD83D\uDCAC ' + esc(p.discord) + '</span>' : ''}</td>${anyR ? '<td class="mono">' + (p.rating != null ? p.rating : '\u2014') + '</td>' : ''}</tr>`).join('') +
+      '</tbody></table></div>';
+  }
+
+  return html;
+}
+// The organizer's divisions panel: split, or move a team (drafted, team single/double elim).
+function divisionsPanelHTML(admin) {
+  let html = '';
+  // Divisions (King/Prince) - team single/double elim only, before the bracket starts
+  if (T.status === 'drafted' && admin && T.competition === 'team' && (T.bracketType === 'single' || T.bracketType === 'double')) {
+    const divs = divisionsOnT() ? T.divisions : 0;
+    const fromDraft = T.formation === 'draft' && T.draft && (T.draft.division || (T.draftDone || []).length);
+    html += `<div class="panel section"><h2>Divisions</h2>
+      <p class="muted small">${fromDraft
+        ? 'The draft decided the divisions: every team plays in the division its captain drafted for. You can still move a team below.'
+        : 'Optionally split the teams into divisions (e.g. King and Prince). Each plays its own bracket, on its own tab, with its own champion. Split by combined team rating, then adjust below.'}</p>
+      <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+        <span class="muted small">Split into</span>
+        <select id="divCount" style="width:auto">${[1, 2, 3, 4].map(n => '<option value="' + n + '"' + ((divs || 1) === n ? ' selected' : '') + '>' + (n === 1 ? 'One bracket (no split)' : n + ' divisions') + '</option>').join('')}</select>
+        <span id="divTopWrap" class="muted small" style="display:${(divs || 1) === 2 ? 'inline-flex' : 'none'};align-items:center;gap:6px">with the
+          <input type="number" id="divTop" min="1" max="${Math.max(1, T.teams.length - 1)}" value="${T.divisionTop || ''}" placeholder="half" style="width:70px;margin:0">
+          best in ${esc(divisionNameOf(1))}</span>
+        <button class="btn ghost small" id="divApply">Apply split</button>
+      </div>`;
+    if (divs) {
+      const loose = T.teams.filter(x => !((x.division || 0) >= 1 && (x.division || 0) <= divs));
+      const col = (dv, list, title) => {
+        let h = `<div class="divcol"><h3>${esc(title)} <span class="muted mono">(${list.length})</span></h3>`;
+        for (const tm of list.slice().sort((a, b) => teamRating(b) - teamRating(a))) {
+          const opts = (dv ? [] : ['<option value="0" selected>-</option>']);
+          for (let dd = 1; dd <= divs; dd++) opts.push('<option value="' + dd + '"' + (dd === dv ? ' selected' : '') + '>' + esc(divisionNameOf(dd)) + '</option>');
+          h += `<div class="divteam"><span>${esc(tm.name)} <span class="muted mono">${teamRating(tm)}</span></span>
+            <select data-divteam="${tm.id}" style="width:auto">${opts.join('')}</select></div>`;
+        }
+        return h + '</div>';
+      };
+      html += '<div class="divgrid" style="margin-top:14px">';
+      for (let dv = 1; dv <= divs; dv++) html += col(dv, divisionTeamsOf(dv), divisionNameOf(dv));
+      if (loose.length) html += col(0, loose, 'Not in a division');
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+
+  return html;
+}
+// The organizer's start panel once the teams are made.
+function readyPanelHTML(admin) {
+  let html = '';
+  if (T.status === 'drafted' && admin) {
+    const canUndoLast = T.draft && T.draft.current > 0;
+    html += `<div class="panel section"><h2>Ready</h2>
+      <p class="muted small">${T.competition === 'ffa' ? 'Starting creates the round-1 FFA lobbies.' : 'Starting opens the best-of configuration for each round.'}</p>
+      <button class="btn primary" id="startBracket">Start ${T.competition === 'ffa' || T.bracketType === 'swiss' ? 'rounds' : 'bracket'}</button>
+      <button class="btn ghost" id="reopen" style="margin-left:10px">Reopen signups</button>
+      ${canUndoLast ? '<button class="btn ghost" id="undoLastDrafted" style="margin-left:10px">\u21b6 Undo last pick</button>' : ''}</div>`;
+  }
+
+  return html;
+}
+// `opts.merged`: a captains draft's one tab (decision 73), `opts.division` the division it shows.
+function drawTeams(el, opts) {
+  const o = opts || {};
   const admin = viewerIsOrganizer();
   let html = '';
 
@@ -1291,7 +1452,7 @@ function drawTeams(el) {
   if (T.status === 'signup') {
     if (admin) {
       if (T.formation === 'draft') {
-        const capMode = T.captainMode === 'rating' ? 'rating' : 'manual';
+        const capMode = T.captainMode === 'rating' || T.captainMode === 'vote' ? T.captainMode : 'manual';
         const capN = T.captainCount || 0;
         // Rating mode resolves at draft start, so show a live preview of who it would pick now.
         const capRanked = T.players.filter(p => !p.pending).slice().sort((a, b) => (b.rating || 0) - (a.rating || 0));
@@ -1314,20 +1475,28 @@ function drawTeams(el) {
           <select id="capMode">
             <option value="manual"${capMode === 'manual' ? ' selected' : ''}>I pick them myself</option>
             <option value="rating"${capMode === 'rating' ? ' selected' : ''}>Top N by rating (automatic)</option>
+            ${fafAuth.enabled || capMode === 'vote' ? '<option value="vote"' + (capMode === 'vote' ? ' selected' : '') + '>The players vote for them</option>' : ''}
           </select>
-          <div id="capRatingWrap" style="${capMode === 'rating' ? '' : 'display:none'}">
+          <div id="capRatingWrap" style="${capMode !== 'manual' ? '' : 'display:none'}">
             <label style="margin-top:12px">How many captains</label>
             <input type="number" id="capNum" min="2" max="64" step="1" value="${capN || ''}" placeholder="e.g. 8" style="max-width:160px">
+            <div id="capRatingNote" style="${capMode === 'rating' ? '' : 'display:none'}">
             <p class="muted small" style="margin-top:6px">Editable until you start the draft. The highest-rated players become captains, worked out at the moment the draft starts, so late signups and rating corrections are included.${ci ? ' With check-in on, only the players who have checked in count.' : ''}</p>
             <div id="capPreview" class="cap-count"></div>
+            </div>
           </div>
+          <div id="capVoteBox" style="${capMode === 'vote' ? '' : 'display:none'}">${voteFieldsHTML(T.voteCfg)}</div>
           <div id="capManualWrap" style="${capMode === 'manual' ? '' : 'display:none'}">
             <p class="muted small" style="margin-top:12px">Mark who the captains are in the list below.</p>
             <div class="pool" id="capPool"></div>
             <div id="capCount" class="cap-count"></div>
           </div>
           ${divs ? laterDivisionsHTML() : ''}
-          <div style="margin-top:16px"><button class="btn amber" id="startDraft">${divs ? 'Close signups &amp; start the ' + esc(divisionNameOf(1)) + ' draft' : 'Close signups &amp; start draft'}</button></div></div>`;
+          ${(() => {
+            const lv = divs ? 'Close signups &amp; start the ' + esc(divisionNameOf(1)) + ' captain vote' : 'Close signups &amp; start the captain vote';
+            const ld = divs ? 'Close signups &amp; start the ' + esc(divisionNameOf(1)) + ' draft' : 'Close signups &amp; start draft';
+            return '<div style="margin-top:16px"><button class="btn amber" id="startDraft" data-lvote="' + lv + '" data-ldraft="' + ld + '">' + (capMode === 'vote' ? lv : ld) + '</button></div></div>';
+          })()}`;
       } else {
         // the ready check (decision 53): who is in and who is left out when this is pressed
         const ci = playerCheckinOn() ? checkinSplit() : null;
@@ -1405,106 +1574,17 @@ function drawTeams(el) {
     }
   }
 
-  if (T.status === 'draft' && T.draft && T.draft.waiting) {
-    // the division above has finished drafting; this one waits for its captains
-    html += waitingDivisionHTML(admin);
-  } else if (T.status === 'draft' && T.draft) {
-    const d = T.draft;
-    const turnTeamId = d.order[d.current];
-    // the team that made the most recent pick (authoritative: previous slot in the pick order)
-    const lastTeamId = d.current > 0 ? d.order[d.current - 1] : null;
-    let canUndo = false, undoName = '', undoLabel = '';
-    if (lastTeamId) {
-      undoName = teamName(lastTeamId);
-      if (admin) canUndo = true;                                             // organizer: anytime
-      else if (T.viewer && T.viewer.teamId === lastTeamId) canUndo = true;   // captain: only if they were last to pick
-      undoLabel = 'Undo ' + undoName + '\u2019s last pick';
-    } else if (admin && d.division && (T.draftDone || []).some(x => x.picks > 0)) {
-      // nobody has picked in this division yet: the last pick made was the division above's
-      canUndo = true;
-      undoLabel = 'Undo the last ' + divisionNameOf(d.division - 1) + ' pick';
+  if (o.merged && T.status !== 'signup') {
+    // a captains draft's one tab (decision 73): its own order, teams above the pool
+    html += draftTabBodyHTML(o.division || 0, admin);
+  } else {
+    if (T.status === 'draft' && T.draft && T.draft.waiting) {
+      // the division above has finished drafting; this one waits for its captains
+      html += waitingDivisionHTML(admin);
+    } else if (T.status === 'draft' && T.draft) {
+      html += draftTurnHTML(admin) + draftPickOrderHTML() + draftPoolPanelHTML(admin);
     }
-    const divLbl = (d.division && divisionsOnT()) ? '<strong>' + esc(divisionNameOf(d.division)) + ' draft</strong> \u00b7 ' : '';
-    html += `<div class="draft-turn">${divLbl}Pick ${d.current + 1} of ${d.order.length} - <strong>${esc(teamName(turnTeamId))}</strong> is picking.
-      ${capToken() && !admin ? '<span class="muted small"> If it\u2019s your team\u2019s turn, the pick buttons below work for you.</span>' : ''}
-      ${canUndo ? '<button class="btn ghost small" id="undoPickBtn" style="margin-left:10px">\u21b6 ' + esc(undoLabel) + '</button>' : ''}
-    </div>`;
-    const orderChips = d.order.map((tid, i) => {
-      const cls = i < d.current ? 'po-done' : i === d.current ? 'po-now' : '';
-      return `<span class="po-chip ${cls}"><span class="po-num">${i + 1}</span>${esc(teamName(tid))}</span>`;
-    }).join('');
-    html += `<div class="panel section"><h2>Pick order</h2><div class="pickorder">${orderChips}</div></div>`;
-    html += `<div class="panel section"><h2>Player pool</h2><div class="pool" id="draftPool"></div>${draftNoShowsHTML(admin)}</div>`;
-  }
-
-  if (T.teams.length) {
-    if (divisionsOnT() && T.teams.some(x => x.division)) {
-      // one grid per division, top division first
-      for (let dv = 1; dv <= T.divisions; dv++) {
-        const k = divisionTeamsOf(dv).length;
-        if (k) html += `<div class="panel section"><h2>${esc(divisionNameOf(dv))} <span class="h2-strong">(${k})</span></h2><div class="teamgrid" data-tgrid="${dv}"></div></div>`;
-      }
-      const loose = T.teams.filter(x => !((x.division || 0) >= 1 && (x.division || 0) <= T.divisions)).length;
-      if (loose) html += `<div class="panel section"><h2>Not in a division <span class="h2-strong">(${loose})</span></h2><div class="teamgrid" data-tgrid="0"></div></div>`;
-    } else {
-      html += `<div class="panel section"><h2>${T.teamSize === 1 ? 'Entrants' : 'Teams'}</h2><div class="teamgrid" id="tGrid" data-tgrid="all"></div></div>`;
-    }
-  }
-  if (T.subs && T.subs.length) {
-    const subPs = T.subs.map(id => T.players.find(p => p.id === id)).filter(Boolean)
-      .sort((a, b) => (a.noShow ? 1 : 0) - (b.noShow ? 1 : 0) || (b.rating || 0) - (a.rating || 0));
-    const anyR = subPs.some(p => p.rating != null);
-    const soloStandby = T.formation === 'solo';   // on a solo field these are the players who did not check in
-    html += `<div class="panel section"><h2>${soloStandby ? 'Standby' : 'Substitutes'} <span class="h2-strong">(${subPs.length})</span></h2>
-      ${soloStandby ? '<p class="muted small">Had not checked in when the entrants were locked, so they are not in the bracket. An organizer can still bring one in as a replacement (Players tab).</p>' : ''}
-      <table><thead><tr><th style="width:40px">#</th><th>Name</th>${anyR ? '<th style="width:90px">Rating</th>' : ''}</tr></thead><tbody>` +
-      subPs.map((p, i) => `<tr><td class="mono muted">${i + 1}</td><td>${esc(p.name)}${p.fafId ? ' <span class="idbadge verified">\u2713</span>' : ''}${p.noShow ? ' <span class="idbadge late ci-badge" title="Had not checked in when the draft started">did not check in</span>' : ''}${p.discord ? ' <span class="dctag" title="Discord \u2014 reach this player here">\uD83D\uDCAC ' + esc(p.discord) + '</span>' : ''}</td>${anyR ? '<td class="mono">' + (p.rating != null ? p.rating : '\u2014') + '</td>' : ''}</tr>`).join('') +
-      '</tbody></table></div>';
-  }
-
-  // Divisions (King/Prince) - team single/double elim only, before the bracket starts
-  if (T.status === 'drafted' && admin && T.competition === 'team' && (T.bracketType === 'single' || T.bracketType === 'double')) {
-    const divs = divisionsOnT() ? T.divisions : 0;
-    const fromDraft = T.formation === 'draft' && T.draft && (T.draft.division || (T.draftDone || []).length);
-    html += `<div class="panel section"><h2>Divisions</h2>
-      <p class="muted small">${fromDraft
-        ? 'The draft decided the divisions: every team plays in the division its captain drafted for. You can still move a team below.'
-        : 'Optionally split the teams into divisions (e.g. King and Prince). Each plays its own bracket, on its own tab, with its own champion. Split by combined team rating, then adjust below.'}</p>
-      <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
-        <span class="muted small">Split into</span>
-        <select id="divCount" style="width:auto">${[1, 2, 3, 4].map(n => '<option value="' + n + '"' + ((divs || 1) === n ? ' selected' : '') + '>' + (n === 1 ? 'One bracket (no split)' : n + ' divisions') + '</option>').join('')}</select>
-        <span id="divTopWrap" class="muted small" style="display:${(divs || 1) === 2 ? 'inline-flex' : 'none'};align-items:center;gap:6px">with the
-          <input type="number" id="divTop" min="1" max="${Math.max(1, T.teams.length - 1)}" value="${T.divisionTop || ''}" placeholder="half" style="width:70px;margin:0">
-          best in ${esc(divisionNameOf(1))}</span>
-        <button class="btn ghost small" id="divApply">Apply split</button>
-      </div>`;
-    if (divs) {
-      const loose = T.teams.filter(x => !((x.division || 0) >= 1 && (x.division || 0) <= divs));
-      const col = (dv, list, title) => {
-        let h = `<div class="divcol"><h3>${esc(title)} <span class="muted mono">(${list.length})</span></h3>`;
-        for (const tm of list.slice().sort((a, b) => teamRating(b) - teamRating(a))) {
-          const opts = (dv ? [] : ['<option value="0" selected>-</option>']);
-          for (let dd = 1; dd <= divs; dd++) opts.push('<option value="' + dd + '"' + (dd === dv ? ' selected' : '') + '>' + esc(divisionNameOf(dd)) + '</option>');
-          h += `<div class="divteam"><span>${esc(tm.name)} <span class="muted mono">${teamRating(tm)}</span></span>
-            <select data-divteam="${tm.id}" style="width:auto">${opts.join('')}</select></div>`;
-        }
-        return h + '</div>';
-      };
-      html += '<div class="divgrid" style="margin-top:14px">';
-      for (let dv = 1; dv <= divs; dv++) html += col(dv, divisionTeamsOf(dv), divisionNameOf(dv));
-      if (loose.length) html += col(0, loose, 'Not in a division');
-      html += '</div>';
-    }
-    html += '</div>';
-  }
-
-  if (T.status === 'drafted' && admin) {
-    const canUndoLast = T.draft && T.draft.current > 0;
-    html += `<div class="panel section"><h2>Ready</h2>
-      <p class="muted small">${T.competition === 'ffa' ? 'Starting creates the round-1 FFA lobbies.' : 'Starting opens the best-of configuration for each round.'}</p>
-      <button class="btn primary" id="startBracket">Start ${T.competition === 'ffa' || T.bracketType === 'swiss' ? 'rounds' : 'bracket'}</button>
-      <button class="btn ghost" id="reopen" style="margin-left:10px">Reopen signups</button>
-      ${canUndoLast ? '<button class="btn ghost" id="undoLastDrafted" style="margin-left:10px">\u21b6 Undo last pick</button>' : ''}</div>`;
+    html += teamGridsHTML(0) + subsPanelHTML() + divisionsPanelHTML(admin) + readyPanelHTML(admin);
   }
 
   el.innerHTML = html || '<div class="panel"><div class="empty">Nothing here yet.</div></div>';
@@ -1549,16 +1629,26 @@ function drawTeams(el) {
         if (waitingDiv) body.division = waitingDiv;
         const n = parseInt(numEl.value, 10);
         if (isFinite(n) && n >= 2) body.count = n;
+        if (capModeSel.value === 'vote') { const vf = readVoteFields(); if (vf) body.vote = vf; }
         api('/api/t/' + T.id + '/phase', body).catch(() => {});
       }, 400);
     };
     capModeSel.onchange = () => {
-      const rating = capModeSel.value === 'rating';
-      if (ratingWrap) ratingWrap.style.display = rating ? '' : 'none';
-      if (manualWrap) manualWrap.style.display = rating ? 'none' : '';
+      const mode = capModeSel.value;
+      if (ratingWrap) ratingWrap.style.display = mode !== 'manual' ? '' : 'none';
+      if (manualWrap) manualWrap.style.display = mode === 'manual' ? '' : 'none';
+      const rn = document.getElementById('capRatingNote');
+      if (rn) rn.style.display = mode === 'rating' ? '' : 'none';
+      const vb = document.getElementById('capVoteBox');
+      if (vb) vb.style.display = mode === 'vote' ? '' : 'none';
+      const sb = document.getElementById('startDraft');
+      if (sb && sb.dataset.lvote) sb.innerHTML = mode === 'vote' ? sb.dataset.lvote : sb.dataset.ldraft;
       paintPreview(); persistCfg();
       if (typeof paintDivHints === 'function') paintDivHints();
     };
+    // the vote's own settings are saved with the captain mode (decision 74)
+    const cvWrap = document.getElementById('capVoteWrap');
+    if (cvWrap) cvWrap.querySelectorAll('input').forEach(i => { i.addEventListener('input', persistCfg); i.addEventListener('change', persistCfg); });
     if (numEl) numEl.oninput = () => { paintPreview(); persistCfg(); if (typeof paintDivHints === 'function') paintDivHints(); };
     paintPreview();
   }
@@ -1634,6 +1724,19 @@ function drawTeams(el) {
       const out = ciOn ? ciSplit.out : [];
       return !out.length || confirm('Start the draft? ' + out.length + ' player' + (out.length === 1 ? ' has' : 's have') + ' not checked in and will be left out of it: ' + out.map(p => p.name).join(', ') + '.');
     };
+    if (modeEl && modeEl.value === 'vote') {
+      // the captain vote (decision 74): its settings saved first, then it starts
+      const n = parseInt((document.getElementById('capNum') || {}).value, 10);
+      if (!isFinite(n) || n < 2) return toast('Enter how many captains (2 or more)', true);
+      if (!leftOutOk()) return;
+      try {
+        await api('/api/t/' + T.id + '/phase', Object.assign({ action: 'set_captain_mode', mode: 'vote', count: n, vote: readVoteFields() || undefined, admin: adminToken() }, forDiv));
+        await api('/api/t/' + T.id + '/phase', { action: 'start_vote', admin: adminToken() });
+        F.capSel = {};
+        await refresh();
+      } catch (e) { toast(e.message, true); }
+      return;
+    }
     if (rating) {
       const n = parseInt((document.getElementById('capNum') || {}).value, 10);
       if (!isFinite(n) || n < 2) return toast('Enter how many captains (2 or more)', true);
