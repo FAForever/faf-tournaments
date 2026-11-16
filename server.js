@@ -43,7 +43,8 @@ const { swissPairRound, swissAfterReport, swissStandings,
 const { ffaCreateRound, ffaAfterReport, ffaRank } = require('./lib/ffa');
 // Team formation and map lookups.
 const { buildDraft, finishDraftIfDone, finalizeOpenTeams, formTeamsGrouped,
-        divisionCaptainCfg, divisionPool, startNextDivision, splitIntoDivisions, draftable, draftNoShows } = require('./lib/teams');
+        divisionCaptainCfg, divisionPool, startNextDivision, splitIntoDivisions, draftable, draftNoShows,
+        finishedPlainDraft, continueInDivisions, canUndoContinue, undoContinueInDivisions } = require('./lib/teams');
 const { mapById, publicMapView, secretNumbers, revealedSecrets, maskedMapView } = require('./lib/maps');
 // Captains chosen by a vote of the players, one captain at a time (decision 74).
 const CAPVOTE = require('./lib/capvote');
@@ -2603,7 +2604,7 @@ function publicView(t) {
       return Object.assign({ division: i + 2 }, divisionCaptainCfg(t, i + 2), { vote: vc });
     }) : null,
     // division drafts already finished, so the page can offer to take back their last pick
-    draftDone: (t.draftDone || []).map(d => ({ division: d.division || 0, picks: d.current || 0 })),
+    draftDone: (t.draftDone || []).map(d => ({ division: d.division || 0, picks: d.current || 0, later: d.later ? 1 : 0 })),
     imported: t.imported || false,
     // Challonge imports: source format, per-group tables, final placements, and whether the event
     // had no reproducible bracket (free-for-all / round robin / group-only).
@@ -7103,7 +7104,20 @@ async function handleAPI(req, res, url) {
       // teams they stay as drafted. Otherwise a change re-splits the locked teams by rating.
       const wantDivs = b.divisions !== undefined ? cleanDivisions(b.divisions) : null;
       const haveDivs = parseInt(t.divisions, 10) || 0;
-      if (wantDivs !== null && wantDivs !== haveDivs) {
+      // A captains draft that finished without divisions continues into them (decision 76): its
+      // teams become the top division and the next division drafts from the players left. While
+      // that division still waits for its captains, one bracket (or a Swiss) puts it back, and the
+      // number can still change.
+      const newBt = (b.bracketType !== undefined && ['single', 'double', 'swiss'].indexOf(b.bracketType) >= 0) ? b.bracketType : t.bracketType;
+      const divsOk = divisionsAllowed(t.competition, newBt);
+      const continueDivs = wantDivs !== null && wantDivs >= 2 && !haveDivs && divsOk && finishedPlainDraft(t);
+      const waitingAfter = haveDivs > 0 && canUndoContinue(t);
+      const undoDivs = waitingAfter && (wantDivs === 0 || !divsOk);
+      const leftAfter = (t.players || []).filter(draftable).length;
+      if (continueDivs && leftAfter < 2) {
+        return bad(res, 'Only ' + leftAfter + ' player' + (leftAfter === 1 ? ' is' : 's are') + ' left after the draft: too few to draft another division');
+      }
+      if (wantDivs !== null && wantDivs !== haveDivs && !continueDivs && !waitingAfter) {
         if (t.status === 'draft') return bad(res, 'The draft is under way - it decides the divisions. Reopen signups to change them.');
         if (t.status === 'drafted' && t.formation === 'draft' && t.draft && (t.draft.division || (t.draftDone || []).length)) {
           return bad(res, 'The divisions came out of the draft. Reopen signups to change them.');
@@ -7173,11 +7187,22 @@ async function handleAPI(req, res, url) {
           if (planRounds) t.plan.rounds = planRounds;
         }
         t.ffaCfg = null;
+        // back to one bracket while the division added after the draft still waits (decision 76)
+        if (undoDivs) {
+          undoContinueInDivisions(t);
+          tlog(t, req, b.admin, 'turned the divisions off again: one bracket, the draft as it finished');
+        }
         // divisions only exist for single/double elimination
         if (!divisionsAllowed('team', t.bracketType)) {
           if (t.divisions) { t.divisions = 0; for (const tm of (t.teams || [])) tm.division = 0; }
         } else if (wantDivs !== null && wantDivs !== haveDivs) {
-          if (t.status === 'drafted') {
+          if (continueDivs) {
+            const nTeams = (t.teams || []).length;
+            continueInDivisions(t, wantDivs);
+            tlog(t, req, b.admin, 'turned on ' + wantDivs + ' divisions after the draft: its ' + nTeams + ' teams are the ' + divisionName(t, 1)
+              + ' bracket, the ' + leftAfter + ' players left are drafted into the ' + divisionName(t, 2) + ' bracket');
+            tpush(t, 'System', 'The ' + divisionName(t, 1) + ' draft is complete. The ' + divisionName(t, 2) + ' draft is waiting for its captains to be chosen.');
+          } else if (t.status === 'drafted') {
             if (wantDivs) splitIntoDivisions(t, wantDivs, t.divisionTop);
             else for (const tm of (t.teams || [])) tm.division = 0;
           }

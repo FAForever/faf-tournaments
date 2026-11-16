@@ -839,13 +839,15 @@ async function drawAdmin(el) {
           // Divisions (King / Prince): their own brackets. Once a draft is under way it decides
           // them, so the number is fixed until signups are reopened; the names stay editable.
           const nDiv = T.divisions || 0;
-          const divLocked = T.status === 'draft'
+          const divLocked = (T.status === 'draft' && !divisionsAddedWaitingT())
             || (T.status === 'drafted' && T.formation === 'draft' && !!T.draft && !!(T.draft.division || (T.draftDone || []).length));
           const names = T.divisionNamesSet || [];
           return `<div id="af_divWrap" style="display:${(T.bracketType === 'single' || T.bracketType === 'double') ? 'block' : 'none'}">
             <label>Divisions</label>
             <select id="af_divisions"${divLocked ? ' disabled' : ''}>${[0, 2, 3, 4].map(n => '<option value="' + n + '"' + (n === nDiv ? ' selected' : '') + '>' + (n ? n + ' divisions' : 'One bracket') + '</option>').join('')}</select>
             ${divLocked ? '<div class="muted small" style="margin-top:4px">The draft decides the divisions, so their number is fixed until signups are reopened. The names can still be changed.</div>'
+              : plainDraftDoneT() ? '<div class="muted small" style="margin-top:4px" id="af_divAfter">The draft is over. Choosing divisions keeps its teams as the ' + esc(divisionNameOf(1)) + ' bracket, and the players left are drafted into the ' + esc(divisionNameOf(2)) + ' bracket by its own captains: you choose them on its tab, then start its draft.</div>'
+              : divisionsAddedWaitingT() ? '<div class="muted small" style="margin-top:4px" id="af_divAfter">The ' + esc(divisionNameOf(2)) + ' draft still waits for its captains: One bracket puts the draft back as it finished.</div>'
               : (T.status === 'drafted' ? '<div class="muted small" style="margin-top:4px">Changing this splits the locked teams by rating again. Move single teams on the Teams tab.</div>' : '')}
             <div id="af_divNames" class="row" style="gap:10px;margin-top:8px;flex-wrap:wrap">
               ${[1, 2, 3, 4].map(d => '<div style="flex:1;min-width:110px" data-afdivname="' + d + '"><div class="muted small">Division ' + d + ' name</div><input type="text" id="af_divName' + d + '" maxlength="24" placeholder="' + DIVISION_DEFAULT_NAMES[d - 1] + '" value="' + esc(names[d - 1] || '') + '" autocomplete="off"></div>').join('')}
@@ -1935,9 +1937,22 @@ async function drawAdmin(el) {
         body.finalSize = g('af_ffinalmode').value === '1' ? g('af_ffinalsize').value : 0;
         body.advance = g('af_fadv').value;
       }
+      // decision 76: divisions after a finished draft, or back to one bracket, say what happens first
+      const nd = body.divisions !== undefined ? (parseInt(body.divisions, 10) || 0) : null;
+      const nmOf = d => ((body.divisionNames || [])[d - 1] || '') || divisionNameOf(d);
+      const btDivs = body.bracketType === 'single' || body.bracketType === 'double';
+      const leftNow = T.players.filter(p => !p.teamId && !p.pending && !p.noShow).length;
+      let after = '';
+      if (nd != null && nd >= 2 && btDivs && plainDraftDoneT()) {
+        if (!confirm('Keep the ' + T.teams.length + ' drafted teams as the ' + nmOf(1) + ' bracket and draft the ' + leftNow + ' players left into the '
+          + nmOf(2) + ' bracket? You choose the ' + nmOf(2) + ' captains next, on its tab, and start its draft there.')) return;
+        after = ' The ' + nmOf(2) + ' draft waits for its captains: choose them on its tab.';
+      } else if (divisionsAddedWaitingT() && ((nd != null && nd === 0) || !btDivs)) {
+        if (!confirm('Back to one bracket? The ' + divisionNameOf(2) + ' draft has not started; the draft stays as it finished, the players left are substitutes again.')) return;
+      }
       try {
         await api('/api/t/' + T.id + '/edit_format', body);
-        toast('Format saved');
+        toast('Format saved' + (after ? '.' + after : ''));
         await refresh();
       } catch (e) { toast(e.message, true); }
     };
@@ -1955,6 +1970,18 @@ async function drawAdmin(el) {
     } catch (e) { toast(e.message, true); }
   };
   adminApplyFocus();   // a link elsewhere asked for one spot on this tab
+}
+
+// A captains draft that finished without divisions (decision 76): choosing divisions keeps its teams
+// as the top division and drafts the players left into the next; while that next division still
+// waits for its captains, One bracket puts it back. The server decides the same way (lib/teams).
+function plainDraftDoneT() {
+  return T.formation === 'draft' && T.status === 'drafted' && !!T.draft && !!T.draft.done && !T.draft.division
+    && !(T.draftDone || []).length && !(T.divisions || 0);
+}
+function divisionsAddedWaitingT() {
+  const dd = T.draftDone || [];
+  return T.status === 'draft' && !!T.draft && !!T.draft.waiting && T.draft.division === 2 && dd.length === 1 && !!dd[0].later;
 }
 
 // ---------- per-tournament activity log (organizers + site admin only) ----------
