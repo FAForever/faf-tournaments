@@ -2127,3 +2127,22 @@ html.panning, html.panning * { cursor: grabbing !important; -webkit-user-select:
 .cv-rounds ol { margin: 6px 0 0; padding-left: 22px; font-size: 13px; }
 .cv-preview { margin-top: 6px; max-width: 520px; }
 .cv-preview td { padding: 4px 8px; }
+
+/* Other players' ratings for this tournament, under the Sign up panel (decision 75) */
+.rating-lookup { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line-solid); }
+.rating-lookup .rl-h { font-family: var(--display); font-size: 13px; letter-spacing: 1px; text-transform: uppercase; color: var(--amber); margin: 0 0 6px; }
+.rating-lookup p { margin: 0; }
+.rl-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+.rl-form input { flex: 1 1 220px; max-width: 420px; margin: 0; }
+.rl-form .btn { margin: 0; }
+.rl-msgs { margin-top: 6px; }
+.rl-bad { color: var(--danger, #e5484d); }
+.rl-list { margin-top: 10px; width: 100%; }
+.rl-list td.rl-x { text-align: right; width: 1%; white-space: nowrap; }
+.rl-total { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line-solid); border-radius: 6px; }
+.rl-total.ok { border-color: var(--green, #46a758); }
+.rl-total.over { border-color: var(--danger, #e5484d); }
+#rlClear { display: inline-block; margin-top: 8px; }
+/* phones turn panel tables into sideways scrollers; this one is small enough to wrap and fit */
+.panel table.rl-list { display: table; overflow-x: visible; white-space: normal; }
+@media (max-width: 720px) { .rl-list th, .rl-list td { padding-left: 6px; padding-right: 6px; } }

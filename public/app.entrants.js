@@ -41,6 +41,108 @@ function playerCheckinHTML(p) {
     <span class="small">${late ? 'The deadline (' + dl + ') has passed, but ' + (draft ? 'the draft has not started' : 'the entrants are not locked') + ' yet: check in now.' : 'Before <strong>' + dl + '</strong>.'} ${rule}</span></div>`;
 }
 
+// ---------- other players' ratings (decision 75) ----------
+// Forming a team, above all under a team rating cap, means knowing the others' ratings for THIS
+// tournament (its board, as of its date) before they sign up. The box under the Sign up panel
+// looks up FAF names or ids, several at once (server: rating_lookup), keeps the list while the page
+// is open (the 4-second updates redraw the panel, so the list lives here, not in the page), takes
+// your own rating in once you check it, and with a team cap adds the list up against the cap.
+let _rlook = { tid: null, rows: [], msgs: [], draft: '', busy: false };
+function rlookState() {
+  if (_rlook.tid !== T.id) _rlook = { tid: T.id, rows: [], msgs: [], draft: '', busy: false };
+  return _rlook;
+}
+function ratingLookupOn() { return !!(T.status === 'signup' && T.ratingType && T.ratingType !== 'none' && fafAuth.enabled && viewerLoggedIn()); }
+function ratingLookupHTML() { return ratingLookupOn() ? '<div class="rating-lookup" id="ratingLookupBox">' + rlookInnerHTML() + '</div>' : ''; }
+// A player joins the list (you first); looked up again, their row is replaced.
+function rlookAdd(row) {
+  const st = rlookState();
+  const i = st.rows.findIndex(x => String(x.fafId) === String(row.fafId));
+  if (i >= 0) st.rows[i] = row;
+  else if (row.you) st.rows.unshift(row);
+  else st.rows.push(row);
+}
+function rlookInnerHTML() {
+  const st = rlookState();
+  const board = T.ratingType === 'rc' ? 'RC' : ratingTypeLabel(T.ratingType);
+  const when = T.ratingDate ? 'as of ' + fmtDate(new Date(T.ratingDate).toISOString()) : 'their current one';
+  const range = T.minRating != null || T.maxRating != null;
+  const rows = st.rows.map(r => {
+    const num = r.rating == null ? '<span class="muted">none</span>' : String(r.rating);
+    const counts = (r.counted != null && r.rating != null && r.counted !== r.rating) ? ' <span class="muted small">counts as ' + r.counted + '</span>' : '';
+    const note = r.signedUp ? 'Signed up' + (r.team ? ', team ' + esc(r.team) : '')
+      : r.rating == null ? 'No ' + esc(board) + ' rating ' + (T.ratingDate ? 'by that date' : 'yet')
+      : r.exempt ? 'Invited: the rating range does not apply'
+      : r.fits === 'below' ? '<span class="rl-bad">Below the minimum of ' + T.minRating + '</span>'
+      : r.fits === 'above' ? '<span class="rl-bad">Above the maximum of ' + T.maxRating + '</span>'
+      : range ? 'In the rating range' : '';
+    return '<tr><td>' + esc(r.name) + (r.you ? ' <span class="muted small">(you)</span>' : '') + ' <span class="muted small mono">#' + esc(String(r.fafId)) + '</span></td>'
+      + '<td class="mono">' + num + counts + '</td><td class="small">' + note + '</td>'
+      + '<td class="rl-x"><button type="button" class="btn ghost small" data-rlx="' + esc(String(r.fafId)) + '" title="Take off the list">\u00d7</button></td></tr>';
+  }).join('');
+  let total = '';
+  if (T.maxTeamRating != null && st.rows.length) {
+    const inSum = st.rows.filter(r => r.counted != null);
+    const sum = inSum.reduce((a, r) => a + r.counted, 0);
+    const spare = T.maxTeamRating - sum;
+    total = '<div class="rl-total ' + (spare < 0 ? 'over' : 'ok') + '">Together (' + inSum.length + ' player' + (inSum.length === 1 ? '' : 's') + '): <strong>' + sum
+      + '</strong> of the <strong>' + T.maxTeamRating + '</strong> team cap, ' + (spare < 0 ? (-spare) + ' over.' : spare + ' to spare.')
+      + (inSum.length < st.rows.length ? ' <span class="muted small">' + (st.rows.length - inSum.length) + ' without a rating not counted.</span>' : '')
+      + (inSum.length > T.teamSize ? ' <span class="muted small">A team has ' + T.teamSize + ' players: take off the ones you are not counting.</span>' : '')
+      + '</div>';
+  }
+  return '<h3 class="rl-h">Look up other players</h3>'
+    + '<p class="muted small">Their <strong>' + esc(board) + '</strong> rating for this tournament (' + esc(when) + '), to plan a team. FAF names or FAF ids, several at once, separated by commas or spaces. Just a check: nobody is signed up or told.</p>'
+    + '<div class="rl-form"><input type="text" id="rlIn" maxlength="200" placeholder="e.g. Jip, Blackheart, 12345" autocomplete="off" value="' + esc(st.draft) + '">'
+    + '<button type="button" class="btn small" id="rlGo"' + (st.busy ? ' disabled' : '') + '>' + (st.busy ? 'Looking up\u2026' : 'Look up') + '</button></div>'
+    + (st.msgs.length ? '<div class="rl-msgs">' + st.msgs.map(m => '<div class="rl-bad small">' + esc(m) + '</div>').join('') + '</div>' : '')
+    + (rows ? '<table class="rl-list"><thead><tr><th>Player</th><th>Rating</th><th></th><th></th></tr></thead><tbody>' + rows + '</tbody></table>' : '')
+    + total
+    + (st.rows.length ? '<a href="#" class="small" id="rlClear">Clear the list</a>' : '');
+}
+function paintRatingLookup() {
+  const box = document.getElementById('ratingLookupBox');
+  if (!box) return;
+  box.innerHTML = rlookInnerHTML();
+  wireRatingLookup();
+}
+function wireRatingLookup() {
+  const box = document.getElementById('ratingLookupBox');
+  if (!box) return;
+  const st = rlookState();
+  const inp = box.querySelector('#rlIn'), go = box.querySelector('#rlGo');
+  if (inp) {
+    inp.addEventListener('input', () => { st.draft = inp.value; });
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); if (go) go.click(); } });
+  }
+  if (go) go.onclick = async () => {
+    const names = ((inp && inp.value) || '').trim();
+    if (st.busy) return;
+    if (!names) { st.msgs = ['Enter a FAF name or FAF id.']; paintRatingLookup(); return; }
+    st.draft = names; st.busy = true; st.msgs = [];
+    paintRatingLookup();
+    try {
+      const r = await api('/api/t/' + T.id + '/rating_lookup', { names });
+      const failed = [];
+      for (const x of (r.results || [])) {
+        if (x.error) { st.msgs.push(x.error); failed.push(x.q); }
+        else rlookAdd(x);
+      }
+      st.draft = failed.join(', ');   // what did not work stays in the box, to correct
+    } catch (e) { st.msgs = [e.message]; }
+    st.busy = false;
+    paintRatingLookup();
+    const again = document.getElementById('rlIn');
+    if (again && st.draft) again.focus();
+  };
+  box.querySelectorAll('[data-rlx]').forEach(b => b.onclick = () => {
+    st.rows = st.rows.filter(x => String(x.fafId) !== b.dataset.rlx);
+    paintRatingLookup();
+  });
+  const clr = box.querySelector('#rlClear');
+  if (clr) clr.onclick = e => { e.preventDefault(); st.rows = []; st.msgs = []; paintRatingLookup(); };
+}
+
 function drawPlayers(el) {
   const admin = viewerIsOrganizer();
   let html = '';
@@ -127,11 +229,11 @@ function drawPlayers(el) {
         html += `<div class="panel section"><h2>Sign up</h2>
           <p class="muted small">Signups haven\u2019t opened yet \u2014 they open <strong>${esc(fmtDateTime(T.signupOpensAt))}</strong>.</p>
           ${ratingCalloutHTML()}
-          ${ratingCheckHTML()}</div>`;
+          ${ratingCheckHTML()}${ratingLookupHTML()}</div>`;
       } else if (viewerSignedUp() && (() => { const mine = T.players.find(pl => pl.id === T.viewer.signedUpPlayerId); return mine && mine.pending; })()) {
         html += `<div class="panel section"><h2>Sign up</h2>
           <p class="signed-in-note">Your signup request is <strong>waiting for organizer approval</strong>. You'll appear in the player list once accepted.</p>
-          <button class="btn danger small" id="sWithdraw">Withdraw request</button></div>`;
+          <button class="btn danger small" id="sWithdraw">Withdraw request</button>${ratingLookupHTML()}</div>`;
       } else if (viewerSignedUp()) {
         const myDc = (fafAuth.user && fafAuth.user.discord) || '';
         html += `<div class="panel section"><h2>Sign up</h2>
@@ -143,12 +245,12 @@ function drawPlayers(el) {
                  <p class="muted small" style="margin:4px 0 6px">Enter your Discord <strong>username</strong> \u2014 the unique all-lowercase handle from Settings \u2192 My Account \u2014 not your display name.</p>
                  <div class="row" style="display:flex;gap:8px;flex-wrap:wrap"><input type="text" id="sDcAdd" maxlength="40" autocomplete="off" style="max-width:240px"><button class="btn small" id="sDcSave">Save</button></div></div>`) : ''}
           ${ratingCheckHTML({ small: 1 })}
-          <button class="btn danger small" id="sWithdraw" style="margin-top:10px">Withdraw</button></div>`;
+          <button class="btn danger small" id="sWithdraw" style="margin-top:10px">Withdraw</button>${ratingLookupHTML()}</div>`;
       } else if ((viewerLoggedIn() || !fafAuth.enabled) && T.signupMode === 'invite' && !(T.viewer && T.viewer.invited) && !admin) {
         html += `<div class="panel section"><h2>Sign up</h2>
           <p class="muted small">This tournament is <strong>invite only</strong>. Ask the organizer for an invite \u2014 once invited, you can sign up here.</p>
           ${ratingCalloutHTML()}
-          ${ratingCheckHTML()}</div>`;
+          ${ratingCheckHTML()}${ratingLookupHTML()}</div>`;
       } else if (viewerLoggedIn() || !fafAuth.enabled) {
         // logged in (or pre-go-live): self-signup, name is your FAF identity
         html += `<div class="panel section"><h2>Sign up</h2>
@@ -163,7 +265,7 @@ function drawPlayers(el) {
               <div class="signup-actions"><button class="btn primary" id="sGo">${T.signupMode === 'request' && !admin ? 'Request to sign up' : 'Sign up'}${fafAuth.enabled ? ' as ' + esc(me()) : ''}</button>${ratingCheckHTML()}</div>
             </div>
             <div class="muted small" style="align-self:end">${esc(helpText)}</div>
-          </div></div>`;
+          </div>${ratingLookupHTML()}</div>`;
       } else {
         // not logged in
         html += `<div class="panel section"><h2>Sign up</h2>
@@ -433,7 +535,22 @@ function drawPlayers(el) {
 
     out.className = cls;
     out.innerHTML = '<div class="rc-verdict">' + verdict + '</div>' + bits.join('');
+    // your own rating joins the look-up list below (decision 75); signed up, the tournament's own
+    // number counts, as in the team sums
+    const myFid = fafAuth.user && fafAuth.user.fafId;
+    if (myFid && ratingLookupOn()) {
+      const mine = viewerSignedUp() ? T.players.find(pl => pl.id === T.viewer.signedUpPlayerId && !pl.pending) : null;
+      const myTeam = mine && mine.teamId ? (T.teams || []).find(x => x.id === mine.teamId) : null;
+      rlookAdd({ fafId: myFid, name: me(), you: 1, signedUp: mine ? 1 : 0,
+        team: myTeam ? myTeam.name : (mine && T.formation === 'premade' && mine.teamName) || null,
+        rating: mine ? (mine.ratingActual != null ? mine.ratingActual : mine.rating) : r.rating,
+        counted: mine ? mine.rating : (r.capped != null ? r.capped : r.rating),
+        exempt: r.exempt ? 1 : 0,
+        fits: (r.min != null && r.rating < r.min) ? 'below' : (r.max != null && r.rating > r.max) ? 'above' : 'ok' });
+      paintRatingLookup();
+    }
   };
+  wireRatingLookup();
 
   const go = document.getElementById('sGo');
   if (go) go.onclick = async () => {
