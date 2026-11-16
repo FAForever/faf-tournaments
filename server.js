@@ -1665,7 +1665,7 @@ const PROPOSALS_ON = FAF_OAUTH_ON;
 const PROPOSAL_DAYS = 28;
 const PROPOSAL_MAX_OPEN = 5;
 // what a proposal waiting for the TD team still accepts (everything else changes it)
-const PROPOSAL_OPEN_SUBS = ['proposal_withdraw', 'proposal_take', 'proposal_decline', 'news_read', 'check_rating', 'faf_lookup', 'check_renames'];
+const PROPOSAL_OPEN_SUBS = ['proposal_withdraw', 'proposal_take', 'proposal_decline', 'news_read', 'check_rating', 'rating_lookup', 'faf_lookup', 'check_renames'];
 // what the proposer's locks cover once a TD runs it: the settings, not running the event
 const PROPOSAL_MAP_SUBS = ['map_save', 'map_delete', 'map_secret', 'pool_save', 'pool_delete', 'pool_assign', 'copy_maps', 'pool_copy_sequence', 'set_maps', 'fveto_config'];
 const PROPOSAL_FORMAT_SUBS = ['edit_format', 'set_plan_round_bo', 'set_round_bo', 'set_match_bo', 'third_place', 'playoff_setup', 'set_stop_at'];
@@ -2858,6 +2858,25 @@ async function fafFetchIdentity(accessToken) {
 // FAF leaderboard technicalName per rating category (the working downloader filters by this).
 // per-session cooldown for the read-only rating check (in memory; resets on restart)
 let _checkRateSeen = {};
+// Looking up other players' ratings (decision 75): each name is one to a few FAF API calls, made
+// with the asker's own FAF token, so an account may look up LOOKUP_BUDGET names per
+// LOOKUP_WINDOW_MS, at most LOOKUP_MAX at a time (in memory; resets on restart).
+const LOOKUP_MAX = 8, LOOKUP_BUDGET = 40, LOOKUP_WINDOW_MS = 10 * 60000;
+let _lookupLog = {};
+// null when this account may look up n more names now (and counts them), else why not
+function lookupBudget(fid, n, at) {
+  const recent = (_lookupLog[fid] || []).filter(x => at - x < LOOKUP_WINDOW_MS);
+  if (recent.length + n > LOOKUP_BUDGET) {
+    const free = recent.length ? Math.max(1, Math.ceil((recent[0] + LOOKUP_WINDOW_MS - at) / 60000)) : 1;
+    _lookupLog[fid] = recent;
+    return 'You can look up ' + LOOKUP_BUDGET + ' players every ' + (LOOKUP_WINDOW_MS / 60000) + ' minutes'
+      + (recent.length < LOOKUP_BUDGET ? ' (' + (LOOKUP_BUDGET - recent.length) + ' left now)' : '')
+      + '. Try again in ' + free + ' minute' + (free === 1 ? '' : 's') + '.';
+  }
+  for (let i = 0; i < n; i++) recent.push(at);
+  _lookupLog[fid] = recent;
+  return null;
+}
 const FAF_LEADERBOARD_NAME = { global: 'global', '1v1': 'ladder_1v1', '2v2': 'tmm_2v2', '3v3': 'tmm_3v3', '4v4': 'tmm_4v4_full_share' };
 
 // End of the given UTC day, formatted like the downloader: "YYYY-MM-DDT23:59:59Z".
@@ -5806,6 +5825,77 @@ async function handleAPI(req, res, url) {
         banned: hit ? banRefusalSelf(hit, t) : null,
         eligible: hit ? false : v.ok,
         message: hit ? banRefusalSelf(hit, t) : (v.ok ? '' : ratingLimitMessage(t, v))
+      });
+    }
+
+    // Other players' ratings for this tournament (decision 75). Forming a team under a team rating
+    // cap means knowing your teammates' ratings before they sign up, and FAF's site shows only
+    // current ratings, not this tournament's board as of its date. FAF names or ids, several at a
+    // time; for each, the rating this tournament would use, the value that counts for team sums
+    // (its per-player cap applied), whether it is inside the rating range, and whether they are
+    // already signed up (then the tournament's own number, and their team). Read-only, like
+    // check_rating. It never says whether someone is banned or invited: that is between them and
+    // the organizers. Uses the asker's own FAF token.
+    if (sub === 'rating_lookup') {
+      const sess = currentSession(req);
+      if (!sess || !sess.fafId) return json(res, 401, { error: 'Log in with FAF to look up ratings' });
+      if (!t.ratingType || t.ratingType === 'none') return bad(res, 'This tournament does not use FAF ratings');
+      if (t.status !== 'signup') return bad(res, 'Signups are closed');
+      const raw = Array.isArray(b.names) ? b.names : String(b.names == null ? '' : b.names).split(/[\s,;]+/);
+      const qs = [], seenQ = {};
+      for (const x of raw) {
+        const q = cleanName(String(x == null ? '' : x), 40);
+        if (q && !seenQ[q.toLowerCase()]) { seenQ[q.toLowerCase()] = 1; qs.push(q); }
+      }
+      if (!qs.length) return bad(res, 'Enter a FAF name or FAF id');
+      if (qs.length > LOOKUP_MAX) return bad(res, 'Up to ' + LOOKUP_MAX + ' players at a time');
+      const token = await fafValidToken(sess);
+      if (!token) return json(res, 409, { error: 'Looking up ratings needs your FAF login. Please log out and log back in (top-right), then try again.', needsRelogin: 1 });
+      const limit = lookupBudget(sess.fafId, qs.length, Date.now());
+      if (limit) return json(res, 429, { error: limit });
+      const one = async q => {
+        let found;
+        try { found = await fafResolve(q, token); } catch (e) { found = { error: 'unreachable' }; }
+        // messages of its own (the shared fafNotFound / fafResolve ones are worded for the organizers' boxes)
+        if (found && found.error) return { q, error: 'FAF did not answer for ' + q + ' just now. Try again in a moment.' };
+        if (!found) return { q, error: /^\d+$/.test(q) ? 'No FAF account with id ' + q + '.' : 'No FAF player named "' + q + '" (names are exact).' };
+        const out = { q, fafId: found.fafId, name: found.name, you: String(found.fafId) === String(sess.fafId) ? 1 : 0, signedUp: 0, team: null };
+        // signed up (not a request still waiting, which only organizers see): the tournament's own
+        // number, the one its team sums use
+        const pl = (t.players || []).find(x => x.fafId && String(x.fafId) === String(found.fafId) && !x.pending);
+        if (pl) {
+          out.signedUp = 1;
+          out.rating = pl.ratingActual != null ? pl.ratingActual : (pl.rating != null ? pl.rating : null);
+          out.counted = pl.rating != null ? pl.rating : null;
+          const tm = pl.teamId ? teamById(t, pl.teamId) : null;
+          out.team = tm ? tm.name : ((t.formation === 'premade' && pl.teamName) ? pl.teamName : null);
+          return out;
+        }
+        // as check_rating asks it: no rating because FAF has none for them, or because FAF did not answer
+        let probe;
+        try {
+          probe = t.ratingType === 'rc' ? await fafRcProbe(found.fafId, t.ratingDate, token)
+            : await fafRatingProbe(found.fafId, t.ratingType, t.ratingDate, token);
+        } catch (e) { probe = null; }
+        if (!probe || probe.rating == null) {
+          const parts = (probe && (probe.attempts || Object.values(probe.boards || {}))) || [];
+          if (!parts.some(a => a.status === 200)) return Object.assign(out, { error: 'Could not reach FAF for ' + found.name + "'s rating just now. Try again in a moment." });
+        }
+        out.rating = probe.rating == null ? null : probe.rating;
+        out.counted = cappedRating(t, out.rating);
+        const v = ratingLimitVerdict(t, out.rating, false);
+        out.fits = out.rating == null ? null : (v.ok ? 'ok' : v.why);
+        return out;
+      };
+      // three at a time: FAF answers each in a fraction of a second, and this keeps a full batch quick
+      const results = new Array(qs.length);
+      let next = 0;
+      await Promise.all([0, 1, 2].map(async () => { while (next < qs.length) { const i = next++; results[i] = await one(qs[i]); } }));
+      return json(res, 200, {
+        ok: true, ratingType: t.ratingType, asOf: t.ratingDate || null,
+        min: t.minRating != null ? t.minRating : null, max: t.maxRating != null ? t.maxRating : null,
+        ratingCap: t.ratingCap != null ? t.ratingCap : null, teamCap: t.maxTeamRating != null ? t.maxTeamRating : null,
+        results
       });
     }
 

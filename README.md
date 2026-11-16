@@ -239,6 +239,17 @@ Zero runtime dependencies: plain Node.js (built-in `http` only), JSON file stora
   link that switches to the Players tab and highlights the check. Both are hidden when the
   tournament does not use FAF ratings, or when the viewer is not logged in.
 - Lightly rate-limited per account, because the button is one click from the FAF API.
+- **Looking up other players.** Under it, **Look up other players** takes FAF names or FAF ids, several
+  at once (separated by commas or spaces), and shows each one's rating for *this* tournament (its board
+  and as-of date), what it counts as under the tournament's per-player cap, and whether it is inside
+  the rating range. Someone already signed up shows the tournament's own number and their team. It is
+  for forming teams: with a team rating cap the list is added up against the cap ("Together (3
+  players): 4100 of the 3000 team cap, 1100 over"), and your own rating joins the list once you check
+  it. The list stays while the page is open; a name FAF does not know is said and stays in the box to
+  correct.
+- It is a check too: nothing is written and nobody is told. It never says whether someone is banned or
+  invited, or that a signup request is waiting. For players logged in with FAF, during signups, with
+  their own FAF login; at most 8 names at a time and 40 every 10 minutes per account.
 
 ### Player-chosen opponents
 - Optional per tournament. Instead of the bracket pairing round one, the **top half of the seeds each choose who they play**, in seed order. LotS has always done this by DM to the tournament director; this is the same thing on the site.
