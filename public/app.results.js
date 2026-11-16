@@ -307,44 +307,58 @@ function drawStandings(el) {
   }
 
   if (T.bracketType === 'swiss' && T.competition === 'team') {
-    const rows = swissTable(T);
-    const cuts = swissCutCfg(T);
-    const s2 = stageTwoCfgOf(T);
-    // With record cuts the table has to say what a row's record MEANS, not just show it:
-    // "2-1" is only readable if you also know that 3 wins is the finish line.
-    const stateCell = r => {
-      if (!cuts.on) return '';
-      if (r.state === 'advanced') return '<td><span class="pill live">Qualified</span></td>';
-      if (r.state === 'eliminated') return '<td><span class="pill">Eliminated</span></td>';
-      const need = [];
-      if (cuts.win) need.push((cuts.win - r.w) + ' more win' + (cuts.win - r.w === 1 ? '' : 's'));
-      if (cuts.loss) need.push((cuts.loss - r.l) + ' loss' + (cuts.loss - r.l === 1 ? '' : 'es') + ' left');
-      return '<td class="muted small">' + esc(need.join(' \u00b7 ')) + '</td>';
-    };
-    const head = cuts.on ? '<th>Status</th>' : '';
-    const note = [];
-    if (cuts.on) note.push(swissCutLabel(T));
-    if (s2) note.push('top ' + s2.cutTo + ' go through to the playoff bracket');
-    // The 'beaten' tiebreak is invisible unless its numbers are on the table.
-    const byBeaten = T.tiebreak === 'beaten';
-    const sbOf = id => (T.swissSB && T.swissSB[id] != null) ? T.swissSB[id] : 0;
-    // Two stages: the playoffs decide the places, so they come first - champion, final, 3rd
-    // place match and on down. The Swiss table below is how everyone got there.
-    const field = (stageTwoLive() && Array.isArray(T.stage2.field)) ? T.stage2.field : [];
-    const inField = T.teams.filter(x => field.indexOf(x.id) >= 0);
-    const playoffHTML = inField.length
-      ? `<div class="panel section"><h2>Playoff <span class="h2-strong">Standings</span></h2>${eliminationPlacingsTable(inField)}</div>` : '';
-    el.innerHTML = playoffHTML + `<div class="panel section"><h2>Swiss <span class="h2-strong">Standings</span></h2>
-      ${note.length ? `<p class="muted small" style="margin:-4px 0 10px">${esc(note.join(' \u00b7 '))}</p>` : ''}
-      ${byBeaten ? `<p class="muted small" style="margin:-4px 0 10px">${esc(swissTiebreakText('beaten'))}</p>` : ''}
-      <table><thead><tr><th>#</th><th>Team</th><th>W</th><th>L</th>${byBeaten ? '<th title="Sum of the Swiss scores (wins) of the opponents this player beat">Beaten opp.</th>' : ''}<th>Game diff</th>${head}</tr></thead><tbody>
-      ${rows.map((r, i) => `<tr class="${r.state === 'eliminated' ? 'row-out' : ''} ${i === 0 ? 'rank1' : i === 1 ? 'rank2' : i === 2 ? 'rank3' : ''}">
-        <td class="mono">${i + 1}</td><td>${esc(teamName(r.id))}${T.championTeamId === r.id ? ' 🏆' : ''}</td>
-        <td class="mono">${r.w}</td><td class="mono">${r.l}</td>${byBeaten ? `<td class="mono">${sbOf(r.id)}</td>` : ''}<td class="mono">${r.gd > 0 ? '+' : ''}${r.gd}</td>${stateCell(r)}</tr>`).join('')}
-      </tbody></table></div>`;
+    // King / Prince (decision 77): one table per division, the top division first
+    if (divisionsOnT()) {
+      let html = '';
+      for (let d = 1; d <= T.divisions; d++) html += withDivisionT(d, () => swissStandingsHTML(divisionNameOf(d)));
+      el.innerHTML = html;
+      return;
+    }
+    el.innerHTML = swissStandingsHTML('');
     return;
   }
-
+  drawStandingsRest(el);
+}
+// The Swiss table (and a playoff table above it), for the whole field or, with divisions, for the
+// division T is narrowed to (withDivisionT): `title` names it.
+function swissStandingsHTML(title) {
+  const rows = swissTable(T);
+  const cuts = swissCutCfg(T);
+  const s2 = stageTwoCfgOf(T);
+  // With record cuts the table has to say what a row's record MEANS, not just show it:
+  // "2-1" is only readable if you also know that 3 wins is the finish line.
+  const stateCell = r => {
+    if (!cuts.on) return '';
+    if (r.state === 'advanced') return '<td><span class="pill live">Qualified</span></td>';
+    if (r.state === 'eliminated') return '<td><span class="pill">Eliminated</span></td>';
+    const need = [];
+    if (cuts.win) need.push((cuts.win - r.w) + ' more win' + (cuts.win - r.w === 1 ? '' : 's'));
+    if (cuts.loss) need.push((cuts.loss - r.l) + ' loss' + (cuts.loss - r.l === 1 ? '' : 'es') + ' left');
+    return '<td class="muted small">' + esc(need.join(' \u00b7 ')) + '</td>';
+  };
+  const head = cuts.on ? '<th>Status</th>' : '';
+  const note = [];
+  if (cuts.on) note.push(swissCutLabel(T));
+  if (s2) note.push('top ' + s2.cutTo + ' go through to the playoff bracket');
+  // The 'beaten' tiebreak is invisible unless its numbers are on the table.
+  const byBeaten = T.tiebreak === 'beaten';
+  const sbOf = id => (T.swissSB && T.swissSB[id] != null) ? T.swissSB[id] : 0;
+  // Two stages: the playoffs decide the places, so they come first - champion, final, 3rd
+  // place match and on down. The Swiss table below is how everyone got there.
+  const field = (stageTwoLive() && Array.isArray(T.stage2.field)) ? T.stage2.field : [];
+  const inField = T.teams.filter(x => field.indexOf(x.id) >= 0);
+  const playoffHTML = inField.length
+    ? `<div class="panel section"><h2>Playoff <span class="h2-strong">Standings</span></h2>${eliminationPlacingsTable(inField)}</div>` : '';
+  return playoffHTML + `<div class="panel section"><h2>${title ? esc(title) : 'Swiss'} <span class="h2-strong">Standings</span></h2>
+    ${note.length ? `<p class="muted small" style="margin:-4px 0 10px">${esc(note.join(' \u00b7 '))}</p>` : ''}
+    ${byBeaten ? `<p class="muted small" style="margin:-4px 0 10px">${esc(swissTiebreakText('beaten'))}</p>` : ''}
+    <table><thead><tr><th>#</th><th>Team</th><th>W</th><th>L</th>${byBeaten ? '<th title="Sum of the Swiss scores (wins) of the opponents this player beat">Beaten opp.</th>' : ''}<th>Game diff</th>${head}</tr></thead><tbody>
+    ${rows.map((r, i) => `<tr class="${r.state === 'eliminated' ? 'row-out' : ''} ${i === 0 ? 'rank1' : i === 1 ? 'rank2' : i === 2 ? 'rank3' : ''}">
+      <td class="mono">${i + 1}</td><td>${esc(teamName(r.id))}${T.championTeamId === r.id ? ' 🏆' : ''}</td>
+      <td class="mono">${r.w}</td><td class="mono">${r.l}</td>${byBeaten ? `<td class="mono">${sbOf(r.id)}</td>` : ''}<td class="mono">${r.gd > 0 ? '+' : ''}${r.gd}</td>${stateCell(r)}</tr>`).join('')}
+    </tbody></table></div>`;
+}
+function drawStandingsRest(el) {
   if (T.competition === 'ffa' && T.ffaCfg.mode === 'points') {
     const tot = {};
     for (const team of T.teams) tot[team.id] = 0;
@@ -842,13 +856,16 @@ async function drawAdmin(el) {
           const divLocked = (T.status === 'draft' && !divisionsAddedWaitingT())
             || (T.status === 'drafted' && T.formation === 'draft' && !!T.draft && !!(T.draft.division || (T.draftDone || []).length));
           const names = T.divisionNamesSet || [];
-          return `<div id="af_divWrap" style="display:${(T.bracketType === 'single' || T.bracketType === 'double') ? 'block' : 'none'}">
+          // a Swiss has divisions too (decision 77): each one plays its own Swiss
+          const unit = T.bracketType === 'swiss' ? ' division' : ' bracket';
+          return `<div id="af_divWrap" style="display:${(T.bracketType === 'single' || T.bracketType === 'double' || T.bracketType === 'swiss') ? 'block' : 'none'}">
             <label>Divisions</label>
             <select id="af_divisions"${divLocked ? ' disabled' : ''}>${[0, 2, 3, 4].map(n => '<option value="' + n + '"' + (n === nDiv ? ' selected' : '') + '>' + (n ? n + ' divisions' : 'One bracket') + '</option>').join('')}</select>
             ${divLocked ? '<div class="muted small" style="margin-top:4px">The draft decides the divisions, so their number is fixed until signups are reopened. The names can still be changed.</div>'
-              : plainDraftDoneT() ? '<div class="muted small" style="margin-top:4px" id="af_divAfter">The draft is over. Choosing divisions keeps its teams as the ' + esc(divisionNameOf(1)) + ' bracket, and the players left are drafted into the ' + esc(divisionNameOf(2)) + ' bracket by its own captains: you choose them on its tab, then start its draft.</div>'
+              : plainDraftDoneT() ? '<div class="muted small" style="margin-top:4px" id="af_divAfter">The draft is over. Choosing divisions keeps its teams as the ' + esc(divisionNameOf(1)) + unit + ', and the players left are drafted into the ' + esc(divisionNameOf(2)) + unit + ' by its own captains: you choose them on its tab, then start its draft.</div>'
               : divisionsAddedWaitingT() ? '<div class="muted small" style="margin-top:4px" id="af_divAfter">The ' + esc(divisionNameOf(2)) + ' draft still waits for its captains: One bracket puts the draft back as it finished.</div>'
               : (T.status === 'drafted' ? '<div class="muted small" style="margin-top:4px">Changing this splits the locked teams by rating again. Move single teams on the Teams tab.</div>' : '')}
+            <div class="muted small" style="margin-top:4px;display:none" id="af_divSwiss"></div>
             <div id="af_divNames" class="row" style="gap:10px;margin-top:8px;flex-wrap:wrap">
               ${[1, 2, 3, 4].map(d => '<div style="flex:1;min-width:110px" data-afdivname="' + d + '"><div class="muted small">Division ' + d + ' name</div><input type="text" id="af_divName' + d + '" maxlength="24" placeholder="' + DIVISION_DEFAULT_NAMES[d - 1] + '" value="' + esc(names[d - 1] || '') + '" autocomplete="off"></div>').join('')}
             </div>
@@ -1830,7 +1847,7 @@ async function drawAdmin(el) {
       g('af_pSwiss').style.display = bt === 'swiss' ? '' : 'none';
       if (g('af_thirdWrap')) g('af_thirdWrap').style.display = bt === 'single' ? 'flex' : 'none';
       if (g('af_divWrap')) {
-        g('af_divWrap').style.display = (bt === 'single' || bt === 'double') ? 'block' : 'none';
+        g('af_divWrap').style.display = (bt === 'single' || bt === 'double' || bt === 'swiss') ? 'block' : 'none';
         const nd = parseInt((g('af_divisions') || {}).value, 10) || 0;
         el.querySelectorAll('[data-afdivname]').forEach(x => { x.style.display = parseInt(x.dataset.afdivname, 10) <= nd ? '' : 'none'; });
         if (g('af_divNames')) g('af_divNames').style.display = nd > 1 ? 'flex' : 'none';
@@ -1841,6 +1858,20 @@ async function drawAdmin(el) {
       if (g('af_swRoundsWrap')) g('af_swRoundsWrap').style.display = (g('af_swcuts') && g('af_swcuts').checked) ? 'none' : 'block';
       if (g('af_sw2Box')) g('af_sw2Box').style.display = (g('af_sw2') && g('af_sw2').checked) ? 'block' : 'none';
       if (g('af_swfinal')) g('af_swfinal').disabled = !!(g('af_sw2') && g('af_sw2').checked);
+      // a Swiss with divisions (decision 77): every division plays its own Swiss, and there are no
+      // playoffs after it
+      {
+        const nd = parseInt((g('af_divisions') || {}).value, 10) || 0;
+        const swissDivs = !isFfa && bt === 'swiss' && nd > 1;
+        const s2 = g('af_sw2') && g('af_sw2').checked;
+        if (g('af_divSwiss')) {
+          g('af_divSwiss').style.display = swissDivs ? 'block' : 'none';
+          g('af_divSwiss').textContent = 'Every division plays its own Swiss with the settings below: its own rounds, table and '
+            + ((g('af_swfinal') && !g('af_swfinal').checked) ? 'champion' : 'final') + ', on its own tab.'
+            + (s2 ? ' Turn off the second stage below first: playoffs after the Swiss do not go with divisions.' : '');
+        }
+        if (g('af_sw2')) g('af_sw2').disabled = swissDivs && !s2;
+      }
       if (g('af_stopBox')) g('af_stopBox').style.display = (g('af_stopOn') && g('af_stopOn').checked) ? 'block' : 'none';
       // a survivor cut-off is an elimination-bracket idea; swiss and FFA have no such count
       if (g('af_stopAt')) g('af_stopAt').style.display = (isFfa || bt === 'swiss') ? 'none' : '';
@@ -1882,7 +1913,7 @@ async function drawAdmin(el) {
       g('af_ffinalsize').style.display = g('af_ffinalmode').value === '1' ? '' : 'none';
       syncPm();
     };
-    for (const id of ['af_comp', 'af_size', 'af_form', 'af_bt', 'af_fsize', 'af_fmode', 'af_fcutmode', 'af_ffinalmode', 'af_perRound', 'af_swcuts', 'af_sw2', 'af_pick', 'af_stopOn', 'af_pickMode', 'af_swwin', 'af_swloss', 'af_sw2type', 'af_divisions']) { const e = g(id); if (e) e.onchange = sync; }
+    for (const id of ['af_comp', 'af_size', 'af_form', 'af_bt', 'af_fsize', 'af_fmode', 'af_fcutmode', 'af_ffinalmode', 'af_perRound', 'af_swcuts', 'af_sw2', 'af_pick', 'af_stopOn', 'af_pickMode', 'af_swwin', 'af_swloss', 'af_sw2type', 'af_divisions', 'af_swfinal']) { const e = g(id); if (e) e.onchange = sync; }
     sync();
 
     g('af_save').onclick = async () => {
@@ -1905,7 +1936,7 @@ async function drawAdmin(el) {
         if (g('af_tiebreak') && g('af_bt').value === 'swiss') body.tiebreak = g('af_tiebreak').value;
         body.bracketType = g('af_bt').value;
         body.perRoundBo = (g('af_perRound') && g('af_perRound').checked) ? 1 : 0;
-        if ((g('af_bt').value === 'single' || g('af_bt').value === 'double') && g('af_divisions')) {
+        if ((g('af_bt').value === 'single' || g('af_bt').value === 'double' || g('af_bt').value === 'swiss') && g('af_divisions')) {
           if (!g('af_divisions').disabled) body.divisions = g('af_divisions').value;
           body.divisionNames = [1, 2, 3, 4].map(d => ((g('af_divName' + d) || {}).value || '').trim());
         }
@@ -1940,12 +1971,13 @@ async function drawAdmin(el) {
       // decision 76: divisions after a finished draft, or back to one bracket, say what happens first
       const nd = body.divisions !== undefined ? (parseInt(body.divisions, 10) || 0) : null;
       const nmOf = d => ((body.divisionNames || [])[d - 1] || '') || divisionNameOf(d);
-      const btDivs = body.bracketType === 'single' || body.bracketType === 'double';
+      const btDivs = body.bracketType === 'single' || body.bracketType === 'double' || body.bracketType === 'swiss';
+      const unitOf = body.bracketType === 'swiss' ? ' division' : ' bracket';
       const leftNow = T.players.filter(p => !p.teamId && !p.pending && !p.noShow).length;
       let after = '';
       if (nd != null && nd >= 2 && btDivs && plainDraftDoneT()) {
-        if (!confirm('Keep the ' + T.teams.length + ' drafted teams as the ' + nmOf(1) + ' bracket and draft the ' + leftNow + ' players left into the '
-          + nmOf(2) + ' bracket? You choose the ' + nmOf(2) + ' captains next, on its tab, and start its draft there.')) return;
+        if (!confirm('Keep the ' + T.teams.length + ' drafted teams as the ' + nmOf(1) + unitOf + ' and draft the ' + leftNow + ' players left into the '
+          + nmOf(2) + unitOf + '? You choose the ' + nmOf(2) + ' captains next, on its tab, and start its draft there.')) return;
         after = ' The ' + nmOf(2) + ' draft waits for its captains: choose them on its tab.';
       } else if (divisionsAddedWaitingT() && ((nd != null && nd === 0) || !btDivs)) {
         if (!confirm('Back to one bracket? The ' + divisionNameOf(2) + ' draft has not started; the draft stays as it finished, the players left are substitutes again.')) return;

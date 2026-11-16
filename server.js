@@ -39,7 +39,8 @@ const { swissPairRound, swissAfterReport, swissStandings,
         swissCuts, swissCutRounds, swissRecord, swissAdvanced, swissPlanRound1, swissShufflePlan,
         stageTwoCfg, stageTwoField, stageTwoBuild, swissStageDone, swissFinishIfDone,
         swissTiebreakMode, swissTiebreakValues,
-        swissRound1Open, swissSetRound1, swissShuffleRound1 } = require('./lib/swiss');
+        swissRound1Open, swissSetRound1, swissShuffleRound1,
+        swissDivisionChampion } = require('./lib/swiss');
 const { ffaCreateRound, ffaAfterReport, ffaRank } = require('./lib/ffa');
 // Team formation and map lookups.
 const { buildDraft, finishDraftIfDone, finalizeOpenTeams, formTeamsGrouped,
@@ -54,6 +55,8 @@ const CAPVOTE = require('./lib/capvote');
 require('./lib/match').setHooks({ swissAfterReport: t => { dropFastRepeats(t); swissAfterReport(t); } });
 require('./lib/swiss').setSwissHooks({ openStagePicks });
 require('./lib/match').setHooks({ afterFinalize: (t) => { autoStopIfReached(t); PRED.stampLocks(t, PRED_CTX); } });
+// A Swiss division without a final is won by the top of its table (decision 77).
+require('./lib/match').setHooks({ divisionChampion: swissDivisionChampion });
 
 const PORT = parseInt(process.env.PORT || '8090', 10);
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -668,11 +671,14 @@ function divisionName(t, d) {
   const set = Array.isArray(t && t.divisionNames) ? t.divisionNames : [];
   return set[d - 1] || DIVISION_DEFAULT_NAMES[d - 1] || ('Division ' + d);
 }
-// Divisions are separate elimination brackets, so they exist for team competition with single or
-// double elimination only (a Swiss already sorts the field, and an FFA has no bracket).
+// Divisions are separate brackets, so they exist for team competition: single or double
+// elimination, or a Swiss, where every division plays its own Swiss and final (decision 77). An FFA
+// has no bracket.
 function divisionsAllowed(competition, bracketType) {
-  return competition === 'team' && (bracketType === 'single' || bracketType === 'double');
+  return competition === 'team' && (bracketType === 'single' || bracketType === 'double' || bracketType === 'swiss');
 }
+// A Swiss with divisions has no playoffs after it: each division ends in its own final.
+const SWISS_DIVS_NO_PLAYOFFS = 'Divisions and playoffs after the Swiss do not go together: every division plays its own Swiss and final. Turn the playoffs off, or play one bracket.';
 function divisionTeams(t, d) { return (t.teams || []).filter(x => (x.division || 0) === d); }
 // The tournament's champion: with divisions, the top division's.
 function tournamentChampion(t) { return divisionsOn(t) ? divisionChampion(t, 1) : (t.championTeamId || null); }
@@ -778,14 +784,16 @@ function sweepCapVote(t) {
 // same defaults start_bracket applies.
 function predictSwissPlan(t) {
   const ex = cleanSwissExtras({}, t.plan || {});
-  const n = (t.teams || []).length;
+  // with divisions the start works the rounds out for the biggest one (decision 77)
+  const n = divisionsOn(t) ? largestDivision(t, t.divisions) : (t.teams || []).length;
   const defR = Math.max(1, log2i(nextPow2(Math.max(2, n))));
   const rounds = swissCutRounds(ex.winCut, ex.lossCut) || intIn((t.plan || {}).rounds, 1, 15, defR);
   return { win: ex.winCut, loss: ex.lossCut, rounds, final: (!ex.stage2 && t.plan && t.plan.final) ? 1 : 0, stage2: ex.stage2 ? 1 : 0 };
 }
 const PRED_CTX = {
   divisionCheck: t => divisionStartCheck(t, parseInt(t.divisions, 10) || 0, t.bracketType === 'double' ? 3 : 2),
-  swissPlan: predictSwissPlan
+  swissPlan: predictSwissPlan,
+  divisionName: (t, d) => divisionName(t, d)
 };
 // 1 = predicted, 'stale' = made for a draw that has changed since, 'part' = some of an open
 // stage still unpicked (a 3rd place match added at the start, say), 0 = nothing yet.
@@ -1256,6 +1264,20 @@ function tournamentRanking(t) {
       if (s2 && s2.built) {
         const top = eliminationRanking(t);
         return top.concat(standings.filter(id => top.indexOf(id) < 0));
+      }
+      if (divisionsOn(t)) {
+        // decision 77: division by division, the top one first; each division's champion heads
+        // its own table (its final, or the top of the table), the rest follow the table
+        const out = [];
+        for (let d = 1; d <= t.divisions; d++) {
+          const champ = divisionChampion(t, d);
+          if (champ) out.push(champ);
+          for (const id of standings) {
+            if (id !== champ && ((teamById(t, id) || {}).division || 0) === d) out.push(id);
+          }
+        }
+        for (const id of standings) if (out.indexOf(id) < 0) out.push(id);
+        return out;
       }
       return standings;
     } catch (e) { return []; }
@@ -2549,7 +2571,7 @@ function publicView(t) {
       ? swissStandings(t).map(r => r.teamId) : null,
     swissSB: (t.bracketType === 'swiss' && t.competition === 'team') ? swissTiebreakValues(t) : null,
     stopAtAlive: t.stopAtAlive || 0, aliveCount: aliveTeamCount(t),
-    swissR1Open: (t.bracketType === 'swiss' && t.status === 'running' && swissRound1Open(t)) ? 1 : 0,
+    swissR1Open: (t.bracketType === 'swiss' && t.status === 'running' && !divisionsOn(t) && swissRound1Open(t)) ? 1 : 0,
     seeding: t.seeding, ratingType: t.ratingType || 'global', ratingDate: t.ratingDate || null,
     signupMode: t.signupMode || 'open',
     playerReporting: t.playerReporting === undefined ? 1 : (t.playerReporting ? 1 : 0),
@@ -3439,6 +3461,8 @@ async function handleAPI(req, res, url) {
       if (ffaCfg.cutTo === 1) ffaCfg.cutTo = 2;
       if (ffaCfg.finalSize === 1) ffaCfg.finalSize = 2;
     }
+    // a Swiss with divisions (decision 77) has no playoffs after it
+    if (competition === 'team' && bracketType === 'swiss' && cleanDivisions(b.divisions) >= 2 && plan && plan.stage2) return bad(res, SWISS_DIVS_NO_PLAYOFFS);
     const maxTeams = intIn(b.maxTeams, 0, 128, 0);
     const places = cleanRewardPlaces(b.rewardPlaces);
     if (places.error) return bad(res, places.error);
@@ -3456,7 +3480,7 @@ async function handleAPI(req, res, url) {
       mods: cleanName(b.mods, 500),
       competition, formation, teamSize, draftOrder, bracketType, ffaCfg,
       plan, maxTeams,
-      // King / Prince: 0 = one bracket, 2-4 = that many divisions (single/double elimination only)
+      // King / Prince: 0 = one bracket, 2-4 = that many divisions (team brackets: elimination or Swiss)
       divisions: divisionsAllowed(competition, bracketType) ? cleanDivisions(b.divisions) : 0,
       divisionNames: cleanDivisionNames(b.divisionNames) || undefined,
       preset: preset ? preset.id : null, presetName: preset ? preset.name : null,
@@ -6561,7 +6585,7 @@ async function handleAPI(req, res, url) {
       if (t.bracketType !== 'single' && t.bracketType !== 'swiss') return bad(res, 'This tournament has no semi-finals');
       if (t.status === 'finished') return bad(res, 'This tournament has already finished');
       const swiss = t.bracketType === 'swiss';
-      if (!swiss && t.divisions > 1) return bad(res, 'A 3rd place match is not available with divisions');
+      if (t.divisions > 1) return bad(res, 'A 3rd place match is not available with divisions');
       const preStart = ['signup', 'draft', 'drafted'].indexOf(t.status) >= 0;
       const s2 = swiss ? stageTwoCfg(t) : null;
       t.plan = (t.plan && typeof t.plan === 'object') ? t.plan : {};
@@ -6643,8 +6667,9 @@ async function handleAPI(req, res, url) {
     if (sub === 'split_divisions') {
       if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
       if (t.status !== 'drafted') return bad(res, 'Split into divisions after forming teams and before starting the bracket');
-      if (!divisionsAllowed(t.competition, t.bracketType)) return bad(res, 'Divisions are for single or double elimination team brackets');
+      if (!divisionsAllowed(t.competition, t.bracketType)) return bad(res, 'Divisions are for team brackets: single or double elimination, or a Swiss');
       const n = intIn(b.divisions, 1, 4, 2);
+      if (n > 1 && t.bracketType === 'swiss' && t.plan && t.plan.stage2) return bad(res, SWISS_DIVS_NO_PLAYOFFS);
       if (n === 1) {
         for (const tm of t.teams) tm.division = 0;
         t.divisions = 0;
@@ -7123,6 +7148,14 @@ async function handleAPI(req, res, url) {
           return bad(res, 'The divisions came out of the draft. Reopen signups to change them.');
         }
       }
+      // A Swiss can have divisions (decision 77), but then no playoffs after it.
+      {
+        const compAfter = b.competition !== undefined ? (b.competition === 'ffa' ? 'ffa' : 'team') : t.competition;
+        const divsAfter = (!divsOk || undoDivs) ? 0 : (wantDivs !== null ? wantDivs : haveDivs);
+        const pbIn = b.plan || {};
+        const s2After = pbIn.stage2 !== undefined ? !!pbIn.stage2 : !!(t.plan && t.plan.stage2);
+        if (compAfter === 'team' && newBt === 'swiss' && divsAfter >= 2 && s2After) return bad(res, SWISS_DIVS_NO_PLAYOFFS);
+      }
 
       const competition = b.competition !== undefined ? (b.competition === 'ffa' ? 'ffa' : 'team') : t.competition;
       let teamSize = t.teamSize, formation = t.formation;
@@ -7192,7 +7225,7 @@ async function handleAPI(req, res, url) {
           undoContinueInDivisions(t);
           tlog(t, req, b.admin, 'turned the divisions off again: one bracket, the draft as it finished');
         }
-        // divisions only exist for single/double elimination
+        // divisions only exist for team brackets (single, double elimination or a Swiss)
         if (!divisionsAllowed('team', t.bracketType)) {
           if (t.divisions) { t.divisions = 0; for (const tm of (t.teams || [])) tm.division = 0; }
         } else if (wantDivs !== null && wantDivs !== haveDivs) {
@@ -8284,10 +8317,21 @@ async function handleAPI(req, res, url) {
           }
           if (t.status !== 'finished') t.status = 'running';
         } else { // swiss
-          const defR = Math.max(1, log2i(nextPow2(n)));
           // Config sent with the start wins; the stored plan is the default. Both go through
           // the same cleaner so the create form, the format panel and the start dialog agree.
           const ex = cleanSwissExtras(c, t.plan || {});
+          // King / Prince (decision 77): every division plays its own Swiss with these settings,
+          // so the number of rounds is worked out for the biggest one.
+          const divs = divisionsOn(t) ? t.divisions : 0;
+          const divSizes = [];
+          for (let d = 1; d <= divs; d++) divSizes.push(divisionTeams(t, d).length);
+          if (divs) {
+            const err = divisionStartCheck(t, divs, 2);
+            if (err) return bad(res, err);
+            if (ex.stage2) return bad(res, SWISS_DIVS_NO_PLAYOFFS);
+          }
+          const smallest = divs ? Math.min.apply(null, divSizes) : n;
+          const defR = Math.max(1, log2i(nextPow2(divs ? Math.max.apply(null, divSizes) : n)));
           // With record cuts the round count is derived, not chosen: the longest a team can
           // last is (winCut-1) wins plus (lossCut-1) losses plus the game that decides it.
           const cutRounds = swissCutRounds(ex.winCut, ex.lossCut);
@@ -8299,23 +8343,27 @@ async function handleAPI(req, res, url) {
             fast: c.fast ? 1 : 0
           };
           if (ex.winCut || ex.lossCut) {
-            if (n <= Math.max(ex.winCut, ex.lossCut)) {
+            if (smallest <= Math.max(ex.winCut, ex.lossCut)) {
               return bad(res, 'A ' + ex.winCut + ' wins / ' + ex.lossCut + ' losses stage needs more than ' +
-                Math.max(ex.winCut, ex.lossCut) + ' teams (' + n + ' entered)');
+                Math.max(ex.winCut, ex.lossCut) + ' teams (' + (divs ? 'the smallest division has ' + smallest : n + ' entered') + ')');
             }
             t.cfg.winCut = ex.winCut; t.cfg.lossCut = ex.lossCut;
             if (ex.decidingBo) t.cfg.decidingBo = ex.decidingBo;
             // Two soft warnings rather than blocks: a TD may deliberately run an odd field.
             // Measured behaviour: 16 teams at 3/3 never needs a rematch and always advances
             // exactly 8; below 2^(cut+1) fresh opponents run out and the draw has to repeat one.
+            // With divisions each division is its own field.
             const comfy = Math.pow(2, Math.max(ex.winCut, ex.lossCut) + 1);
-            if (n < comfy) {
-              tpush(t, 'System', 'Heads up: ' + n + ' teams is a small field for ' + ex.winCut + ' wins / ' +
-                ex.lossCut + ' losses. Below ' + comfy + ' the draw can run out of fresh opponents and may have to repeat a pairing.');
-            }
-            if (nextPow2(n) !== n) {
-              tpush(t, 'System', 'Heads up: ' + n + ' is not a power of two, so some rounds need a bye. A bye is a free win, ' +
-                'which means the number of teams that reach ' + (ex.winCut || '-') + ' wins can vary.');
+            const fields = divs ? divSizes.map((k, i) => ({ k, nm: divisionName(t, i + 1) + ': ' })) : [{ k: n, nm: '' }];
+            for (const f of fields) {
+              if (f.k < comfy) {
+                tpush(t, 'System', 'Heads up: ' + f.nm + f.k + ' teams is a small field for ' + ex.winCut + ' wins / ' +
+                  ex.lossCut + ' losses. Below ' + comfy + ' the draw can run out of fresh opponents and may have to repeat a pairing.');
+              }
+              if (nextPow2(f.k) !== f.k) {
+                tpush(t, 'System', 'Heads up: ' + f.nm + f.k + ' is not a power of two, so some rounds need a bye. A bye is a free win, ' +
+                  'which means the number of teams that reach ' + (ex.winCut || '-') + ' wins can vary.');
+              }
             }
           }
           // A per-tournament draw seed: the pairing inside a score group is shuffled with it, so
@@ -8327,6 +8375,14 @@ async function handleAPI(req, res, url) {
             if (t.stage2.cutTo >= n) return bad(res, 'The playoff cut (' + t.stage2.cutTo + ') must be smaller than the field (' + n + ')');
             t.cfg.final = 0;   // the playoff bracket replaces the single swiss final
           }
+          if (divs) {
+            // every division plays seeds 1..n, and draws its own round 1 by seed
+            numberDivisionSeeds(t, divs);
+            if (t.plannedR1) {
+              t.plannedR1 = null;
+              tpush(t, 'System', 'The round 1 matchups set by hand were not used: with divisions every division draws its own round 1.');
+            }
+          }
           swissPairRound(t, 1);
           t.status = 'running';
         }
@@ -8335,6 +8391,10 @@ async function handleAPI(req, res, url) {
         if (divisionsOn(t) && t.competition === 'team' && (t.bracketType === 'single' || t.bracketType === 'double')) {
           tpush(t, 'System', 'Brackets started: ' + Array.from({ length: t.divisions }, (x, i) =>
             divisionName(t, i + 1) + ' (' + divisionTeams(t, i + 1).length + ' teams)').join(', ') + '.');
+        } else if (divisionsOn(t) && t.competition === 'team' && t.bracketType === 'swiss') {
+          tpush(t, 'System', 'Round 1 is drawn in every division: ' + Array.from({ length: t.divisions }, (x, i) =>
+            divisionName(t, i + 1) + ' (' + divisionTeams(t, i + 1).length + ' teams)').join(', ') + '. Each division plays its own '
+            + (t.cfg && t.cfg.final ? 'Swiss and its own final.' : 'Swiss, and the top of its table is its champion.'));
         }
         saveDB();
         return json(res, 200, { ok: true });
@@ -8374,6 +8434,7 @@ async function handleAPI(req, res, url) {
     if (sub === 'swiss_round1') {
       if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
       if (t.bracketType !== 'swiss') return bad(res, 'This only applies to a Swiss stage');
+      if (divisionsOn(t)) return bad(res, 'With divisions every division draws its own round 1 by seed, so the matchups cannot be set by hand');
       // Order matters: a finished tournament that is told "has not started yet" reads as a bug.
       // Before the stage starts there are no matches to rewrite, so the matchups are PINNED
       // instead and applied when it starts. This is the fix for the race that made the feature
@@ -9034,7 +9095,8 @@ async function handleAPI(req, res, url) {
         if (m.bracket === 'sw') {
           const later = t.matches.some(x => x.bracket === 'sw' && x.round > m.round && (x.status === 'live' || x.status === 'done') &&
             (x.team1 === m.team1 || x.team1 === m.team2 || x.team2 === m.team1 || x.team2 === m.team2));
-          const gf = t.matches.find(x => x.bracket === 'gf');
+          // the final of this match's own division: another division's final has nothing to do with it
+          const gf = t.matches.find(x => x.bracket === 'gf' && (x.division || 0) === (m.division || 0));
           if (later || (gf && (gf.status === 'live' || gf.status === 'done'))) {
             return bad(res, 'Later matches already played — cannot correct');
           }

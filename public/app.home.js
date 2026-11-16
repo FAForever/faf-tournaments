@@ -879,14 +879,18 @@ async function renderHost() {
       perMatch.innerHTML += '<option value="' + n + '"' + (n === Math.min(cur, maxL) ? ' selected' : '') + '>' + n + players + '</option>';
     }
   };
-  // Divisions: separate brackets for single or double elimination team events. How the teams get
-  // into them depends on the formation, so the line under the choice says which.
+  // Divisions: separate brackets for team events, single or double elimination or a Swiss (decision
+  // 77). How the teams get into them depends on the formation, so the line under the choice says which.
   const syncDivOpts = () => {
     const box = document.getElementById('divOpts');
     if (!box) return;
-    const allowed = comp.value === 'team' && (cBracket.value === 'single' || cBracket.value === 'double');
+    const swiss = cBracket.value === 'swiss';
+    const allowed = comp.value === 'team' && (cBracket.value === 'single' || cBracket.value === 'double' || swiss);
     box.style.display = allowed ? '' : 'none';
     const n = parseInt((document.getElementById('cDivisions') || {}).value, 10) || 0;
+    // a Swiss with divisions has no playoffs after it: every division ends in its own final
+    const st2 = document.getElementById('pSwStage2');
+    if (st2) st2.disabled = allowed && swiss && n > 1 && !st2.checked;
     const row = document.getElementById('divNamesRow');
     if (row) row.style.display = n > 1 ? 'flex' : 'none';
     document.querySelectorAll('[data-divnamebox]').forEach(el => { el.style.display = parseInt(el.dataset.divnamebox, 10) <= n ? '' : 'none'; });
@@ -895,9 +899,10 @@ async function renderHost() {
     if (n < 2) { how.textContent = 'Everyone plays in one bracket.'; return; }
     const nm = d => ((document.getElementById('cDivName' + d) || {}).value || '').trim() || DIVISION_DEFAULT_NAMES[d - 1];
     const draft = formation.value === 'draft' && size.value !== '1';
-    how.textContent = draft
+    how.textContent = (draft
       ? 'The ' + nm(1) + ' captains draft first, and everyone they pick plays in the ' + nm(1) + ' bracket. Whoever is left is drafted into the ' + nm(2) + ' bracket by its own captains' + (n > 2 ? ', and so on down' : '') + '. You set how many captains each division gets on the Teams tab.'
-      : 'When signups close, the teams are split by combined rating: the strongest into ' + nm(1) + ', the next into ' + nm(2) + (n > 2 ? ', and so on' : '') + '. You can move teams between divisions before the start. Each division plays its own bracket and has its own winner.';
+      : 'When signups close, the teams are split by combined rating: the strongest into ' + nm(1) + ', the next into ' + nm(2) + (n > 2 ? ', and so on' : '') + '. You can move teams between divisions before the start. Each division plays its own bracket and has its own winner.')
+      + (swiss ? ' With a Swiss every division plays its own rounds, table and final, on its own tab.' + (st2 && st2.checked ? ' Turn off the playoffs after the Swiss above: they do not go with divisions.' : '') : '');
   };
 
   const syncVis = () => {
@@ -918,7 +923,7 @@ async function renderHost() {
     syncDivOpts();
     syncPerMatch();
   };
-  ['cDivisions', 'cDivName1', 'cDivName2', 'cDivName3', 'cDivName4'].forEach(id => {
+  ['cDivisions', 'cDivName1', 'cDivName2', 'cDivName3', 'cDivName4', 'pSwStage2'].forEach(id => {
     const e = document.getElementById(id);
     if (e) { e.addEventListener('change', syncDivOpts); e.addEventListener('input', syncDivOpts); }
   });
@@ -1228,7 +1233,7 @@ async function renderHost() {
         draftOrder: document.getElementById('cDraftOrder').value,
         bracketType: bt,
         plan,
-        divisions: (!isFfa && (bt === 'single' || bt === 'double')) ? ((document.getElementById('cDivisions') || {}).value || 0) : 0,
+        divisions: (!isFfa && (bt === 'single' || bt === 'double' || bt === 'swiss')) ? ((document.getElementById('cDivisions') || {}).value || 0) : 0,
         divisionNames: [1, 2, 3, 4].map(d => ((document.getElementById('cDivName' + d) || {}).value || '').trim()),
         maxTeams: document.getElementById('cMaxTeams').value,
         minTeams: document.getElementById('cMinTeams').value,
@@ -1655,7 +1660,7 @@ function drawTournament() {
     if (tb === 'log') return 'Log';
     if (merged && isDraftTab(tb)) return draftTabLabel(draftTabDivision(tb));
     if (tb === 'teams' && T.status === 'draft') return 'Draft';
-    if (isBracketTab(tb) && divisionsOnT()) return divisionNameOf(tabDivision(tb)) + ' bracket';
+    if (isBracketTab(tb) && divisionsOnT()) return divisionNameOf(tabDivision(tb)) + (T.bracketType === 'swiss' ? ' rounds' : ' bracket');
     if (tb === 'bracket') return bracketTabName(T);
     if (tb === 'vetoes') {
       const pending = T.matches.filter(m => m.veto && !m.veto.done).length;

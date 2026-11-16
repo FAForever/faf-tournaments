@@ -1153,7 +1153,9 @@ function seedPanelHTML() {
   const byDiv = divisionsOnT() && T.teams.some(x => x.division);
   // What a seed actually DOES differs by format, and getting this wrong is how an organizer
   // spends an evening reordering a list that the pairer stops consulting after round 1.
-  const what = swiss
+  const what = (swiss && byDiv)
+    ? 'Each division is seeded on its own: the top of each list is that division\u2019s seed 1. Seeds set the division\u2019s <strong>opening round\u2019s draw</strong> and break ties in its standings \u2014 from round 2 on, pairing follows records.'
+    : swiss
     ? 'Seed 1 is the top seed. Seeds set the <strong>opening round\u2019s draw</strong> and break ties in the standings \u2014 from round 2 on, pairing follows records. Once the rounds start you can still rearrange round 1 by hand.'
     : (byDiv ? 'Each division is seeded on its own: the top of each list is that division\u2019s seed 1. It decides that division\u2019s bracket, and is fixed once you start it.'
       : 'Seed 1 is the top seed. This determines the bracket \u2014 fixed once you start it.');
@@ -1503,14 +1505,16 @@ function subsPanelHTML() {
 // The organizer's divisions panel: split, or move a team (drafted, team single/double elim).
 function divisionsPanelHTML(admin) {
   let html = '';
-  // Divisions (King/Prince) - team single/double elim only, before the bracket starts
-  if (T.status === 'drafted' && admin && T.competition === 'team' && (T.bracketType === 'single' || T.bracketType === 'double')) {
+  // Divisions (King/Prince) - team brackets (single/double elim, or a Swiss without playoffs after
+  // it, decision 77), before the start
+  const swissPlayoffs = T.bracketType === 'swiss' && !!(T.plan && T.plan.stage2);
+  if (T.status === 'drafted' && admin && T.competition === 'team' && (T.bracketType === 'single' || T.bracketType === 'double' || (T.bracketType === 'swiss' && !swissPlayoffs))) {
     const divs = divisionsOnT() ? T.divisions : 0;
     const fromDraft = T.formation === 'draft' && T.draft && (T.draft.division || (T.draftDone || []).length);
     html += `<div class="panel section"><h2>Divisions</h2>
       <p class="muted small">${fromDraft
         ? 'The draft decided the divisions: every team plays in the division its captain drafted for. You can still move a team below.'
-        : 'Optionally split the teams into divisions (e.g. King and Prince). Each plays its own bracket, on its own tab, with its own champion. Split by combined team rating, then adjust below.'}</p>
+        : 'Optionally split the teams into divisions (e.g. King and Prince). Each plays its own ' + (T.bracketType === 'swiss' ? 'Swiss' : 'bracket') + ', on its own tab, with its own champion. Split by combined team rating, then adjust below.'}</p>
       <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
         <span class="muted small">Split into</span>
         <select id="divCount" style="width:auto">${[1, 2, 3, 4].map(n => '<option value="' + n + '"' + ((divs || 1) === n ? ' selected' : '') + '>' + (n === 1 ? 'One bracket (no split)' : n + ' divisions') + '</option>').join('')}</select>
@@ -2161,8 +2165,11 @@ function openStartConfig() {
   // find a winner for this field
   const planR = swissRoundsSet(T);
   const defR = planR || Math.max(1, R);
+  // With divisions (decision 77) every division plays its own Swiss with these settings, so the
+  // smallest one is the field that runs out of fresh opponents first.
+  const nField = divs ? Math.min.apply(null, sizes) : n;
   // each team can meet every other team once: n - 1 rounds, or n with an odd field (a bye each)
-  const freshR = n % 2 ? n : n - 1;
+  const freshR = nField % 2 ? nField : nField - 1;
   // Record cuts and stage 2 are decided on the create form / format panel, not here. The
   // dialog reflects them so nobody starts a LotS bracket wondering where the settings went.
   const cutW = parseInt(sp.winCut, 10) || 0;
@@ -2177,15 +2184,15 @@ function openStartConfig() {
   const comfy = cutsOn ? Math.pow(2, Math.max(cutW, cutL) + 1) : 0;
   return modal(`
     <h3>Swiss setup</h3>
-    <p class="muted small">${n} teams. ${cutsOn
+    <p class="muted small">${divs ? esc(sizes.map((k, i) => divisionNameOf(i + 1) + ' ' + k).join(', ') + ' teams. Every division plays its own Swiss with these settings: its own rounds, table and final, on its own tab.') : n + ' teams.'} ${cutsOn
       ? 'Teams leave the stage the moment they hit either mark; pairings stay inside a score group and rematches are avoided.'
       : 'Everyone plays every round; pairings by standings, rematches avoided.'}</p>
     ${cutsOn ? `<div class="infocell" style="margin:0 0 12px">
       <div class="mono small muted">FORMAT</div>
       <div>${esc(cutBits.join(' \u00b7 '))}</div>
       <div class="muted small" style="margin-top:4px">At most ${cutRounds} round${cutRounds === 1 ? '' : 's'} per team${sp.decidingBo ? ' \u00b7 Bo' + sp.decidingBo + ' when a win qualifies or a loss eliminates' : ''}</div>
-      ${n < comfy ? `<div class="muted small" style="margin-top:6px">${n} teams is a small field for this - below ${comfy} the draw can run out of fresh opponents and may have to repeat a pairing.</div>` : ''}
-      ${nextPow2(n) !== n ? `<div class="muted small" style="margin-top:6px">${n} is not a power of two, so some rounds need a bye. A bye is a free win, so the number reaching ${cutW || '-'} wins can vary.</div>` : ''}
+      ${nField < comfy ? `<div class="muted small" style="margin-top:6px">${nField} teams is a small field for this - below ${comfy} the draw can run out of fresh opponents and may have to repeat a pairing.</div>` : ''}
+      ${nextPow2(nField) !== nField ? `<div class="muted small" style="margin-top:6px">${nField} is not a power of two, so some rounds need a bye. A bye is a free win, so the number reaching ${cutW || '-'} wins can vary.</div>` : ''}
     </div>` : ''}
     ${s2On ? `<div class="infocell" style="margin:0 0 12px">
       <div class="mono small muted">SECOND STAGE</div>
@@ -2219,7 +2226,7 @@ function openStartConfig() {
         const v = parseInt(rIn.value, 10) || 0;
         const bits = [];
         if (planR && v === planR) bits.push('As planned on the Format panel.');
-        if (freshR >= 1 && v > freshR) bits.push(n + ' teams can only play ' + freshR + ' round' + (freshR === 1 ? '' : 's') + ' without someone meeting the same opponent twice.');
+        if (freshR >= 1 && v > freshR) bits.push((divs ? 'The smallest division (' + nField + ' teams)' : n + ' teams') + ' can only play ' + freshR + ' round' + (freshR === 1 ? '' : 's') + ' without someone meeting the same opponent twice.');
         rNote.textContent = bits.join(' ');
         rNote.className = 'small ' + (freshR >= 1 && v > freshR ? 'warn' : 'muted');
       };

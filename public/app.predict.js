@@ -261,7 +261,9 @@ function predStageHTML(stage, data, viewing) {
     const made = c ? c.made : Object.keys(picks).filter(k => picks[k]).length;
     const total = stage.total || (c ? c.need : 0);
     const dirty = predDirty(stage);
-    const dist = stage.kind === 'records' ? predSwissDist((stage.teams || []).length, stage.plan || {}) : null;
+    const dist = stage.kind === 'records' ? (divisionsOnT()
+      ? Array.from({ length: T.divisions }, (x, i) => predSwissDist(predRecordTeams(stage, i + 1).length, stage.plan || {})).find(Boolean) || null
+      : predSwissDist((stage.teams || []).length, stage.plan || {})) : null;
     // (a bracket stage had "Higher seed wins every match": taken out, decision 67)
     const fill = (stage.kind === 'records' && dist) ? 'Fill in by seed' : '';
     h += `<div class="pred-actions">
@@ -295,7 +297,7 @@ function predBracketHTML(stage, picks, marks, editable) {
   };
   let h = '';
   for (const d of divs) {
-    if (multi && divs.length > 1) h += '<h3 class="pred-div">' + esc(divisionNameOf(d)) + ' bracket</h3>';
+    if (multi && divs.length > 1) h += '<h3 class="pred-div">' + esc(divisionNameOf(d)) + (T.bracketType === 'swiss' ? ' final' : ' bracket') + '</h3>';
     const inDiv = ps.filter(p => p.d === d);
     // rounds in playing order, as the server listed them
     const groups = [];
@@ -335,12 +337,31 @@ function predBracketHTML(stage, picks, marks, editable) {
 // Every team's final record. Records are buttons; when the format splits evenly, the counts each
 // record should end up with are shown beside what has been chosen.
 function predRecordsHTML(stage, picks, marks, editable) {
-  const teams = (stage.teams || []).map(id => (T.teams || []).find(x => x.id === id)).filter(Boolean).sort((a, b) => (a.seed || 0) - (b.seed || 0));
+  // A Swiss with divisions (decision 77) is one Swiss per division: a list each, top division first.
+  if (divisionsOnT()) {
+    let h = '';
+    for (let d = 1; d <= T.divisions; d++) {
+      const ids = predRecordTeams(stage, d).map(x => x.id);
+      if (!ids.length) continue;
+      h += '<h3 class="pred-div">' + esc(divisionNameOf(d)) + '</h3>' + predRecordsListHTML(Object.assign({}, stage, { teams: ids }), picks, marks, editable);
+    }
+    return h;
+  }
+  return predRecordsListHTML(stage, picks, marks, editable);
+}
+// The teams of a records stage, by seed: all of them, or one division's (`d`).
+function predRecordTeams(stage, d) {
+  return (stage.teams || []).map(id => (T.teams || []).find(x => x.id === id))
+    .filter(x => x && (!d || (x.division || 0) === d)).sort((a, b) => (a.seed || 0) - (b.seed || 0));
+}
+function predRecordsListHTML(stage, picks, marks, editable) {
+  const teams = predRecordTeams(stage);
   const choices = stage.choices || [];
   const dist = predSwissDist(teams.length, stage.plan || {});
   const actual = stage.actual || {};
   const counts = {};
-  for (const id of Object.keys(picks)) if (picks[id]) counts[picks[id]] = (counts[picks[id]] || 0) + 1;
+  // the teams on this list only: with divisions each division counts its own (decision 77)
+  for (const tm of teams) if (picks[tm.id]) counts[picks[tm.id]] = (counts[picks[tm.id]] || 0) + 1;
   let h = '<div class="pred-dist">' + choices.map(rc => {
     const n = counts[rc] || 0, want = dist ? (dist[rc] || 0) : null;
     const off = want != null && n !== want;
@@ -457,11 +478,14 @@ function wirePredictions(el, data, stage) {
       const p = picks();
       for (const k of Object.keys(p)) delete p[k];
       if (stage.kind === 'records') {
-        const dist = predSwissDist((stage.teams || []).length, stage.plan || {});
-        if (!dist) return;
-        const teams = (stage.teams || []).map(id => (T.teams || []).find(x => x.id === id)).filter(Boolean).sort((a, b) => (a.seed || 0) - (b.seed || 0));
-        let i = 0;
-        for (const rc of stage.choices || []) for (let n = 0; n < (dist[rc] || 0) && i < teams.length; n++) p[teams[i++].id] = rc;
+        // by seed, and with divisions by seed within each division (decision 77)
+        for (const d of (divisionsOnT() ? Array.from({ length: T.divisions }, (x, i) => i + 1) : [0])) {
+          const teams = predRecordTeams(stage, d);
+          const dist = predSwissDist(teams.length, stage.plan || {});
+          if (!dist) continue;
+          let i = 0;
+          for (const rc of stage.choices || []) for (let n = 0; n < (dist[rc] || 0) && i < teams.length; n++) p[teams[i++].id] = rc;
+        }
       }
       redraw();
     };

@@ -2031,6 +2031,8 @@ function drawBracket(el, division) {
   if (T.competition === 'ffa') return drawFfaRounds(el);
 
   if (T.bracketType === 'swiss') {
+    // King / Prince (decision 77): this tab is one division's Swiss
+    if (one) return drawSwissDivision(el, one);
     if (pickOpen) drawPickPhase(el);
     // Two-stage: the playoff bracket sits above the Swiss stage that produced it, so the
     // live action is at the top and the Swiss rounds read as history below it.
@@ -2101,6 +2103,25 @@ function drawBracket(el, division) {
   for (const f of connectorRedraws) f();
 }
 
+// One division of a Swiss (decision 77): its own overview, rounds and final, drawn by the same code
+// as a Swiss without divisions, handed the division's share of the tournament (withDivisionT).
+function drawSwissDivision(el, d) {
+  const champ = divisionChampionOf(d);
+  const hdr = document.createElement('div');
+  hdr.className = 'division-header';
+  hdr.innerHTML = '<h2 style="margin:0 0 4px">' + esc(divisionNameOf(d)) + ' <span class="h2-strong">rounds</span></h2>'
+    + '<p class="muted small" style="margin:0 0 12px">' + divisionTeamsOf(d).length + ' teams'
+    + (champ ? ' \u00b7 champion: <strong>' + esc(teamName(champ)) + '</strong>' : '') + '</p>';
+  el.appendChild(hdr);
+  // its own box, so its final (put on top of the rounds) stays under this header
+  const body = document.createElement('div');
+  el.appendChild(body);
+  withDivisionT(d, () => {
+    drawSwissGrid(body);
+    drawSwissRounds(body);
+  });
+}
+
 // ---- preview (before the bracket is generated) ----
 
 function previewSeedOrder(n) {
@@ -2151,9 +2172,13 @@ function divisionPreviewNote(division) {
   const n = divisionTeamsOf(division).length;
   const off = divisionRoundOffset(division);
   const bits = [];
-  if (!n) bits.push(T.formation === 'draft' ? 'The ' + nm + ' bracket fills in once its teams are drafted.' : 'The ' + nm + ' bracket fills in once the teams are split into divisions.');
+  const swiss = T.bracketType === 'swiss';
+  const what = 'The ' + nm + (swiss ? ' division' : ' bracket');
+  if (!n) bits.push(T.formation === 'draft' ? what + ' fills in once its teams are drafted.' : what + ' fills in once the teams are split into divisions.');
   else bits.push(n + ' team' + (n === 1 ? '' : 's') + ', seeded 1-' + n + ' within the division.');
-  if (off) bits.push('It has fewer rounds than the biggest division and plays its round lengths counted back from the final: its final is the final, its semi-finals the semi-finals.');
+  // a Swiss division plays the same rounds as the others, its own Swiss and its own final
+  if (swiss) bits.push('It plays its own Swiss: its own rounds, table and ' + ((T.plan && T.plan.final === 0) ? 'champion.' : 'final.'));
+  else if (off) bits.push('It has fewer rounds than the biggest division and plays its round lengths counted back from the final: its final is the final, its semi-finals the semi-finals.');
   return bits.join(' ');
 }
 
@@ -2228,7 +2253,7 @@ function drawBracketPreview(el, division) {
   const head = document.createElement('div');
   head.className = 'panel section';
   const capNote = T.maxTeams ? ('capped at ' + T.maxTeams + ' teams') : 'uncapped';
-  head.innerHTML = (one ? `<h2>${esc(divisionNameOf(one))} <span class="h2-strong">bracket preview</span></h2>
+  head.innerHTML = (one ? `<h2>${esc(divisionNameOf(one))} <span class="h2-strong">${T.bracketType === 'swiss' ? 'rounds' : 'bracket'} preview</span></h2>
     <p class="muted small" style="margin:0 0 6px">${esc(divisionPreviewNote(one))}</p>` : `<h2>Format <span class="h2-strong">preview</span></h2>`)
     + `<p style="margin:0 0 4px">${esc(typeLine(T))}</p>
     <p class="muted" style="margin:0 0 8px">${esc(planSummary(T))}</p>
@@ -2238,7 +2263,10 @@ function drawBracketPreview(el, division) {
 
   if (T.competition === 'ffa') { drawFfaPreview(el, n); return; }
   if (T.bracketType === 'swiss') {
-    drawSwissPreview(el, n);
+    // with divisions the start works the number of rounds out for the biggest one
+    let nRounds = n;
+    if (one) for (let d = 1; d <= T.divisions; d++) nRounds = Math.max(nRounds, plannedDivisionSize(d) || 0);
+    drawSwissPreview(el, n, nRounds);
     if (T.status === 'drafted') drawSwissRound1Editor(el);
     return;
   }
@@ -2567,16 +2595,16 @@ function previewBox(a, b, bo, label) {
   return box;
 }
 
-function drawSwissPreview(el, n) {
+function drawSwissPreview(el, n, nRounds) {
   const sec = document.createElement('div');
   sec.className = 'panel section';
-  const rounds = swissPlannedRounds(T, n);
+  const rounds = swissPlannedRounds(T, nRounds || n);
   // How many rounds, and where that comes from (decision 61): the planned number, or worked out at
   // the start from the field. Record cuts say their own count elsewhere.
   const planned = swissRoundsSet(T);
   const roundsTxt = swissCutCfg(T).on ? ''
     : planned ? 'Planned: ' + planned + ' round' + (planned === 1 ? '' : 's') + '.'
-    : n >= 2 ? rounds + ' round' + (rounds === 1 ? '' : 's') + ' for ' + n + ' teams, worked out when the stage starts.'
+    : n >= 2 ? rounds + ' round' + (rounds === 1 ? '' : 's') + ' for ' + ((nRounds && nRounds !== n) ? 'the biggest division (' + nRounds + ' teams)' : n + ' teams') + ', worked out when the stage starts.'
     : 'The number of rounds is worked out from the number of teams when the stage starts.';
   const roundsLink = (roundsTxt && viewerIsOrganizer())
     ? ' <a href="#" data-adminjump="format" data-adminfocus="af_swrounds">' + (planned ? 'Change it' : 'Set the number of rounds') + ' under Admin tab \u2192 Format</a>.' : '';
@@ -2983,6 +3011,8 @@ function plannedPairsFor(teams) {
 
 function drawSwissRound1Editor(el) {
   if (!viewerIsOrganizer() || T.bracketType !== 'swiss') return;
+  // with divisions every division draws its own round 1 by seed (decision 77)
+  if (divisionsOnT()) return;
   const planning = T.status === 'drafted';
   if (!planning && !T.swissR1Open) return;
 

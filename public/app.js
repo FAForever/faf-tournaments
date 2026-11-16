@@ -1055,10 +1055,11 @@ function statusPillClass(t) {
 
 // ---- divisions (King / Prince ...) ----
 // Each division is its own bracket on its own tab: 'bracket' for division 1, 'bracket2'... after.
+// A Swiss has them too (decision 77): every division plays its own rounds, on its own tab.
 const DIVISION_DEFAULT_NAMES = ['King', 'Prince', 'Duke', 'Baron'];
 function divisionsOnT(t) {
   t = t || T;
-  return !!t && t.competition === 'team' && (t.bracketType === 'single' || t.bracketType === 'double') && (parseInt(t.divisions, 10) || 0) > 1;
+  return !!t && t.competition === 'team' && (t.bracketType === 'single' || t.bracketType === 'double' || t.bracketType === 'swiss') && (parseInt(t.divisions, 10) || 0) > 1;
 }
 function divisionNameOf(d, t) {
   t = t || T;
@@ -1068,6 +1069,20 @@ function divisionNameOf(d, t) {
 function divisionChampionOf(d, t) { t = t || T; return ((t && t.divisionChampions) || [])[d - 1] || null; }
 function divisionTeamsOf(d, t) { t = t || T; return ((t && t.teams) || []).filter(x => (x.division || 0) === d); }
 function divisionTab(d) { return d <= 1 ? 'bracket' : 'bracket' + d; }
+// One division of a Swiss (decision 77) is drawn by the same code as a Swiss without divisions,
+// which reads T: while fn runs, T is that division's share of the tournament - its teams, its
+// matches, its champion, and finished once it has one. Always put back, even if fn throws.
+function withDivisionT(d, fn) {
+  const whole = T;
+  const champ = divisionChampionOf(d, whole);
+  T = Object.assign({}, whole, {
+    teams: (whole.teams || []).filter(x => (x.division || 0) === d),
+    matches: (whole.matches || []).filter(m => (m.division || 0) === d),
+    championTeamId: champ,
+    status: champ ? 'finished' : whole.status
+  });
+  try { return fn(); } finally { T = whole; }
+}
 // A captains draft has one tab for its players and its draft (decision 73), and with divisions one
 // per division once the draft starts: 'teams' is the first (or only) one, 'teams2' the second...
 function draftMergedT(t) { t = t || T; return !!t && t.formation === 'draft'; }
@@ -1174,7 +1189,7 @@ function typeLine(t) {
   // A tournament created from a named preset says so: it is the format's identity, and only a
   // global tournament director can have made it.
   const head = t.presetName ? t.presetName + ' · ' : '';
-  const divTail = divisionsOnT(t) ? ' \u00b7 ' + divisionListText(t) + ' brackets' : '';
+  const divTail = divisionsOnT(t) ? ' \u00b7 ' + divisionListText(t) + (t.bracketType === 'swiss' ? ' divisions' : ' brackets') : '';
   return head + form + ' · ' + bt + swissTail + divTail + (t.maxTeams ? ' · max ' + t.maxTeams + ' teams' : '');
 }
 
