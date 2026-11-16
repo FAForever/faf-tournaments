@@ -5018,64 +5018,6 @@ async function handleAPI(req, res, url) {
       });
     }
 
-    // Re-pull every signed-up player's rating onto whatever board currently counts. Needed after
-    // changing ratingType or ratingDate, which deliberately do not rewrite history on their own.
-    // Uses the requesting organizer's FAF token; a player whose rating cannot be fetched keeps
-    // the one they have rather than being wiped to null.
-    // ---- per-tournament bans (organizers of THIS tournament) ----
-    // The gap this closes: an organizer could already remove someone, but nothing stopped them
-    // signing straight back up.
-    if (sub === 'ban_set') {
-      if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
-      const fid = String(b.fafId || '').trim();
-      if (!fid) return bad(res, 'FAF id required');
-      const exp = parseBanExpiry(b.expires);
-      if (!exp.ok) return bad(res, 'Invalid expiry date');
-      t.bans = t.bans || {};
-      const existed = !!t.bans[fid];
-      t.bans[fid] = makeBanRecord(t.bans[fid], fid, b.name, b.reason, exp.value, actorOf(req, b.admin).name);
-      tlog(t, req, b.admin, (existed ? 'updated the tournament ban on ' : 'banned ') + t.bans[fid].name +
-        ' from this tournament' + (exp.value ? ' until ' + exp.value.slice(0, 10) : ' (no expiry)') +
-        (t.bans[fid].reason ? ' - ' + t.bans[fid].reason : ''));
-      saveDB();
-      return json(res, 200, { ok: true });
-    }
-    if (sub === 'ban_remove') {
-      if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
-      const fid = String(b.fafId || '').trim();
-      if (!t.bans || !t.bans[fid]) return bad(res, 'Not banned from this tournament');
-      const nm = t.bans[fid].name || fid;
-      delete t.bans[fid];
-      tlog(t, req, b.admin, 'lifted the tournament ban on ' + nm);
-      saveDB();
-      return json(res, 200, { ok: true });
-    }
-
-    if (sub === 'repull_ratings') {
-      if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
-      if (!t.ratingType || t.ratingType === 'none') return bad(res, 'This tournament does not pull ratings from FAF');
-      const tk = await fafValidToken(currentSession(req));
-      if (!tk) return json(res, 409, { error: 'Log out and log back in (top-right) so the site can query FAF on your behalf, then try again.' });
-      let done = 0, failed = [];
-      for (const p of (t.players || [])) {
-        if (!p.fafId) { failed.push(p.name + ' (no FAF account)'); continue; }
-        let r = null;
-        try {
-          r = (t.ratingType === 'rc')
-            ? (await fafRcProbe(p.fafId, t.ratingDate, tk)).rating
-            : (await fafRatingProbe(p.fafId, t.ratingType, t.ratingDate, tk)).rating;
-        } catch (e) { r = null; }
-        if (r == null) { failed.push(p.name); continue; }
-        p.rating = r; p.ratingActual = r;
-        applyRatingCap(t, p);
-        try { p.allRatings = await fafAllRatings(p.fafId, t.ratingDate, tk); } catch (e) {}
-        done++;
-      }
-      tlog(t, req, b.admin, 're-pulled ratings for ' + done + ' player' + (done === 1 ? '' : 's') + ' on the ' + t.ratingType + ' board' + (failed.length ? ' (' + failed.length + ' could not be fetched)' : ''));
-      saveDB();
-      return json(res, 200, { ok: true, updated: done, failed });
-    }
-
     if (sub === 'chat_rooms' && method === 'GET') {
       const tok = url.searchParams.get('token');
       return json(res, 200, { rooms: chatRoomsFor(t, req, tok), muted: chatMuted(t, (currentSession(req) || {}).fafId) ? 1 : 0 });
@@ -5118,6 +5060,66 @@ async function handleAPI(req, res, url) {
     // allow up to ~8MB so map image uploads (base64 of a 5MB file ≈ 6.7MB) fit; the real
     // per-image 5MB cap is enforced when decoding in saveMapImage.
     const b = await readBody(req, 8 * 1024 * 1024);
+
+    // These three read the body, so they come after it: above it they answered 500 ("Cannot access
+    // 'b' before initialization") from the day they were added, 1 and 2 Sep.
+    // ---- per-tournament bans (organizers of THIS tournament) ----
+    // The gap this closes: an organizer could already remove someone, but nothing stopped them
+    // signing straight back up.
+    if (sub === 'ban_set') {
+      if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
+      const fid = String(b.fafId || '').trim();
+      if (!fid) return bad(res, 'FAF id required');
+      const exp = parseBanExpiry(b.expires);
+      if (!exp.ok) return bad(res, 'Invalid expiry date');
+      t.bans = t.bans || {};
+      const existed = !!t.bans[fid];
+      t.bans[fid] = makeBanRecord(t.bans[fid], fid, b.name, b.reason, exp.value, actorOf(req, b.admin).name);
+      tlog(t, req, b.admin, (existed ? 'updated the tournament ban on ' : 'banned ') + t.bans[fid].name +
+        ' from this tournament' + (exp.value ? ' until ' + exp.value.slice(0, 10) : ' (no expiry)') +
+        (t.bans[fid].reason ? ' - ' + t.bans[fid].reason : ''));
+      saveDB();
+      return json(res, 200, { ok: true });
+    }
+    if (sub === 'ban_remove') {
+      if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
+      const fid = String(b.fafId || '').trim();
+      if (!t.bans || !t.bans[fid]) return bad(res, 'Not banned from this tournament');
+      const nm = t.bans[fid].name || fid;
+      delete t.bans[fid];
+      tlog(t, req, b.admin, 'lifted the tournament ban on ' + nm);
+      saveDB();
+      return json(res, 200, { ok: true });
+    }
+
+    // Re-pull every signed-up player's rating onto whatever board currently counts. Needed after
+    // changing ratingType or ratingDate, which deliberately do not rewrite history on their own.
+    // Uses the requesting organizer's FAF token; a player whose rating cannot be fetched keeps
+    // the one they have rather than being wiped to null.
+    if (sub === 'repull_ratings') {
+      if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
+      if (!t.ratingType || t.ratingType === 'none') return bad(res, 'This tournament does not pull ratings from FAF');
+      const tk = await fafValidToken(currentSession(req));
+      if (!tk) return json(res, 409, { error: 'Log out and log back in (top-right) so the site can query FAF on your behalf, then try again.' });
+      let done = 0, failed = [];
+      for (const p of (t.players || [])) {
+        if (!p.fafId) { failed.push(p.name + ' (no FAF account)'); continue; }
+        let r = null;
+        try {
+          r = (t.ratingType === 'rc')
+            ? (await fafRcProbe(p.fafId, t.ratingDate, tk)).rating
+            : (await fafRatingProbe(p.fafId, t.ratingType, t.ratingDate, tk)).rating;
+        } catch (e) { r = null; }
+        if (r == null) { failed.push(p.name); continue; }
+        p.rating = r; p.ratingActual = r;
+        applyRatingCap(t, p);
+        try { p.allRatings = await fafAllRatings(p.fafId, t.ratingDate, tk); } catch (e) {}
+        done++;
+      }
+      tlog(t, req, b.admin, 're-pulled ratings for ' + done + ' player' + (done === 1 ? '' : 's') + ' on the ' + t.ratingType + ' board' + (failed.length ? ' (' + failed.length + ' could not be fetched)' : ''));
+      saveDB();
+      return json(res, 200, { ok: true, updated: done, failed });
+    }
 
     // The actual winners of an imported tournament, for the Hall of Fame (decision 60). Challonge
     // only knew the entries, so nobody from an import counts until a site admin or a tournament
