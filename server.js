@@ -1805,6 +1805,8 @@ function proposalView(t, req, organizer) {
     canDrop: (named && p.state === 'draft' && canHost(req)) ? 1 : 0,
     canRelease: (p.state === 'taken' && t.published === false && t.status === 'signup' && ((organizer && approver) || isSiteAdmin(req))) ? 1 : 0,
     canUnlock: (p.state === 'taken' && (p.lockMaps || p.lockFormat) && (mine || isSiteAdmin(req))) ? 1 : 0,
+    // this account closed the "taken over" box for this takeover (decision 79)
+    closed: (p.state === 'taken' && fid && ((db.profiles[fid] || {}).closedProps || {})[t.id] === String(p.takenAt)) ? 1 : 0,
     credit: p.byName
   };
 }
@@ -5515,6 +5517,23 @@ async function handleAPI(req, res, url) {
         delete t.proposal;
         saveDB();
         audit(req, 'proposal_dropped', Object.assign({ detail: 'an ordinary draft again' }, tn));
+        return json(res, 200, { ok: true });
+      }
+      // Close the "taken over" box for this account (decision 79): it stays closed on every device,
+      // for this takeover; taken over again after a give-back, it shows again. Only the account's
+      // own memory changes, so anyone who sees the box may close it.
+      if (sub === 'proposal_close') {
+        if (p.state !== 'taken') return bad(res, 'Only the box of a proposal a director has taken over can be closed');
+        const prof = db.profiles[who.by] = db.profiles[who.by] || {};
+        const keep = {};
+        for (const tid of Object.keys(prof.closedProps || {})) {
+          // what is still closed and still matters: the same takeover of a tournament that exists
+          const o = db.tournaments[tid];
+          if (o && o.proposal && o.proposal.state === 'taken' && String(o.proposal.takenAt) === prof.closedProps[tid]) keep[tid] = prof.closedProps[tid];
+        }
+        keep[t.id] = String(p.takenAt);
+        prof.closedProps = keep;
+        saveDB();
         return json(res, 200, { ok: true });
       }
       return bad(res, 'Unknown proposal action');

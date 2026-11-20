@@ -66,7 +66,7 @@ function proposalBannerHTML(admin) {
       ${P.note ? '<p class="muted small" style="margin:4px 0 0">Your note to the TD team: <em>' + esc(P.note) + '</em></p>' : ''}
       <div class="pub-actions">${P.canWithdraw ? '<button class="btn ghost" id="propWithdraw">Withdraw it to change something</button>' : ''}</div>
     </div>`;
-  } else if (P.state === 'taken' && (mine || runs)) {
+  } else if (P.state === 'taken' && (mine || runs) && !P.closed) {
     const lockLines = [];
     if (P.lockMaps) lockLines.push(mine
       ? 'You asked that the <strong>maps, map pools and vetoes</strong> stay as you set them.' + (P.canUnlock ? ' <button class="btn ghost small" data-propunlock="maps">Let the director change them</button>' : '')
@@ -74,8 +74,9 @@ function proposalBannerHTML(admin) {
     if (P.lockFormat) lockLines.push(mine
       ? 'You asked that the <strong>format and bracket</strong> stay as you set them.' + (P.canUnlock ? ' <button class="btn ghost small" data-propunlock="format">Let the director change it</button>' : '')
       : '<strong>' + esc(P.byName) + '</strong> asked that the <strong>format and bracket</strong> stay as proposed: changing them is refused until they lift that.' + (P.canUnlock ? ' <button class="btn ghost small" data-propunlock="format">Lift it (site admin)</button>' : ''));
+    // closable (decision 79): closed, it stays closed for this account until it is taken over again
     out += `<div class="panel prop-box prop-taken" style="margin-top:12px">
-      <div class="mono small prop-head">PROPOSAL &middot; TAKEN OVER</div>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px"><div class="mono small prop-head">PROPOSAL &middot; TAKEN OVER</div><button class="pending-x" id="propCloseX" title="Close. It stays closed for your account, on every device." aria-label="Close">&times;</button></div>
       <p style="margin:6px 0">${mine ? 'Your proposal' : 'Proposed by <strong>' + esc(P.byName) + '</strong>. It'} was taken over by <strong>${esc(P.takenByName || '')}</strong> on ${esc(fmtDateTime(P.takenAt))}${P.takeNote ? ': <em>' + esc(P.takeNote) + '</em>' : '.'}
         ${mine ? ' They run it now.' : ''} Publishing it needs a second tournament director, not the one who took it over.</p>
       ${lockLines.map(l => '<p class="small prop-lock" style="margin:4px 0">' + l + '</p>').join('')}
@@ -130,6 +131,12 @@ function wireProposalBanner() {
     catch (e) { toast(e.message, true); }
   };
   if ($('propReleaseOpen')) $('propReleaseOpen').onclick = () => { $('propReleaseBox').hidden = false; $('propReleaseWhy').focus(); };
+  if ($('propCloseX')) $('propCloseX').onclick = async () => {
+    const box = $('propCloseX').closest('.prop-box');
+    if (box) box.style.display = 'none';   // gone at once; the server remembers it for this account
+    try { await api('/api/t/' + T.id + '/proposal_close', {}); await refresh(); }
+    catch (e) { if (box) box.style.display = ''; toast(e.message, true); }
+  };
   if ($('propReleaseGo')) $('propReleaseGo').onclick = async () => {
     const why = $('propReleaseWhy').value.trim();
     if (!why) return toast('Say why, so ' + T.proposal.byName + ' knows', true);
