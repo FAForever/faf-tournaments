@@ -40,7 +40,7 @@ const { swissPairRound, swissAfterReport, swissStandings,
         stageTwoCfg, stageTwoField, stageTwoBuild, swissStageDone, swissFinishIfDone,
         swissTiebreakMode, swissTiebreakValues,
         swissRound1Open, swissSetRound1, swissShuffleRound1,
-        swissDivisionChampion } = require('./lib/swiss');
+        swissDivisionChampion, swissDeciderInfo, swissMatchStarted } = require('./lib/swiss');
 const { ffaCreateRound, ffaAfterReport, ffaRank } = require('./lib/ffa');
 // Team formation and map lookups.
 const { buildDraft, finishDraftIfDone, finalizeOpenTeams, formTeamsGrouped,
@@ -52,8 +52,14 @@ const CAPVOTE = require('./lib/capvote');
 // Wire the Swiss progression hook into the match core (see lib/match.js). Must come
 // after the swiss require above, since swissAfterReport is now imported, not hoisted.
 // A result in a fast-pairing Swiss first takes back a repeat the old fast pairing made (decision 62).
-require('./lib/match').setHooks({ swissAfterReport: t => { dropFastRepeats(t); swissAfterReport(t); } });
-require('./lib/swiss').setSwissHooks({ openStagePicks });
+// Deciders for a Swiss final drawn by this result go in the log, with who plays them and why (decision 80).
+require('./lib/match').setHooks({ swissAfterReport: t => {
+  dropFastRepeats(t);
+  const had = new Set((t.matches || []).filter(m => m.bracket === 'dc').map(m => m.id));
+  swissAfterReport(t);
+  logNewDeciders(t, had);
+} });
+require('./lib/swiss').setSwissHooks({ openStagePicks, removedMatches: tidyRemovedMatches });
 require('./lib/match').setHooks({ afterFinalize: (t) => { autoStopIfReached(t); PRED.stampLocks(t, PRED_CTX); } });
 // A Swiss division without a final is won by the top of its table (decision 77).
 require('./lib/match').setHooks({ divisionChampion: swissDivisionChampion });
@@ -1125,6 +1131,46 @@ function dropFastRepeats(t) {
   tpush(t, 'System', 'Took back ' + gone.map(m => tTeamName(t, m.team1) + ' vs ' + tTeamName(t, m.team2)).join(', ')
     + ': fast pairing had paired them again although they had already played. Nobody had started it, so they get a new opponent instead.');
   return gone.length;
+}
+// Matches the Swiss engine took back (a decider or final for a Swiss final that a corrected result
+// no longer fits, decision 80): the same tidying as a redo of the playoffs.
+function tidyRemovedMatches(t, ids) {
+  for (const id of ids || []) {
+    if (t.chat) delete t.chat['match:' + id];
+    if (t.chatRev) delete t.chatRev['match:' + id];
+    if (t.chatPings) delete t.chatPings['match:' + id];
+    if (t.poolAssign) delete t.poolAssign['match:' + id];
+  }
+}
+// ---------- deciders for a Swiss final (decision 80) ----------
+// One sentence: who finished level for a place in the final, and how the deciders settle it.
+function deciderNote(t, f) {
+  const nm = id => tTeamName(t, id);
+  const list = ids => (ids.length > 1 ? ids.slice(0, -1).map(nm).join(', ') + ' and ' + nm(ids[ids.length - 1]) : ids.map(nm).join(''));
+  const lead = list(f.ids) + ' finished level on ' + f.rec + ' for ' + (f.spots === 1 ? 'the last place' : 'both places') + ' in the final';
+  const n = f.ids.length;
+  if (f.spots === 1 && n === 2) return lead + ', so they play a decider: the winner goes to the final.';
+  if (f.spots === 1 && n === 3) return lead + ': ' + nm(f.ids[1]) + ' plays ' + nm(f.ids[2]) + ', and the winner plays ' + nm(f.ids[0]) + ' for it.';
+  if (f.spots === 1 && n === 4) return lead + ': two deciders, then the two winners play for it.';
+  if (f.spots === 2 && n === 3) return lead + ': ' + nm(f.ids[0]) + ' plays ' + nm(f.ids[1]) + ' and the winner goes to the final; the loser plays ' + nm(f.ids[2]) + ' for the other place.';
+  if (f.spots === 2 && n === 4) return lead + ': two deciders, and both winners go to the final.';
+  return lead + ', so they play deciders for ' + (f.spots === 1 ? 'it' : 'them') + '.';
+}
+// For the page: who plays (or played) deciders, per division, with that sentence.
+function swissDecidersView(t) {
+  const list = swissDeciderInfo(t);
+  return list ? list.map(f => Object.assign({}, f, { note: deciderNote(t, f) })) : null;
+}
+// After a result: a division whose first deciders were just drawn (or drawn again, after a
+// correction) says so in the log. `had` holds the ids of the deciders there were before.
+function logNewDeciders(t, had) {
+  const list = swissDeciderInfo(t);
+  if (!list) return;
+  for (const f of list) {
+    const d = f.division || 0;
+    if (!(t.matches || []).some(m => m.bracket === 'dc' && m.round === 1 && (m.division || 0) === d && !had.has(m.id))) continue;
+    tpush(t, 'System', (d && divisionsOn(t) ? 'The ' + divisionName(t, d) + ' Swiss is over. ' : 'The Swiss stage is over. ') + deciderNote(t, f));
+  }
 }
 // Opening the tournament: take such repeats back and pair whoever is free again.
 function sweepFastRepeats(t) {
@@ -2389,6 +2435,11 @@ function matchLabelCore(t, m) {
     return t.bracketType === 'swiss' ? 'Final' : 'Grand Final';
   }
   if (m.bracket === 'sw') return 'Round ' + m.round + ' Match ' + (m.index + 1);
+  // a decider for the Swiss final (decision 80): "Decider", "Decider 2", "Decider Match 2"
+  if (m.bracket === 'dc') {
+    const several = (t.matches || []).filter(x => x.bracket === 'dc' && x.round === m.round && (x.division || 0) === (m.division || 0)).length > 1;
+    return 'Decider' + (m.round > 1 ? ' ' + m.round : '') + (several ? ' Match ' + (m.index + 1) : '');
+  }
   if (m.bracket === 'ffa') return 'Round ' + m.round + ' Lobby ' + (m.index + 1);
   if (m.bracket === '3p') return twoStage ? 'Playoffs 3rd place match' : '3rd place match';
   if (twoStage) {
@@ -2572,6 +2623,8 @@ function publicView(t) {
     swissOrder: (t.bracketType === 'swiss' && t.competition === 'team' && (t.status === 'running' || t.status === 'finished'))
       ? swissStandings(t).map(r => r.teamId) : null,
     swissSB: (t.bracketType === 'swiss' && t.competition === 'team') ? swissTiebreakValues(t) : null,
+    // who plays deciders for the final, and why (decision 80)
+    swissDeciders: (t.bracketType === 'swiss' && t.competition === 'team' && (t.status === 'running' || t.status === 'finished')) ? swissDecidersView(t) : null,
     stopAtAlive: t.stopAtAlive || 0, aliveCount: aliveTeamCount(t),
     swissR1Open: (t.bracketType === 'swiss' && t.status === 'running' && !divisionsOn(t) && swissRound1Open(t)) ? 1 : 0,
     seeding: t.seeding, ratingType: t.ratingType || 'global', ratingDate: t.ratingDate || null,
@@ -7818,8 +7871,9 @@ async function handleAPI(req, res, url) {
           if (m.bracket === 'ffa' || m.status === 'done') continue;
           if (!m.team1 || !m.team2 || m.team1 === 'BYE' || m.team2 === 'BYE') continue;
           const mk = 'match:' + m.id, rk = poolRoundKey(t, m);
-          // a 3rd place match with no pool of its own plays the semi-finals' one (poolForMatch)
-          const fk = m.bracket === '3p' ? 'wb:' + (m.round - 1) : null;
+          // a 3rd place match with no pool of its own plays the semi-finals' one, a decider for a
+          // Swiss final the last round's (poolForMatch)
+          const fk = m.bracket === '3p' ? 'wb:' + (m.round - 1) : m.bracket === 'dc' ? 'sw:' + ((t.cfg && t.cfg.rounds) || 0) : null;
           if (key !== mk && key !== rk && key !== fk) continue;  // not affected by this key
           if (key === rk && t.poolAssign['match:' + m.id]) continue;  // a per-match override wins
           if (key === fk && (t.poolAssign[mk] || t.poolAssign[rk])) continue;
@@ -7934,7 +7988,7 @@ async function handleAPI(req, res, url) {
       if (!canManageMaps(t, req, b)) return json(res, 403, { error: 'Map access is limited to this tournament\u2019s own organizers' });
       const bracket = String(b.bracket || '');
       const round = parseInt(b.round, 10);
-      if (['wb', 'lb', 'gf', 'sw', 'ffa', '3p'].indexOf(bracket) < 0 || !(round >= 1 && round <= 30)) return bad(res, 'Bad round');
+      if (['wb', 'lb', 'gf', 'sw', 'ffa', '3p', 'dc'].indexOf(bracket) < 0 || !(round >= 1 && round <= 30)) return bad(res, 'Bad round');
       // maps are now map-DB IDs; keep only ids that exist in the database
       let ids = Array.isArray(b.maps) ? b.maps.filter(id => mapById(t, id)) : [];
       ids = ids.slice(0, 9);
@@ -9118,14 +9172,28 @@ async function handleAPI(req, res, url) {
             (x.team1 === m.team1 || x.team1 === m.team2 || x.team2 === m.team1 || x.team2 === m.team2));
           // the final of this match's own division: another division's final has nothing to do with it
           const gf = t.matches.find(x => x.bracket === 'gf' && (x.division || 0) === (m.division || 0));
-          if (later || (gf && (gf.status === 'live' || gf.status === 'done'))) {
+          if (later || (gf && swissMatchStarted(gf))) {
             return bad(res, 'Later matches already played — cannot correct');
+          }
+          // Deciders for the final (decision 80) are drawn from the whole table: once one has started,
+          // the table is history. Until then a correction draws them (and the final) again if needed.
+          if (t.matches.some(x => x.bracket === 'dc' && (x.division || 0) === (m.division || 0) && swissMatchStarted(x))) {
+            return bad(res, 'The deciders for the final have already started, so the Swiss results can no longer be corrected');
           }
           if (playoffsMade(t)) {
             // Once the playoffs are being played the Swiss stage is history, the same rule as for
             // a Swiss round with later rounds played on top of it.
             if (playoffsLocked(t)) return bad(res, 'The playoffs have already started, so Swiss results can no longer be corrected');
             playoffsFrom = playoffSig(t);
+          }
+          m.status = 'ready'; m.winner = null; m.loser = null;
+        } else if (m.bracket === 'dc') {
+          // A decider for the Swiss final (decision 80): the deciders after it and the final are drawn
+          // from its result, so it can be corrected until one of them has started; they are drawn
+          // again from the corrected result.
+          const div = m.division || 0;
+          if (t.matches.some(x => x !== m && (x.division || 0) === div && ((x.bracket === 'dc' && x.round > m.round) || x.bracket === 'gf') && swissMatchStarted(x))) {
+            return bad(res, 'Later matches already played \u2014 cannot correct');
           }
           m.status = 'ready'; m.winner = null; m.loser = null;
         } else {
@@ -9198,6 +9266,9 @@ async function handleAPI(req, res, url) {
       } else {
         m.score1 = s1; m.score2 = s2;
         m.status = 'live';
+        // A Swiss result or decider corrected to a score that decides nothing yet: the deciders and
+        // final drawn from it that have not started go until it is decided again (decision 80).
+        if (m.bracket === 'sw' || m.bracket === 'dc') swissFinishIfDone(t);
         PRED.stampLocks(t, PRED_CTX);
       }
       settlePlayoffsAfterCorrection(t, playoffsFrom);

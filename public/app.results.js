@@ -340,6 +340,12 @@ function swissStandingsHTML(title) {
   const note = [];
   if (cuts.on) note.push(swissCutLabel(T));
   if (s2) note.push('top ' + s2.cutTo + ' go through to the playoff bracket');
+  // A final after the Swiss (decision 80): who plays deciders for a place in it, or the rule while
+  // nobody does yet.
+  // (a final drawn before deciders existed - no fromTable - was simply the top two)
+  const dec = swissDecidersHere();
+  if (dec && dec.note) note.push(dec.note.replace(/\.$/, ''));
+  else if (T.cfg && T.cfg.final && !s2 && !(T.matches || []).some(m => m.bracket === 'gf' && !m.fromTable)) note.push('the top two play the final; teams level on record for a place in it play deciders for it');
   // The 'beaten' tiebreak is invisible unless its numbers are on the table.
   const byBeaten = T.tiebreak === 'beaten';
   const sbOf = id => (T.swissSB && T.swissSB[id] != null) ? T.swissSB[id] : 0;

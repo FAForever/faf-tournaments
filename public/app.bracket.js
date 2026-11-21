@@ -71,7 +71,9 @@ function mapsLine(bracket, round, el, bo) {
     const pools = T.mapPools || [];
     const pool = assigned ? pools.find(p => p.id === assigned) : null;
     // A 3rd place match with no pool of its own plays the semi-finals' pool (lib/match poolForMatch).
-    const semiId = (!pool && bracket === '3p') ? (T.poolAssign || {})['wb:' + (round - 1)] : null;
+    // A decider for a Swiss final with none of its own plays the last Swiss round's (decision 80).
+    const semiId = (!pool && bracket === '3p') ? (T.poolAssign || {})['wb:' + (round - 1)]
+      : (!pool && bracket === 'dc') ? (T.poolAssign || {})['sw:' + ((T.cfg && T.cfg.rounds) || 0)] : null;
     const semiPool = semiId ? pools.find(p => p.id === semiId) : null;
     const fallback = (!pool && !semiPool && pools.length) ? pools[0] : null;
     const shown = pool || semiPool || fallback;
@@ -88,7 +90,9 @@ function mapsLine(bracket, round, el, bo) {
     }
     div.innerHTML = '<div class="mapblock-head"><span>MAP POOL</span>' + (admin ? '<a href="#">change</a>' : '') + '</div>' +
       (shown
-        ? '<div class="maprow"><span>' + esc(shown.name) + (pool ? '' : semiPool
+        ? '<div class="maprow"><span>' + esc(shown.name) + (pool ? '' : (semiPool && bracket === 'dc')
+            ? ' <span class="muted" title="No pool is assigned to the deciders, so they are played on the last Swiss round\u2019s pool. Click change to pin one.">(as the last round)</span>'
+            : semiPool
             ? ' <span class="muted" title="No pool is assigned to the 3rd place match, so it is played on the semi-finals\u2019 pool. Click change to pin one.">(as the semi-finals)</span>'
             : ' <span class="muted" title="No pool is assigned to this round, so the first pool is being used. Click change to pin one.">(default)</span>') + '</span></div>' + sub
         : '<div class="maprow muted">no pools yet \u2014 add them on the Maps tab</div>');
@@ -168,6 +172,7 @@ function pickPoolForRound(bracket, round) {
 function projectedBoFor(bracket, round) {
   const plan = T.plan || {};
   if (bracket === 'gf') return plan.gf || 5;
+  if (bracket === 'dc') return (T.cfg && T.cfg.bo) || plan.bo || 1;
   const n = projectedTeamCount();
   const size = Math.max(2, Math.pow(2, Math.ceil(Math.log2(Math.max(n, 2)))));
   const R = Math.round(Math.log2(size));
@@ -190,7 +195,7 @@ function editMaps(bracket, round, bo) {
   const count = Math.max(maxBo, existing.length, 1);
   const db = (T.mapDb || []);
   if (db.length === 0) {
-    modal(`<h3>Maps — ${esc(bracket === 'gf' ? 'Grand final' : bracket === '3p' ? '3rd place match' : bracket.toUpperCase() + ' round ' + round)}</h3>
+    modal(`<h3>Maps \u2014 ${esc(bracket === 'gf' ? 'Grand final' : bracket === '3p' ? '3rd place match' : bracket === 'dc' ? 'Deciders for the final' : bracket.toUpperCase() + ' round ' + round)}</h3>
       <p class="muted small">No maps in the database yet. Add maps on the <strong>Maps</strong> tab first, then assign them here.</p>
       <div class="actions"><button class="btn ghost" id="mCancel">Close</button></div>`, root => {
       root.querySelector('#mCancel').onclick = closeModal;
@@ -203,7 +208,7 @@ function editMaps(bracket, round, bo) {
     selects.push(`<label style="display:block;margin-bottom:7px">Game ${i + 1} <select class="mapSel" style="width:100%">${opt(existing[i] || '')}</select></label>`);
   }
   modal(`
-    <h3>Maps — ${esc(bracket === 'gf' ? 'Grand final' : bracket === '3p' ? '3rd place match' : bracket.toUpperCase() + ' round ' + round)}</h3>
+    <h3>Maps \u2014 ${esc(bracket === 'gf' ? 'Grand final' : bracket === '3p' ? '3rd place match' : bracket === 'dc' ? 'Deciders for the final' : bracket.toUpperCase() + ' round ' + round)}</h3>
     <p class="muted small">Pick a map from the database for each game of the series (Bo${maxBo}). ${T.veto && T.veto.enabled ? 'Note: if map vetoes are enabled, captains pick the maps per match — this round pool is a fallback.' : 'Everyone in this round plays these maps.'}</p>
     ${selects.join('')}
     <div class="actions">
@@ -241,6 +246,11 @@ function mLabel(m) {
   if (m.bracket === 'gf') return T.bracketType === 'swiss' ? 'FINAL' : 'GRAND FINAL';
   if (m.bracket === '3p') return '3RD PLACE';
   if (m.bracket === 'sw') return 'R' + m.round + ' M' + (m.index + 1);
+  if (m.bracket === 'dc') {
+    // a decider for the Swiss final (decision 80): "DECIDER", "DECIDER 2", "DECIDER M2"
+    const several = (T.matches || []).filter(x => x.bracket === 'dc' && x.round === m.round && (x.division || 0) === (m.division || 0)).length > 1;
+    return 'DECIDER' + (m.round > 1 ? ' ' + m.round : '') + (several ? ' M' + (m.index + 1) : '');
+  }
   if (m.bracket === 'ffa') return 'R' + m.round + ' LOBBY ' + (m.index + 1);
   const p = m.bracket === 'lb' ? 'LB ' : (T.bracketType === 'double' ? 'WB ' : '');
   return p + 'R' + m.round + ' M' + (m.index + 1);
@@ -896,6 +906,7 @@ function roundKeyLabel(bracket, round, division) {
   round = parseInt(round, 10);
   if (bracket === 'gf') return 'Grand final';
   if (bracket === '3p') return '3rd place match';
+  if (bracket === 'dc') return 'Deciders for the final';
   if (bracket === 'sw') return 'Swiss round ' + round;
   if (bracket === 'ffa') return 'FFA round ' + round;
   // deepest round in this bracket - from real matches, or projected during signups
@@ -3146,14 +3157,18 @@ function swissGridModel() {
   }
   for (const b of Object.values(boxes)) { b.teams.sort((x, y) => rank(x) - rank(y)); col(b.w + b.l).results.push(b); }
   // after the Swiss: who went on to the final or the playoffs (a stage with set rounds marks them)
+  // A decider for the final (decision 80) is not the final: its teams are through once they win
+  // it and the final has them. A better record than the deciders' is through already.
   const through = new Set();
+  const deciders = swissDecidersHere();
   if (finished) {
     for (const m of (T.matches || [])) {
-      if (m.bracket === 'sw' || m.bracket === 'ffa') continue;
+      if (m.bracket === 'sw' || m.bracket === 'ffa' || m.bracket === 'dc') continue;
       for (const id of [m.team1, m.team2]) if (id && id !== 'BYE') through.add(id);
     }
+    if (deciders) for (const id of (deciders.above || [])) through.add(id);
   }
-  return { cols: Object.values(cols).sort((a, b) => a.c - b.c), hiddenFrom, through, finished, cuts };
+  return { cols: Object.values(cols).sort((a, b) => a.c - b.c), hiddenFrom, through, finished, cuts, deciders };
 }
 // One match in the grid: two lines, the winner in green with the score, the rest on its details
 // popup (players, veto, chat, replays, report or correct). Streamer mode hides the result, as on
@@ -3243,9 +3258,34 @@ function drawSwissGrid(el) {
     colEl.appendChild(body);
     inner.appendChild(colEl);
   }
+  // Deciders for the final (decision 80): a column after the last round, one box per decider round.
+  // Not while streamer mode hides a result: who is level would give it away.
+  const dcs = (T.matches || []).filter(m => m.bracket === 'dc');
+  if (dcs.length && !model.hiddenFrom) {
+    const colEl = document.createElement('div');
+    colEl.className = 'swcol swcol-dc';
+    colEl.dataset.col = 'dc';
+    colEl.innerHTML = '<div class="bcol-title swcol-title">Deciders</div>';
+    const body = document.createElement('div');
+    body.className = 'swcol-body';
+    const rounds = Array.from(new Set(dcs.map(m => m.round))).sort((a, b) => a - b);
+    for (const r of rounds) {
+      const box = document.createElement('div');
+      box.className = 'swgroup';
+      box.dataset.rec = 'dc' + r;
+      const bos = Array.from(new Set(dcs.filter(m => m.round === r).map(m => parseInt(m.bo, 10)).filter(b => b > 0))).sort((a, b) => a - b);
+      box.innerHTML = '<div class="swgroup-head"><span class="swrec">' + esc(r > 1 ? 'Decider ' + r : 'Decider') + '</span>'
+        + (bos.length ? '<span class="swbo">' + bos.map(b => 'Bo' + b).join(' / ') + '</span>' : '') + '</div>';
+      for (const m of dcs.filter(x => x.round === r).sort((a, b) => (a.index || 0) - (b.index || 0))) box.insertAdjacentHTML('beforeend', swissGridMatchHTML(m));
+      body.appendChild(box);
+    }
+    colEl.appendChild(body);
+    inner.appendChild(colEl);
+  }
   wrap.appendChild(inner);
   sec.appendChild(wrap);
   const notes = [];
+  if (model.deciders && model.deciders.note && !model.hiddenFrom) notes.push(model.deciders.note);
   if (model.through.size) notes.push('Green: through to ' + (T.stage2 ? 'the playoffs' : 'the final') + '.');
   if (model.hiddenFrom) notes.push('Streamer mode: later rounds show once the results of round ' + model.hiddenFrom + ' are revealed.');
   if (notes.length) sec.insertAdjacentHTML('beforeend', '<p class="muted small" style="margin:6px 0 0">' + esc(notes.join(' ')) + '</p>');
@@ -3305,6 +3345,23 @@ function drawSwissRounds(el) {
       q.appendChild(d);
     }
     el.appendChild(sec);
+  }
+  // Deciders for the final (decision 80): under the final, above the rounds - who is level and how
+  // it is settled, their maps, the matches in playing order.
+  const dcs = T.matches.filter(m => m.bracket === 'dc');
+  if (dcs.length) {
+    const info = swissDecidersHere();
+    const sec = document.createElement('div');
+    sec.className = 'panel section swdeciders';
+    sec.innerHTML = '<h2>Deciders <span class="muted small" style="font-weight:400">for the final</span></h2>'
+      + (info && info.note ? '<p class="muted small" style="margin:2px 0 0">' + esc(info.note) + '</p>' : '');
+    mapsLine('dc', 1, sec);
+    const q = document.createElement('div');
+    q.className = 'queue';
+    q.style.marginTop = '10px';
+    sec.appendChild(q);
+    fillQueue(q, dcs.slice().sort((a, b) => (a.round - b.round) || ((a.index || 0) - (b.index || 0))), true);
+    el.prepend(sec);
   }
   const gf = T.matches.find(m => m.bracket === 'gf');
   if (gf) {
