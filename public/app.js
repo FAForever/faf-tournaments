@@ -294,6 +294,12 @@ function playerName(id) {
 }
 
 function mapsFor(bracket, round) {
+  // Every decider for a Swiss final plays one set of maps, and with none of its own the last
+  // round's (decision 80; lib/match poolRoundKey / poolForMatch).
+  if (bracket === 'dc') {
+    const own = (T.maps && T.maps['dc:1']) || [];
+    return own.length ? own : ((T.maps && T.maps['sw:' + ((T.cfg && T.cfg.rounds) || 0)]) || []);
+  }
   const own = (T.maps && T.maps[bracket + ':' + round]) || [];
   // A 3rd place match with no maps of its own is played on the semi-finals' maps.
   if (bracket === '3p' && !own.length) return (T.maps && T.maps['wb:' + (round - 1)]) || [];
@@ -458,6 +464,7 @@ function roundLabelCore(m) {
   if (m.bracket === 'gf') return T.bracketType === 'swiss' ? 'FINAL' : 'GRAND FINAL';
   if (m.bracket === '3p') return '3RD PLACE MATCH';
   if (m.bracket === 'sw') return 'ROUND ' + m.round;
+  if (m.bracket === 'dc') return 'DECIDER' + (m.round > 1 ? ' ' + m.round : '');
   if (m.bracket === 'ffa') {
     const maxR = Math.max.apply(null, T.matches.map(x => x.round));
     const cnt = T.matches.filter(x => x.bracket === 'ffa' && x.round === m.round).length;
@@ -493,6 +500,7 @@ function colLabel(bracket, r, totalRounds) {
     return 'LB ROUND ' + r;
   }
   if (bracket === '3p') return '3RD PLACE';
+  if (bracket === 'dc') return 'DECIDER' + (r > 1 ? ' ' + r : '');
   return 'ROUND ' + r;
 }
 
@@ -1156,6 +1164,7 @@ function matchChrono(m) {
   if (b === 'sw' || b === 'ffa') return r;
   const base = (T && T.bracketType === 'swiss') ? 10000 : 0;
   if (b === 'gf') return base + 9999;
+  if (b === 'dc') return base + 9000 + r;   // deciders for a Swiss final: after the rounds, before the final
   const off = m.division ? divisionRoundOffset(m.division) : 0;
   const wbAt = x => (x <= 1 ? 0.5 : 2 * x - 2);
   if (b === 'lb') return base + r + 2 * off + 0.1;
@@ -1363,6 +1372,15 @@ function swissTable(t) {
   }
   return Object.values(S).sort((a, b) => b.w - a.w || a.l - b.l || b.gd - a.gd || teamSeed(a.id) - teamSeed(b.id));
 }
+// Who plays (or played) deciders for the final of the Swiss on screen - with divisions the one
+// T is narrowed to (withDivisionT) - and the sentence that says why (decision 80). Null if nobody.
+function swissDecidersHere(t) {
+  t = t || T;
+  const list = (t && t.swissDeciders) || [];
+  if (!list.length) return null;
+  const d = divisionsOnT(t) ? (((t.teams || [])[0] || {}).division || 0) : 0;
+  return list.find(x => (x.division || 0) === d) || null;
+}
 // How equal Swiss records are ordered, in words. One sentence, used wherever it is explained.
 function swissTiebreakText(mode) {
   return mode === 'beaten'
@@ -1395,6 +1413,11 @@ function swissRecordsBefore(round, t) {
 // is the normal case, and "2-1 vs 1-2" when an odd group floated its lowest player down into the
 // next one. Null for anything that is not a head-to-head Swiss match.
 function swissMatchRecord(m, t) {
+  // a decider for the final is between teams level on their final record (decision 80)
+  if (m && m.bracket === 'dc' && m.team1 && m.team2) {
+    const a = swissRecordsBefore(1e9, t)[m.team1];
+    return a ? a.w + '-' + a.l : null;
+  }
   if (!m || m.bracket !== 'sw' || !m.round || m.round < 2) return null;
   if (!m.team1 || !m.team2 || m.team1 === 'BYE' || m.team2 === 'BYE') return null;
   const before = swissRecordsBefore(m.round, t);
