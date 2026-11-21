@@ -205,6 +205,9 @@ input[type=checkbox] { accent-color: var(--amber); width: 15px; height: 15px; }
 .qwin { color: var(--green); }
 .qrec { font-family: var(--mono); font-size: 11px; color: var(--muted); border: 1px solid var(--line-solid); border-radius: 3px; padding: 1px 7px; white-space: nowrap; }
 .qitem.done .qrec { opacity: .8; }
+/* two who already played each other in a Swiss (decision 81) */
+.qrec.qrematch { color: var(--red); border-color: #E2564A88; }
+.qitem.done .qrec.qrematch { opacity: 1; }
 .livechip { font-family: var(--mono); font-size: 10px; color: var(--blue); border: 1px solid #5c9ee855; border-radius: 3px; padding: 1px 7px; letter-spacing: 1px; }
 .livechip::before { content: '● '; animation: pulse 1.6s infinite; }
 
@@ -2061,6 +2064,8 @@ label.cal-toggle {
 .swrow.winner .swscore { color: var(--green); }
 .swlive { position: absolute; top: 3px; right: 30px; font-family: var(--mono); font-size: 9.5px; font-weight: 700; color: var(--blue); letter-spacing: 1px; }
 .swmatch.notplayed { opacity: .4; border-color: var(--line-solid); }
+.swmatch.rematch { border-color: var(--red); }
+.swrematch-note .btn { margin-left: 6px; }
 .swmatch.notplayed::after {
   content: 'not played'; position: absolute; right: 8px; bottom: 3px;
   font-family: var(--mono); font-size: 9px; letter-spacing: .5px; color: var(--muted); text-transform: uppercase;

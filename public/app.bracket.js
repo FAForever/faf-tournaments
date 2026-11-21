@@ -3096,6 +3096,126 @@ function drawSwissRound1Editor(el) {
   };
 }
 
+// ---- pairing the latest Swiss round again (decision 81) ----
+// "There should NEVER be rematches in swiss!" An organizer can pair the teams of the latest round's
+// matches nobody has started, and its bye, again: by hand, or by the draw (which never repeats a
+// matchup). The server checks it all again (lib/swiss swissCheckRound).
+function swissMatchUntouchedHere(m) {
+  if (m.status === 'done' || m.status === 'live' || m.pendingReport || (Array.isArray(m.games) && m.games.length)) return false;
+  if (m.veto && ((m.veto.stepIndex || 0) > 0 || (m.veto.banned || []).length || (m.veto.picks || []).length)) return false;
+  if (m.fveto && m.fveto.games && Object.values(m.fveto.games).some(g => g && (g.t1Done || g.t2Done))) return false;
+  return true;
+}
+// What the latest round of division d (0 without divisions) leaves to pair again, or null.
+function swissRoundEditState(d) {
+  if (!viewerIsOrganizer() || T.status !== 'running' || T.bracketType !== 'swiss' || T.imported || (T.cfg && T.cfg.fast)) return null;
+  const ms = (T.matches || []).filter(m => m.bracket === 'sw' && (m.division || 0) === d);
+  const r = ms.reduce((x, m) => Math.max(x, m.round || 0), 0);
+  if (r < 2) return null;
+  const inRound = ms.filter(m => m.round === r);
+  const bye = inRound.find(m => m.status === 'bye') || null;
+  const open = inRound.filter(m => m.status !== 'bye' && swissMatchUntouchedHere(m));
+  if (!open.length) return null;
+  const keep = inRound.filter(m => m !== bye && open.indexOf(m) < 0);
+  const ids = open.flatMap(m => [m.team1, m.team2]).concat(bye ? [bye.team1] : []);
+  return { d, r, open, bye, keep, ids };
+}
+// The rematches in the latest round of division d: [{ m, round }].
+function swissRoundRematches(d) {
+  const ms = (T.matches || []).filter(m => m.bracket === 'sw' && (m.division || 0) === d);
+  const r = ms.reduce((x, m) => Math.max(x, m.round || 0), 0);
+  return ms.filter(m => m.round === r).map(m => ({ m, round: swissRematchRound(m) })).filter(x => x.round);
+}
+function openRoundEditor(d, r) {
+  const st = swissRoundEditState(d);
+  if (!st || st.r !== r) return toast('Round ' + r + ' can no longer be changed', true);
+  const nm = id => teamName(id);
+  // the records going into the round: the bye being moved is not a win yet
+  const tbl = swissRecordsBefore(r);
+  const recOf = id => (tbl[id] ? tbl[id].w + '-' + tbl[id].l : '');
+  // the teams, best first, with their record so far
+  const order = Array.isArray(T.swissOrder) ? T.swissOrder : [];
+  const ids = st.ids.slice().sort((a, b) => (order.indexOf(a) < 0 ? 999 : order.indexOf(a)) - (order.indexOf(b) < 0 ? 999 : order.indexOf(b)));
+  const opts = sel => ids.map(id => '<option value="' + esc(id) + '"' + (id === sel ? ' selected' : '') + '>' + esc(nm(id) + (recOf(id) ? ' (' + recOf(id) + ')' : '')) + '</option>').join('');
+  const where = d ? divisionNameOf(d) + ' round ' : 'Round ';
+  const met = {};
+  for (const m of (T.matches || [])) {
+    if (m.bracket !== 'sw' || m.round >= r || (m.division || 0) !== d || !m.team1 || !m.team2 || m.team2 === 'BYE') continue;
+    met[m.team1 + '|' + m.team2] = met[m.team2 + '|' + m.team1] = m.round;
+  }
+  const hadBye = {};
+  for (const m of (T.matches || [])) if (m.bracket === 'sw' && m.round < r && (m.division || 0) === d && m.status === 'bye') hadBye[m.team1] = m.round;
+  const rows = st.open.map((m, i) => `<div class="r1row"><span class="r1n mono">${i + 1}</span>
+      <select data-rca="${i}">${opts(m.team1)}</select><span class="muted small">vs</span><select data-rcb="${i}">${opts(m.team2)}</select></div>`).join('');
+  modal(`<h3>${esc(where + r)} matchups</h3>
+    <p class="muted small">The matches nobody has started yet${st.bye ? ', and the bye,' : ''} can be paired again. Two teams who already played each other can never meet again.${st.keep.length ? ' Started, so staying as they are: ' + esc(st.keep.map(m => nm(m.team1) + ' vs ' + nm(m.team2)).join(', ')) + '.' : ''}</p>
+    <div class="r1rows rcrows">${rows}${st.bye ? `<div class="r1row"><span class="r1n mono">BYE</span><select data-rcbye="1">${opts(st.bye.team1)}</select><span class="muted small">a free win</span></div>` : ''}</div>
+    <div id="rcWarn" class="small" style="margin-top:8px"></div>
+    <div class="actions" style="flex-wrap:wrap">
+      <button class="btn ghost" id="rcDraw" title="Down the table going into this round, never a rematch">Draw without rematches</button>
+      <button class="btn ghost" id="rcCancel">Cancel</button>
+      <button class="btn primary" id="rcSave">Save matchups</button>
+    </div>`, root => {
+    const read = () => ({
+      pairs: st.open.map((m, i) => [root.querySelector('[data-rca="' + i + '"]').value, root.querySelector('[data-rcb="' + i + '"]').value]),
+      bye: st.bye ? root.querySelector('[data-rcbye]').value : null
+    });
+    // the same rules the server applies, said before anything is sent
+    const check = () => {
+      const x = read(), seen = {}, twice = [], again = [];
+      for (const id of x.pairs.flat().concat(x.bye ? [x.bye] : [])) { if (seen[id]) twice.push(nm(id)); seen[id] = 1; }
+      for (const [a, b] of x.pairs) if (a !== b && met[a + '|' + b]) again.push(nm(a) + ' vs ' + nm(b) + ' (round ' + met[a + '|' + b] + ')');
+      const none = ids.filter(id => !hadBye[id]);
+      const w = root.querySelector('#rcWarn');
+      let msg = '';
+      if (twice.length) msg = 'Twice in the list: ' + [...new Set(twice)].join(', ');
+      else if (x.pairs.some(([a, b]) => a === b)) msg = 'A team cannot play itself';
+      else if (again.length) msg = 'Already played each other: ' + again.join(', ');
+      else if (x.bye && hadBye[x.bye] && none.length) msg = nm(x.bye) + ' already had a bye (round ' + hadBye[x.bye] + '). It goes to a team that has not had one: ' + none.map(nm).join(', ');
+      w.innerHTML = msg ? '<span class="warn">' + esc(msg) + '</span>' : '<span class="muted">No rematch.</span>';
+      return !msg;
+    };
+    root.querySelectorAll('select').forEach(s => s.onchange = check);
+    check();
+    root.querySelector('#rcCancel').onclick = closeModal;
+    root.querySelector('#rcDraw').onclick = async () => {
+      try {
+        const res = await api('/api/t/' + T.id + '/swiss_round_set', { suggest: 1, round: r, division: d, admin: adminToken() });
+        (res.pairs || []).forEach((p, i) => {
+          const a = root.querySelector('[data-rca="' + i + '"]'), b = root.querySelector('[data-rcb="' + i + '"]');
+          if (a && b) { a.value = p[0]; b.value = p[1]; }
+        });
+        const by = root.querySelector('[data-rcbye]');
+        if (by && res.bye) by.value = res.bye;
+        check();
+      } catch (e) { toast(e.message, true); }
+    };
+    root.querySelector('#rcSave').onclick = async () => {
+      if (!check()) return toast('Fix the matchups first', true);
+      const x = read();
+      try {
+        await api('/api/t/' + T.id + '/swiss_round_set', { round: r, division: d, pairs: x.pairs, bye: x.bye, admin: adminToken() });
+        closeModal();
+        toast(where + r + ' matchups changed');
+        await refresh();
+      } catch (e) { toast(e.message, true); }
+    };
+  });
+}
+// The latest round's rematch, said where the round is shown, with the way to fix it for an organizer.
+function swissRematchNoteHTML(d) {
+  const list = swissRoundRematches(d);
+  if (!list.length) return '';
+  const st = swissRoundEditState(d);
+  return '<p class="warn small swrematch-note" style="margin:6px 0 0">Rematch: ' + esc(list.map(x => teamName(x.m.team1) + ' vs ' + teamName(x.m.team2) + ' (they played in round ' + x.round + ')').join(', ')) + '.'
+    + (st ? ' <button class="btn ghost small" data-rcopen="' + d + ':' + st.r + '">Change round ' + st.r + ' matchups</button>' : '') + '</p>';
+}
+function wireRoundEditor(root) {
+  root.querySelectorAll('[data-rcopen]').forEach(b => {
+    b.onclick = e => { e.preventDefault(); const [d, r] = b.dataset.rcopen.split(':').map(x => parseInt(x, 10)); openRoundEditor(d, r); };
+  });
+}
+
 // ---- the Swiss stage as a grid (decision 64) ----
 // What organizers used to keep in a spreadsheet: one column per round, the matches grouped by the
 // record their teams brought into it (best first), and the teams that are through or out leaving
@@ -3184,8 +3304,9 @@ function swissGridMatchHTML(m) {
       + (seed ? '<span class="seedtag">' + seed + '</span>' : '') + esc(bracketLabel(tid)) + '</span><span class="swscore">' + sc + '</span></div>';
   };
   // as on the bracket: a hidden match reads as still to play, and one an early stop left unplayed is dimmed
-  const state = (masked ? 'ready' : m.status) + (neverPlayed(m, T) ? ' notplayed' : '');
-  return '<div class="swmatch ' + esc(state) + '" data-swm="' + esc(m.id) + '" role="button" tabindex="0" title="' + esc(mLabelFull(m)) + (neverPlayed(m, T) ? ' - not played' : ' - details') + '">'
+  const again = swissRematchRound(m);
+  const state = (masked ? 'ready' : m.status) + (neverPlayed(m, T) ? ' notplayed' : '') + (again ? ' rematch' : '');
+  return '<div class="swmatch ' + esc(state) + '" data-swm="' + esc(m.id) + '" role="button" tabindex="0" title="' + esc(mLabelFull(m)) + (again ? ' - a rematch: they played in round ' + again : '') + (neverPlayed(m, T) ? ' - not played' : ' - details') + '">'
     + row(m.team1, m.score1) + row(m.team2, m.score2)
     + ((!masked && m.status === 'live') ? '<span class="swlive">LIVE</span>' : '') + '</div>';
 }
@@ -3289,6 +3410,9 @@ function drawSwissGrid(el) {
   if (model.through.size) notes.push('Green: through to ' + (T.stage2 ? 'the playoffs' : 'the final') + '.');
   if (model.hiddenFrom) notes.push('Streamer mode: later rounds show once the results of round ' + model.hiddenFrom + ' are revealed.');
   if (notes.length) sec.insertAdjacentHTML('beforeend', '<p class="muted small" style="margin:6px 0 0">' + esc(notes.join(' ')) + '</p>');
+  // a rematch in the latest round, and for an organizer the way to pair it again (decision 81)
+  const rematch = swissRematchNoteHTML(swissDivisionHere());
+  if (rematch) { sec.insertAdjacentHTML('beforeend', rematch); wireRoundEditor(sec); }
   sec.querySelectorAll('.swresult-team[data-teamid], .swbye-name[data-teamid]').forEach(x => {
     x.onclick = () => showTeamPopup(x.dataset.teamid);
   });
@@ -3323,12 +3447,18 @@ function drawSwissRounds(el) {
     }
   }
 
+  // the latest round: a rematch in it said here, and an organizer can pair it again (decision 81)
+  const dHere = swissDivisionHere();
+  const edit = swissRoundEditState(dHere);
   for (let r = rounds; r >= 1; r--) {
     const sec = document.createElement('div');
     sec.className = 'panel section';
     const cuts = swissCutCfg(T);
+    const latest = r === rounds;
     sec.innerHTML = `<h2>Round <span class="h2-strong">${r}${cuts.on ? '' : ' / ' + T.cfg.rounds}</span></h2>`
-      + (r === rounds && cuts.on ? `<p class="muted small" style="margin:2px 0 0">${esc(swissCutLabel(T))}${cuts.decidingBo ? ' \u00b7 Bo' + cuts.decidingBo + ' when a win qualifies or a loss eliminates' : ''}</p>` : '');
+      + (r === rounds && cuts.on ? `<p class="muted small" style="margin:2px 0 0">${esc(swissCutLabel(T))}${cuts.decidingBo ? ' \u00b7 Bo' + cuts.decidingBo + ' when a win qualifies or a loss eliminates' : ''}</p>` : '')
+      + (latest ? (swissRematchNoteHTML(dHere) || (edit && edit.r === r ? '<p class="muted small" style="margin:6px 0 0"><button class="btn ghost small" data-rcopen="' + dHere + ':' + r + '">Change matchups</button></p>' : '')) : '');
+    if (latest) wireRoundEditor(sec);
     mapsLine('sw', r, sec);
     const q = document.createElement('div');
     q.className = 'queue';

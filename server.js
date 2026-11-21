@@ -40,7 +40,8 @@ const { swissPairRound, swissAfterReport, swissStandings,
         stageTwoCfg, stageTwoField, stageTwoBuild, swissStageDone, swissFinishIfDone,
         swissTiebreakMode, swissTiebreakValues,
         swissRound1Open, swissSetRound1, swissShuffleRound1,
-        swissDivisionChampion, swissDeciderInfo, swissMatchStarted } = require('./lib/swiss');
+        swissDivisionChampion, swissDeciderInfo, swissMatchStarted,
+        swissDivisionView, swissSetRound, swissSuggestRound } = require('./lib/swiss');
 const { ffaCreateRound, ffaAfterReport, ffaRank } = require('./lib/ffa');
 // Team formation and map lookups.
 const { buildDraft, finishDraftIfDone, finalizeOpenTeams, formTeamsGrouped,
@@ -52,12 +53,14 @@ const CAPVOTE = require('./lib/capvote');
 // Wire the Swiss progression hook into the match core (see lib/match.js). Must come
 // after the swiss require above, since swissAfterReport is now imported, not hoisted.
 // A result in a fast-pairing Swiss first takes back a repeat the old fast pairing made (decision 62).
-// Deciders for a Swiss final drawn by this result go in the log, with who plays them and why (decision 80).
+// Deciders for a Swiss final drawn by this result go in the log, with who plays them and why (decision 80),
+// and so does a rematch in a round it drew (only when no round without one exists, decision 81).
 require('./lib/match').setHooks({ swissAfterReport: t => {
   dropFastRepeats(t);
-  const had = new Set((t.matches || []).filter(m => m.bracket === 'dc').map(m => m.id));
+  const had = new Set((t.matches || []).filter(m => m.bracket === 'dc' || m.bracket === 'sw').map(m => m.id));
   swissAfterReport(t);
   logNewDeciders(t, had);
+  logForcedRematches(t, had);
 } });
 require('./lib/swiss').setSwissHooks({ openStagePicks, removedMatches: tidyRemovedMatches });
 require('./lib/match').setHooks({ afterFinalize: (t) => { autoStopIfReached(t); PRED.stampLocks(t, PRED_CTX); } });
@@ -1170,6 +1173,23 @@ function logNewDeciders(t, had) {
     const d = f.division || 0;
     if (!(t.matches || []).some(m => m.bracket === 'dc' && m.round === 1 && (m.division || 0) === d && !had.has(m.id))) continue;
     tpush(t, 'System', (d && divisionsOn(t) ? 'The ' + divisionName(t, d) + ' Swiss is over. ' : 'The Swiss stage is over. ') + deciderNote(t, f));
+  }
+}
+// After a result: a round drawn with a rematch says so in the log. The draw only ever does that when
+// no round without one exists for those teams (decision 81), so the format asked for more rounds than
+// the field has opponents for.
+function logForcedRematches(t, had) {
+  if (!t.cfg || t.cfg.fast) return;   // fast pairing marks its own (repeat), at the very end of the stage
+  const met = {};
+  for (const m of (t.matches || [])) {
+    if (m.bracket !== 'sw' || !had.has(m.id) || !m.team1 || !m.team2 || m.team2 === 'BYE') continue;
+    met[(m.division || 0) + '|' + m.team1 + '|' + m.team2] = met[(m.division || 0) + '|' + m.team2 + '|' + m.team1] = m.round;
+  }
+  for (const m of (t.matches || [])) {
+    if (m.bracket !== 'sw' || had.has(m.id) || !m.team1 || !m.team2 || m.team2 === 'BYE') continue;
+    const k = met[(m.division || 0) + '|' + m.team1 + '|' + m.team2];
+    if (k) tpush(t, 'System', (m.division && divisionsOn(t) ? divisionName(t, m.division) + ' r' : 'R') + 'ound ' + m.round + ' has a rematch, '
+      + tTeamName(t, m.team1) + ' vs ' + tTeamName(t, m.team2) + ' (they played in round ' + k + '): no round without one exists for these teams.');
   }
 }
 // Opening the tournament: take such repeats back and pair whoever is free again.
@@ -8544,6 +8564,38 @@ async function handleAPI(req, res, url) {
         + drawn.map(m => nm(m.team1) + ' vs ' + nm(m.team2)).join(' \u00b7 ') + '.');
       saveDB();
       return json(res, 200, { ok: true, pairs: drawn.map(m => [m.team1, m.team2]) });
+    }
+
+    // Pair the latest Swiss round again (decision 81): the teams of its matches nobody has started,
+    // and the bye, by hand (`pairs`, `bye`) or by the draw (`suggest`: answers the draw, changes
+    // nothing). Never a rematch, never a second bye while a team in it has not had one.
+    if (sub === 'swiss_round_set') {
+      if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
+      if (t.bracketType !== 'swiss') return bad(res, 'This only applies to a Swiss stage');
+      if (t.status !== 'running') return bad(res, 'The Swiss stage is not being played');
+      const nDiv = divisionsOn(t) ? (parseInt(t.divisions, 10) || 0) : 0;
+      const d = nDiv ? parseInt(b.division, 10) : 0;
+      if (nDiv && !(d >= 1 && d <= nDiv)) return bad(res, 'Which division?');
+      const v = nDiv ? swissDivisionView(t, d) : t;
+      const r = parseInt(b.round, 10);
+      if (b.suggest) {
+        const sg = swissSuggestRound(v, r);
+        if (sg.err) return bad(res, sg.err);
+        return json(res, 200, { ok: true, pairs: sg.pairs, bye: sg.bye });
+      }
+      const bye = b.bye ? String(b.bye) : null;
+      const pairs = Array.isArray(b.pairs) ? b.pairs.map(p => Array.isArray(p) ? p.map(String) : p) : null;
+      const removed = [];
+      const err = swissSetRound(v, r, pairs, bye, removed);
+      if (err) return bad(res, err);
+      tidyRemovedMatches(t, removed);
+      const nm = id => tTeamName(t, id);
+      const where = nDiv ? divisionName(t, d) + ' ' : '';
+      const drawn = v.matches.filter(m => m.bracket === 'sw' && m.round === r && m.team2 !== 'BYE').sort((x, y) => x.index - y.index);
+      tlog(t, req, b.admin, 'changed the ' + where + 'round ' + r + ' matchups: ' + drawn.map(m => nm(m.team1) + ' vs ' + nm(m.team2)).join(', ')
+        + (bye ? ', bye ' + nm(bye) : ''));
+      saveDB();
+      return json(res, 200, { ok: true, pairs: drawn.map(m => [m.team1, m.team2]), bye });
     }
 
     // Set (or clear) the survivor count this tournament stops at. Deliberately NOT part of

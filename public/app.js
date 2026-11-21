@@ -1372,14 +1372,27 @@ function swissTable(t) {
   }
   return Object.values(S).sort((a, b) => b.w - a.w || a.l - b.l || b.gd - a.gd || teamSeed(a.id) - teamSeed(b.id));
 }
+// The division of the Swiss on screen: the one T is narrowed to (withDivisionT), 0 without divisions.
+function swissDivisionHere(t) {
+  t = t || T;
+  return divisionsOnT(t) ? (((t.teams || [])[0] || {}).division || 0) : 0;
+}
 // Who plays (or played) deciders for the final of the Swiss on screen - with divisions the one
 // T is narrowed to (withDivisionT) - and the sentence that says why (decision 80). Null if nobody.
 function swissDecidersHere(t) {
   t = t || T;
   const list = (t && t.swissDeciders) || [];
   if (!list.length) return null;
-  const d = divisionsOnT(t) ? (((t.teams || [])[0] || {}).division || 0) : 0;
+  const d = swissDivisionHere(t);
   return list.find(x => (x.division || 0) === d) || null;
+}
+// The round in which the two teams of a Swiss match already played each other, or 0 (decision 81).
+function swissRematchRound(m, t) {
+  t = t || T;
+  if (!m || m.bracket !== 'sw' || !m.team1 || !m.team2 || m.team1 === 'BYE' || m.team2 === 'BYE') return 0;
+  const old = ((t && t.matches) || []).find(x => x.bracket === 'sw' && x.round < m.round && (x.division || 0) === (m.division || 0)
+    && ((x.team1 === m.team1 && x.team2 === m.team2) || (x.team1 === m.team2 && x.team2 === m.team1)));
+  return old ? old.round : 0;
 }
 // How equal Swiss records are ordered, in words. One sentence, used wherever it is explained.
 function swissTiebreakText(mode) {

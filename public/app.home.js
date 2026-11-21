@@ -2272,6 +2272,9 @@ function fillQueue(el, matches, withReport) {
     // and the standings cannot answer it anyway once the round has been played.
     const swRec = swissMatchRecord(m);
     if (swRec) inner += `<span class="qrec" title="Record both players brought into this round">${esc(swRec)}</span>`;
+    // two who already played each other (decision 81): the organizer can pair the round again
+    const again = swissRematchRound(m);
+    if (again) inner += `<span class="qrec qrematch" title="${esc('These two already played each other in round ' + again)}">REMATCH</span>`;
     if (m.bracket === 'ffa') {
       const names = m.entrants.map(id => {
         const won = m.winners && m.winners.indexOf(id) >= 0;
