@@ -241,7 +241,7 @@ function drawPlayers(el) {
           ${playerCheckinHTML(T.players.find(pl => pl.id === T.viewer.signedUpPlayerId))}
           ${fafAuth.enabled ? (myDc
             ? '<p class="muted small">Discord: <span class="dctag">\uD83D\uDCAC ' + esc(myDc) + '</span> <a href="#" id="sDcEdit">change</a></p>'
-            : `<div class="dc-nudge"><label>Discord handle <span class="muted small">(optional \u2014 so the organizer and your teammates can reach you)</span></label>
+            : `<div class="dc-nudge"><label>Discord handle ${T.requireDiscord ? '<span class="warn small">(this tournament needs it)</span>' : '<span class="muted small">(optional \u2014 so the organizer and your teammates can reach you)</span>'}</label>
                  <p class="muted small" style="margin:4px 0 6px">Enter your Discord <strong>username</strong> \u2014 the unique all-lowercase handle from Settings \u2192 My Account \u2014 not your display name.</p>
                  <div class="row" style="display:flex;gap:8px;flex-wrap:wrap"><input type="text" id="sDcAdd" maxlength="40" autocomplete="off" style="max-width:240px"><button class="btn small" id="sDcSave">Save</button></div></div>`) : ''}
           ${ratingCheckHTML({ small: 1 })}
@@ -259,7 +259,7 @@ function drawPlayers(el) {
               ${fafAuth.enabled ? '<p class="muted small">Signing up as <strong>' + esc(me()) + '</strong> (your FAF account).</p>' : '<label>FAF name</label><input type="text" id="sName" maxlength="30" placeholder="Your in-game name" autocomplete="off">'}
               ${ratingCalloutHTML()}
               ${(T.formation === 'premade' && T.teamSize > 1) ? '<label>Team name</label><input type="text" id="sTeam" maxlength="30" placeholder="Your team name" autocomplete="off">' : ''}
-              ${fafAuth.enabled ? '<label>Discord handle <span class="muted small">(optional \u2014 so the organizer and teammates can reach you)</span></label><p class="muted small" style="margin:4px 0 6px">Your Discord <strong>username</strong> \u2014 the unique all-lowercase handle from Settings \u2192 My Account \u2014 not your display name. Saved to your account for all tournaments.</p><input type="text" id="sDiscord" maxlength="40" autocomplete="off" value="' + esc((fafAuth.user && fafAuth.user.discord) || '') + '">' : ''}
+              ${fafAuth.enabled ? '<label>Discord handle ' + (T.requireDiscord ? '<span class="warn small">(required for this tournament)</span>' : '<span class="muted small">(optional \u2014 so the organizer and teammates can reach you)</span>') + '</label><p class="muted small" style="margin:4px 0 6px">Your Discord <strong>username</strong> \u2014 the unique all-lowercase handle from Settings \u2192 My Account \u2014 not your display name. Saved to your account for all tournaments.</p><input type="text" id="sDiscord" maxlength="40" autocomplete="off" value="' + esc((fafAuth.user && fafAuth.user.discord) || '') + '">' : ''}
               ${(T.ratingType && T.ratingType !== 'none') ? '' : '<label>Rating</label><input type="number" id="sRating" min="0" max="4000" placeholder="e.g. 1500" autocomplete="off">'}
               ${T.signupMode === 'request' && !admin ? '<p class="muted small">This tournament is <strong>request only</strong>: an organizer approves your signup before you appear in the list.</p>' : ''}
               <div class="signup-actions"><button class="btn primary" id="sGo">${T.signupMode === 'request' && !admin ? 'Request to sign up' : 'Sign up'}${fafAuth.enabled ? ' as ' + esc(me()) : ''}</button>${ratingCheckHTML()}</div>
@@ -338,6 +338,8 @@ function drawPlayers(el) {
     if (T.formation === 'draft' && T.status !== 'signup' && p.noShow && !p.teamId) {
       badge += ' <span class="idbadge late ci-badge" title="Had not checked in when the draft started, so not in it.' + (draftRunning ? ' An organizer can still put them in the player pool.' : ' They are a substitute.') + '">did not check in</span>';
     }
+    // decision 82: with a Discord name required, organizers see who has none (signed up before it was)
+    if (admin && T.requireDiscord && p.fafId && !p.discord) badge += ' <span class="idbadge late" title="This tournament asks for a Discord name and this player has none on their account (signed up before it was asked, or added by an organizer)">no Discord</span>';
     // replace button: for players currently IN a team (mid-tournament drop-out replacement)
     const canReplace = admin && p.teamId;
     tr.innerHTML = `
@@ -566,6 +568,12 @@ function drawPlayers(el) {
       body.name = name;
     }
     if (rEl && rEl.value === '') return toast('Enter your rating — it is used for balancing and seeding', true);
+    // decision 82: a tournament can ask for the Discord name; the server refuses it without one too
+    const dcNeed = document.getElementById('sDiscord');
+    if (T.requireDiscord && dcNeed && dcNeed.value.trim().length < 2) {
+      dcNeed.focus();
+      return toast('This tournament needs your Discord username to sign up', true);
+    }
     try {
       const dcEl = document.getElementById('sDiscord');
       if (dcEl) {

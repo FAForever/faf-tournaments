@@ -410,6 +410,11 @@ function audit(req, action, opts) {
   }
 }
 
+// The Discord name on a FAF account, or '' (decision 82: two characters at least, as Discord asks).
+function discordOf(fafId) {
+  const d = String(((db.profiles || {})[fafId] || {}).discord || '').trim();
+  return d.length >= 2 ? d : '';
+}
 function tTeamName(t, id) { const tm = (t.teams || []).find(x => x.id === id); return tm ? tm.name : '?'; }
 
 // ---------- per-tournament activity log (Log tab, organizers + site admin only) ----------
@@ -1899,7 +1904,7 @@ function proposalSummary(t, fid) {
     ffaCfg: t.ffaCfg || null, divisions: t.divisions || 0, divisionNames: t.divisionNames || null, stopAtAlive: t.stopAtAlive || 0,
     pickOpponents: t.pickOpponents ? 1 : 0, pickMode: t.pickMode || null, tiebreak: t.tiebreak || null, seeding: t.seeding,
     eventDate: t.eventDate || null, eventDays: (t.eventDays && t.eventDays.length) ? t.eventDays.slice() : null,
-    signupMode: t.signupMode || 'open', maxTeams: t.maxTeams || 0, minTeams: t.minTeams || 0, checkInDeadline: t.checkInDeadline || null,
+    signupMode: t.signupMode || 'open', requireDiscord: t.requireDiscord ? 1 : 0, maxTeams: t.maxTeams || 0, minTeams: t.minTeams || 0, checkInDeadline: t.checkInDeadline || null,
     ratingType: t.ratingType || 'global', minRating: t.minRating != null ? t.minRating : null, maxRating: t.maxRating != null ? t.maxRating : null,
     maxTeamRating: t.maxTeamRating != null ? t.maxTeamRating : null, ratingCap: t.ratingCap != null ? t.ratingCap : null,
     playerReporting: t.playerReporting === false ? 0 : 1,
@@ -2649,6 +2654,7 @@ function publicView(t) {
     swissR1Open: (t.bracketType === 'swiss' && t.status === 'running' && !divisionsOn(t) && swissRound1Open(t)) ? 1 : 0,
     seeding: t.seeding, ratingType: t.ratingType || 'global', ratingDate: t.ratingDate || null,
     signupMode: t.signupMode || 'open',
+    requireDiscord: t.requireDiscord ? 1 : 0,
     playerReporting: t.playerReporting === undefined ? 1 : (t.playerReporting ? 1 : 0),
     veto: t.veto || { enabled: false, mode: 'upfront' },
     plannedR1: Array.isArray(t.plannedR1) ? t.plannedR1.map(p => p.slice()) : null,
@@ -3573,6 +3579,8 @@ async function handleAPI(req, res, url) {
       ratingType: (['global', '1v1', '2v2', '3v3', '4v4', 'rc'].indexOf(b.ratingType) >= 0) ? b.ratingType : (b.ratingType === 'none' ? 'none' : 'global'),
       ratingDate: b.ratingDate ? (new Date(b.ratingDate).getTime() || null) : null,
       signupMode: (['open', 'invite', 'request'].indexOf(b.signupMode) >= 0) ? b.signupMode : 'open',
+      // players must give their Discord name to sign up (decision 82)
+      requireDiscord: b.requireDiscord ? 1 : 0,
       playerReporting: b.playerReporting === undefined ? true : !!b.playerReporting,
       invites: [],
       veto: cleanVeto(b.veto),
@@ -4568,6 +4576,13 @@ async function handleAPI(req, res, url) {
     const b = await readBody(req);
     // permissive: Discord handles are 2-32 chars (legacy Name#1234 allowed); strip HTML-dangerous chars
     const discord = String(b.discord || '').trim().replace(/[<>"'&\\]/g, '').slice(0, 40);
+    // A tournament this account is in that asks for a Discord name (decision 82) keeps it: it can be
+    // changed, not removed, until the player withdraws or the tournament is over.
+    if (discord.length < 2) {
+      const needs = Object.values(db.tournaments || {}).find(x => x && x.requireDiscord && x.status !== 'finished' && !x.archived && !x.abandoned
+        && (x.players || []).some(p => p.fafId === sess.fafId));
+      if (needs) return bad(res, needs.name + ' needs your Discord username (2 characters or more) while you are signed up there. You can change it, but not remove it.');
+    }
     if (!db.profiles[sess.fafId]) db.profiles[sess.fafId] = {};
     db.profiles[sess.fafId].discord = discord;   // empty string clears it
     db.profiles[sess.fafId].updatedAt = Date.now();
@@ -5823,6 +5838,12 @@ async function handleAPI(req, res, url) {
       // no duplicates: by FAF id if we have one, else by name
       if (fafId && t.players.some(p => p.fafId === fafId)) return bad(res, 'You are already signed up');
       if (t.players.some(p => p.name.toLowerCase() === name.toLowerCase())) return bad(res, manual ? 'That name is already signed up' : 'You are already signed up');
+      // A tournament can ask every player for their Discord name (decision 82): without one, no signup.
+      // It lives on the FAF account (/api/my/profile), so it is given once for every tournament. A name
+      // typed by an organizer (FAF login off) has no account, so no fafId, and is not held to it.
+      if (t.requireDiscord && fafId && !discordOf(fafId)) {
+        return bad(res, 'This tournament needs your Discord name to sign up. Enter your Discord username and sign up again.');
+      }
 
       let rating;
       if (t.ratingType && t.ratingType !== 'none') {
@@ -7617,7 +7638,7 @@ async function handleAPI(req, res, url) {
           if (prob) return bad(res, prob.replace(' before publishing', ''));
         }
       }
-      const touched = ['description', 'rewards', 'prizeCurrency', 'prizeAmount', 'sponsors', 'streams', 'minRating', 'maxRating', 'maxTeamRating', 'ratingCap', 'lobbyOptions', 'mods', 'signupMode', 'playerReporting', 'checkInDeadline', 'veto'].filter(k => b[k] !== undefined);
+      const touched = ['description', 'rewards', 'prizeCurrency', 'prizeAmount', 'sponsors', 'streams', 'minRating', 'maxRating', 'maxTeamRating', 'ratingCap', 'lobbyOptions', 'mods', 'signupMode', 'requireDiscord', 'playerReporting', 'checkInDeadline', 'veto'].filter(k => b[k] !== undefined);
       if (nextSched && (nextSched.dayTimesMode !== (t.dayTimesMode || null) || JSON.stringify(nextSched.dayTimes || null) !== JSON.stringify(t.dayTimes || null))) {
         touched.push(nextSched.dayTimesMode === 'perday' ? 'start time per day'
           : (nextSched.dayTimesMode === 'same' ? 'same start time every day' : 'start times per day (unanswered)'));
@@ -7660,6 +7681,7 @@ async function handleAPI(req, res, url) {
       if (b.lobbyOptions !== undefined) t.lobbyOptions = cleanName(b.lobbyOptions, 20000);
       if (b.mods !== undefined) t.mods = cleanName(b.mods, 500);
       if (b.signupMode !== undefined && ['open', 'invite', 'request'].indexOf(b.signupMode) >= 0) t.signupMode = b.signupMode;
+      if (b.requireDiscord !== undefined) t.requireDiscord = b.requireDiscord ? 1 : 0;
       if (b.playerReporting !== undefined) t.playerReporting = !!b.playerReporting;
       if (b.name !== undefined) { const nm = cleanName(b.name, 60); if (nm) t.name = nm; }
       if (nextSched) { t.dayTimesMode = nextSched.dayTimesMode; t.dayTimes = nextSched.dayTimes; }
