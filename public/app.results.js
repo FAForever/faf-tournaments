@@ -708,6 +708,8 @@ async function drawAdmin(el) {
         <option value="request"${mode === 'request' ? ' selected' : ''}>Request only - an organizer approves each signup</option>
         <option value="invite"${mode === 'invite' ? ' selected' : ''}>Invite only</option>
       </select>
+      <label style="display:block;margin-top:12px"><input type="checkbox" id="su_dc"${T.requireDiscord ? ' checked' : ''}> Players must give their Discord username to sign up</label>
+      <p class="muted small" style="margin:4px 0 0">It is saved to their FAF account for every tournament. Players who signed up before this was on stay in; the player list marks who has none.</p>
       <label style="margin-top:12px">Signups open at <span class="muted small">(before this, only organizers can add players)</span></label>
       <div style="display:flex;gap:8px"><input type="date" id="su_opdate" value="${esc(su.date)}" style="flex:1"><input type="time" id="su_optime" value="${esc(su.time)}" style="width:130px"></div>
       <label style="margin-top:12px">Signups close at <span class="muted small">(auto-closes signups; team forming &amp; picks still work. Empty = manual)</span></label>
@@ -1365,6 +1367,7 @@ async function drawAdmin(el) {
     try {
       await api('/api/t/' + T.id + '/edit_info', {
         signupMode: g('su_mode').value,
+        requireDiscord: g('su_dc').checked ? 1 : 0,
         signupOpensAt: combineDateTimeUTC(g('su_opdate'), g('su_optime')),
         signupClosesAt: combineDateTimeUTC(g('su_cldate'), g('su_cltime')),
         checkInDeadline: combineDateTimeUTC(g('su_cidate'), g('su_citime')),

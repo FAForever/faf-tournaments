@@ -716,6 +716,7 @@ async function renderHost() {
           <option value="invite">Invite only — only players you invite can sign up</option>
         </select>
 
+        <label style="display:block;margin-top:10px"><input type="checkbox" id="cRequireDiscord"> Players must give their Discord username to sign up <span class="muted small">(saved to their account; only organizers and fellow players see it)</span></label>
         <label style="display:block;margin-top:10px"><input type="checkbox" id="cPlayerReporting" checked> Allow players to submit scores <span class="muted small">(must provide replay IDs and be confirmed by the opponent; organizers can always report)</span></label>
         <label style="display:flex;align-items:center;gap:8px;margin-top:16px;cursor:pointer">
           <input type="checkbox" id="cVeto" style="width:auto"> Enable map vetoes (captains ban/pick maps before matches)
@@ -1098,7 +1099,7 @@ async function renderHost() {
       }
     }
     setv('cRatingType', t.ratingType || 'none'); setv('cRatingDate', t.ratingDate ? new Date(t.ratingDate).toISOString().slice(0, 10) : '');
-    setv('cSignupMode', t.signupMode || 'open'); setc('cPlayerReporting', t.playerReporting !== 0);
+    setv('cSignupMode', t.signupMode || 'open'); setc('cPlayerReporting', t.playerReporting !== 0); setc('cRequireDiscord', !!t.requireDiscord);
     setv('cMinRating', t.minRating != null ? t.minRating : ''); setv('cMaxRating', t.maxRating != null ? t.maxRating : '');
     setv('cMaxTeamRating', t.maxTeamRating != null ? t.maxTeamRating : ''); setv('cRatingCap', t.ratingCap != null ? t.ratingCap : '');
     setv('cMaxTeams', t.maxTeams || ''); setv('cMinTeams', t.minTeams || '');
@@ -1247,6 +1248,7 @@ async function renderHost() {
         ratingType: document.getElementById('cRatingType').value,
         ratingDate: document.getElementById('cRatingDate').value || null,
         signupMode: document.getElementById('cSignupMode').value,
+        requireDiscord: document.getElementById('cRequireDiscord').checked ? 1 : 0,
         playerReporting: document.getElementById('cPlayerReporting').checked ? 1 : 0,
         admin: siteAdmin() || undefined,
         rewards: document.getElementById('cRewards').value,
@@ -1370,6 +1372,7 @@ function maybePromptLateSignup() {
     <p>Do you want to sign up to <strong>${esc(T.name)}</strong> as a late signup?</p>
     <p class="muted small">Signups are closed, but this link lets you join${fafAuth.enabled ? ' as <strong>' + esc(me()) + '</strong>' : ''}.</p>
     ${ratingInfo}
+    ${(fafAuth.enabled && T.requireDiscord) ? '<label>Discord username <span class="warn small">(required for this tournament)</span></label><input type="text" id="lsDiscord" maxlength="40" autocomplete="off" value="' + esc((fafAuth.user && fafAuth.user.discord) || '') + '">' : ''}
     <div class="actions"><button class="btn ghost" id="lsNo">Cancel</button><button class="btn primary" id="lsYes">Sign up</button></div>`, root => {
     root.querySelector('#lsNo').onclick = closeModal;
     root.querySelector('#lsYes').onclick = async () => {
@@ -1381,7 +1384,11 @@ function maybePromptLateSignup() {
         body.rating = rating;
       }
       if (!fafAuth.enabled) { const nm = prompt('Your FAF name:'); if (!nm) return; body.name = nm; }
+      // decision 82: the Discord name first, when the tournament asks for it
+      const dcEl = root.querySelector('#lsDiscord');
+      if (dcEl && dcEl.value.trim().length < 2) { dcEl.focus(); return toast('This tournament needs your Discord username to sign up', true); }
       try {
+        if (dcEl && dcEl.value.trim() !== ((fafAuth.user && fafAuth.user.discord) || '')) { await api('/api/my/profile', { discord: dcEl.value }); await refreshFafAuth(); }
         await api('/api/t/' + late.id + '/signup', body);
         closeModal();
         toast('Signed up as a late entry');

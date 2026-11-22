@@ -247,6 +247,7 @@ function proposalCardHTML(q) {
   if (q.maxTeams) signups.push('max ' + q.maxTeams);
   if (q.minTeams) signups.push('min ' + q.minTeams);
   if (q.checkInDeadline) signups.push('check-in');
+  if (q.requireDiscord) signups.push('Discord name required');
   if (!q.playerReporting) signups.push('organizers report the scores');
   const rating = [q.ratingType === 'none' ? 'No rating' : (typeof ratingTypeLabel === 'function' ? ratingTypeLabel(q.ratingType) : q.ratingType) + ' rating'];
   if (q.minRating != null || q.maxRating != null) rating.push((q.minRating != null ? q.minRating : '0') + '-' + (q.maxRating != null ? q.maxRating : 'any'));
