@@ -214,7 +214,7 @@ input[type=checkbox] { accent-color: var(--amber); width: 15px; height: 15px; }
 /* bracket */
 .bsection { margin-bottom: 30px; max-width: 100%; }
 .bsection-title { font-family: var(--display); font-size: 13px; letter-spacing: 2px; text-transform: uppercase; color: var(--text); margin: 0 auto 12px; padding-left: 12px; border-left: 3px solid var(--amber); width: max-content; max-width: 100%; }
-.bsection-title.lb { border-left-color: var(--red); }
+.bsection-title.lb, .bsection-title.ql { border-left-color: var(--red); }
 .bsection-title.gf { border-left-color: var(--green); }
 .bracket { overflow-x: auto; overflow-y: hidden; max-width: 100%; padding: 8px 2px 18px; }
 .bname-team { cursor: pointer; }
@@ -454,6 +454,36 @@ tbody tr:hover { background: #ffffff05; }
 .mono.warn { color: #ff6369; }
 .dcpill { display: inline-block; font-family: var(--mono); font-size: 10px; color: var(--amber); border: 1px dashed #6b5220; background: #2a2113; border-radius: 3px; padding: 1px 6px; margin-left: 6px; vertical-align: middle; white-space: nowrap; }
 .replayline { font-family: var(--mono); font-size: 10px; color: var(--muted); margin: 4px 10px 6px; word-break: break-all; }
+/* match times (decision 83) */
+.mtime { font-family: var(--mono); font-size: 10.5px; color: var(--muted); padding: 4px 10px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mtime[data-mtimego], .qtime.clickable { cursor: pointer; }
+.mtime[data-mtimego]:hover, .qtime.clickable:hover { color: var(--amber); }
+.mtime.set, .qtime.set, .sch-when.set, .mtime-inline.set, .mt-when.set { color: var(--green); }
+.mtime.wait, .qtime.wait, .sch-when.wait, .mtime-inline.wait, .mt-when.wait,
+.mtime.prop, .qtime.prop, .sch-when.prop, .mtime-inline.prop, .mt-when.prop { color: var(--amber); }
+.mtime.late, .qtime.late, .sch-when.late, .mtime-inline.late, .mt-when.late { color: var(--red); }
+.qtime { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
+.bcol-when { text-align: center; font-family: var(--mono); font-size: 10.5px; color: var(--muted); height: 16px; line-height: 16px; margin: -2px 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.md-time { margin: 10px 0 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mtime-inline { font-family: var(--mono); font-size: 13px; }
+.mt-now { margin: 6px 0; }
+.mt-now.set strong { color: var(--green); }
+.mt-now.wait strong, .mt-now.prop strong { color: var(--amber); }
+.mt-org { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line-solid); }
+.sch-row { display: grid; grid-template-columns: minmax(170px, 250px) minmax(80px, 140px) 1fr auto; gap: 10px; align-items: center; padding: 7px 10px; margin: 6px 0; background: var(--panel2); border: 1px solid var(--line-solid); border-left: 3px solid var(--line-solid); border-radius: 4px; }
+.sch-row.mine { border-left-color: var(--amber); }
+.sch-when { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.sch-teams { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sch-day { font-family: var(--display); font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); margin: 12px 0 2px; }
+.sch-rnd { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; padding: 8px 0; border-bottom: 1px solid var(--line-solid); }
+.sch-rname { flex: 1 1 180px; padding-bottom: 8px; }
+.sch-f { display: flex; flex-direction: column; gap: 2px; margin: 0; text-transform: none; font-family: var(--body); }
+.sch-f input { max-width: 220px; }
+@media (max-width: 720px) {
+  .sch-row { grid-template-columns: 1fr auto; }
+  .sch-row .sch-round { grid-column: 1; }
+  .sch-row .sch-teams { grid-column: 1 / -1; white-space: normal; }
+}
 .reward-panel { border-left: 3px solid var(--amber); }
 .stream-panel { border-left: 3px solid #a855f7; }
 /* live now (decision 56): Twitch's red, a LIVE NOW tag and a red person with the viewer count */

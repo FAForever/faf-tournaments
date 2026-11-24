@@ -411,6 +411,12 @@ function drawStandingsRest(el) {
   el.innerHTML = `<div class="panel section"><h2>Standings</h2>${eliminationPlacingsTable(T.teams)}</div>`;
 }
 
+// "Out in quarterfinals", "Out in the qualifying bracket, losers round 2", "Out in the playoffs, losers final"
+function outInText(label) {
+  const m = /^(Qualifying|Playoffs) (.*)$/.exec(label);
+  if (m) return 'Out in the ' + (m[1] === 'Qualifying' ? 'qualifying bracket' : 'playoffs') + ', ' + m[2].toLowerCase();
+  return 'Out in ' + label.toLowerCase();
+}
 // Place, name and result of everyone in an elimination bracket, best first: by how far each got.
 // A 3rd place match splits the two beaten semi-finalists (3rd and 4th); while it is still to be
 // played they sit behind the beaten finalist, as "plays for 3rd place".
@@ -423,6 +429,8 @@ function eliminationPlacingsTable(teams, champ, division) {
     if (champion === team.id) return 1e9;
     if (team.out && team.out.bracket === '3p') return (team.out.round - 1) + (team.out.place === 3 ? 0.6 : 0.5);
     if (!team.out) return for3rd(team.id) ? (m3.round - 1) + 0.55 : 1e8; // still alive
+    // out in a qualifying bracket before playoffs (decision 84): below every playoff place
+    if (team.out.bracket === 'qw' || team.out.bracket === 'ql') return -1e6 + (team.out.bracket === 'ql' ? 1000 : 0) + team.out.round;
     if (team.out.bracket === 'gf') return 1e6;
     if (team.out.bracket === 'lb') return 1000 + team.out.round;
     return team.out.round; // wb (single elim) or ffa round
@@ -436,8 +444,8 @@ function eliminationPlacingsTable(teams, champ, division) {
     const label = champion === team.id ? '1' : (!team.out ? '—' : String(rank));
     const note = champion === team.id ? '🏆 Champion' : (!team.out ? (for3rd(team.id) ? 'Plays for 3rd place' : 'Still in') :
       team.out.bracket === '3p' ? (team.out.place === 3 ? 'Won the 3rd place match' : 'Lost the 3rd place match') :
-      team.out.bracket === 'gf' || roundKeyLabel(team.out.bracket, team.out.round, division) === 'Final' ? 'Lost the final' :
-      'Out in ' + roundKeyLabel(team.out.bracket, team.out.round, division).toLowerCase());
+      team.out.bracket === 'gf' || /^(Playoffs )?final$/i.test(roundKeyLabel(team.out.bracket, team.out.round, division)) ? 'Lost the final' :
+      outInText(roundKeyLabel(team.out.bracket, team.out.round, division)));
     return `<tr class="${label === '1' ? 'rank1' : label === '2' ? 'rank2' : (label === '3' ? 'rank3' : '')}">
       <td class="mono">${label}</td><td>${esc(team.name)}</td><td class="small muted">${esc(note)}</td></tr>`;
   }).join('');
@@ -931,6 +939,34 @@ async function drawAdmin(el) {
           </div>
         </div>
       </div>
+      ${(() => {
+        // playoffs after an elimination bracket (decision 84): only before the start, like the format
+        const pe = (T.bracketType === 'single' || T.bracketType === 'double') ? (T.plan || {}) : {};
+        const on = !!pe.stage2;
+        const ty = pe.s2Type === 'single' ? 'single' : 'double';
+        const cut = [2, 4, 8, 16].indexOf(parseInt(pe.s2CutTo, 10)) >= 0 ? parseInt(pe.s2CutTo, 10) : 4;
+        return `<div id="af_elimPo">
+        <label style="display:flex;align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text);margin-top:14px">
+          <input type="checkbox" id="af_elimOn"${on ? ' checked' : ''}> Playoffs for the last few: play the bracket down to them, then they start again in a new bracket
+        </label>
+        <div id="af_elimBox" style="display:${on ? 'block' : 'none'};padding:8px 0 0 22px">
+          <p class="muted small" style="margin:0 0 8px">One tournament, two stages. The bracket is played as a qualifying bracket until this many are left; they then start again at 0 losses in a playoff bracket on the same page, the unbeaten seeded first. For a league: the qualifying rounds over the weeks, the playoffs on one day.</p>
+          <div class="row" style="gap:10px;flex-wrap:wrap">
+            <div style="flex:1;min-width:120px"><div class="muted small">Go to the playoffs</div><select id="af_elimCut">${[2, 4, 8, 16].map(v => '<option value="' + v + '"' + (v === cut ? ' selected' : '') + '>The last ' + v + '</option>').join('')}</select></div>
+            <div style="flex:1;min-width:160px"><div class="muted small">Playoff bracket</div><select id="af_elimType"><option value="single"${ty === 'single' ? ' selected' : ''}>Single elimination</option><option value="double"${ty === 'double' ? ' selected' : ''}>Double elimination</option></select></div>
+          </div>
+          <div class="row" style="gap:10px;margin-top:8px;flex-wrap:wrap">
+            <div style="flex:1;min-width:100px"><div class="muted small" id="af_elimBoLbl">Upper bracket</div>${boSel('af_elimBo', pe.s2Bo || 3)}</div>
+            <div style="flex:1;min-width:100px" id="af_elimLbWrap"><div class="muted small">Lower bracket</div>${boSel('af_elimLbBo', pe.s2LbBo || 3)}</div>
+            <div style="flex:1;min-width:100px"><div class="muted small" id="af_elimFinLbl">Grand final</div>${boSel('af_elimFinal', (ty === 'single' ? pe.s2Final : pe.s2Gf) || 5)}</div>
+          </div>
+          <label id="af_elimThirdWrap" style="display:none;align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text);margin-top:8px">
+            <input type="checkbox" id="af_elimThird"${pe.s2Third ? ' checked' : ''}> 3rd place match: the two beaten semi-finalists play for 3rd
+          </label>
+          <p class="muted small" id="af_elimWhy" style="margin:8px 0 0"></p>
+        </div>
+      </div>`;
+      })()}
       <div id="af_stopAt">
         <label style="display:flex;align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text);margin-top:14px">
           <input type="checkbox" id="af_stopOn"${T.stopAtAlive ? ' checked' : ''}> End the tournament early, once a set number are left
@@ -1009,6 +1045,20 @@ async function drawAdmin(el) {
         <input type="checkbox" id="srPlayers"${T.playerReporting ? ' checked' : ''}> Players submit their own scores <span class="muted small">(replay IDs, confirmed by the opponent)</span>
       </label>
       <p class="muted small" style="margin:8px 0 0">When this is off, only organizers enter results. Saved as soon as you tick or untick it.</p>
+    </div>`;
+  }
+
+  // Match times (decision 83): the players agree them on the site; a league, played over weeks.
+  // Saved as soon as it is ticked, at any time, like score reporting.
+  if (T.status !== 'finished' && T.competition === 'team') {
+    panel.times = `<div class="panel section"><h2>Match <span class="h2-strong">times</span></h2>
+      <label style="display:flex;align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text);margin:0">
+        <input type="checkbox" id="mtOn"${T.matchTimes ? ' checked' : ''}> Players agree their own match times <span class="muted small">(a league: matches played over days or weeks)</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text);margin:8px 0 0 22px">
+        <input type="checkbox" id="mtOk"${T.timeApproval ? ' checked' : ''}${T.matchTimes ? '' : ' disabled'}> An agreed time needs an organizer\u2019s OK
+      </label>
+      <p class="muted small" style="margin:8px 0 0">One side proposes a time on the match, the other accepts it or proposes another; it is said in the match chat too, and the time shows on the bracket and a Schedule tab, in everyone\u2019s own time zone. Organizers can always set or move a time (for casting, or when the players cannot agree), and the players cannot change one an organizer set. Each round\u2019s dates (from, play by) are set on the Schedule tab. Saved as soon as you tick or untick it.</p>
     </div>`;
   }
 
@@ -1290,7 +1340,7 @@ async function drawAdmin(el) {
   panel.hofWinners = (T.imported && T.viewer && T.viewer.hofWinners) ? importWinnersPanelHTML() : '';
   const order = {
     info: ['share', 'publishing', 'hofWinners', 'details', 'setup', 'rewards', 'sponsors', 'streams', 'images', 'series', 'category', 'danger'],
-    format: ['proposalLock', 'format', 'seeding', 'playoffs', 'endEarly', 'ended', 'reporting', 'vetoes', 'fvetoes', 'notes'],
+    format: ['proposalLock', 'format', 'seeding', 'playoffs', 'endEarly', 'ended', 'reporting', 'times', 'vetoes', 'fvetoes', 'notes'],
     signups: ['signups', 'rating', 'qualifiers'],
     people: ['organizers', 'casters', 'bans', 'mutes', 'names']
   };
@@ -1378,6 +1428,24 @@ async function drawAdmin(el) {
       toast('Signups saved');
       await refresh();
     } catch (e) { toast(e.message, true); }
+  };
+  // match times (decision 83)
+  const mtOn = document.getElementById('mtOn'), mtOk = document.getElementById('mtOk');
+  if (mtOn) mtOn.onchange = async () => {
+    const on = mtOn.checked;
+    try {
+      await api('/api/t/' + T.id + '/edit_info', { matchTimes: on ? 1 : 0, admin: adminToken() });
+      toast(on ? 'Players agree their own match times' : 'Match times are off');
+      await refresh();
+    } catch (e) { mtOn.checked = !on; toast(e.message, true); }
+  };
+  if (mtOk) mtOk.onchange = async () => {
+    const on = mtOk.checked;
+    try {
+      await api('/api/t/' + T.id + '/edit_info', { timeApproval: on ? 1 : 0, admin: adminToken() });
+      toast(on ? 'Agreed times now wait for an organizer\u2019s OK' : 'Agreed times stand without an OK');
+      await refresh();
+    } catch (e) { mtOk.checked = !on; toast(e.message, true); }
   };
   const srPlayers = document.getElementById('srPlayers');
   if (srPlayers) srPlayers.onchange = async () => {
@@ -1881,6 +1949,30 @@ async function drawAdmin(el) {
         }
         if (g('af_sw2')) g('af_sw2').disabled = swissDivs && !s2;
       }
+      // playoffs after an elimination bracket (decision 84): not with ending early, nor with divisions
+      if (g('af_elimPo')) {
+        const elimBt = !isFfa && (bt === 'single' || bt === 'double');
+        g('af_elimPo').style.display = elimBt ? '' : 'none';
+        const on = elimBt && g('af_elimOn').checked;
+        g('af_elimBox').style.display = on ? 'block' : 'none';
+        const dbl = g('af_elimType').value === 'double';
+        g('af_elimLbWrap').style.display = dbl ? '' : 'none';
+        g('af_elimBoLbl').textContent = dbl ? 'Upper bracket' : 'Playoff rounds';
+        g('af_elimFinLbl').textContent = dbl ? 'Grand final' : 'Final';
+        g('af_elimThirdWrap').style.display = (!dbl && parseInt(g('af_elimCut').value, 10) >= 4) ? 'flex' : 'none';
+        const stopCk = g('af_stopOn');
+        if (stopCk) { if (on && stopCk.checked) stopCk.checked = false; stopCk.disabled = on; }
+        const dv = g('af_divisions');
+        if (dv && !dv.disabled && on && dv.value !== '0') dv.value = '0';
+        if (dv && !dv.dataset.lockedBefore) dv.dataset.lockedBefore = dv.disabled ? '1' : '0';
+        if (dv && dv.dataset.lockedBefore === '0') dv.disabled = on;
+        g('af_elimWhy').textContent = on ? 'Ending early and divisions do not go with this, so they are off while it is on.'
+          + (dbl && g('af_elimCut').value === '2' ? ' Double elimination playoffs need at least 4: choose the last 4 or more, or single elimination.' : '') : '';
+        // the qualifying bracket has no finals of its own: only its round lengths count
+        for (const id of ['af_semi', 'af_final', 'af_wbf', 'af_lbf', 'af_gf']) { const e = g(id); if (e) e.parentElement.style.display = on ? 'none' : ''; }
+        if (g('af_hcap')) g('af_hcap').parentElement.style.display = on ? 'none' : 'flex';
+        if (g('af_thirdWrap') && on) g('af_thirdWrap').style.display = 'none';
+      }
       if (g('af_stopBox')) g('af_stopBox').style.display = (g('af_stopOn') && g('af_stopOn').checked) ? 'block' : 'none';
       // a survivor cut-off is an elimination-bracket idea; swiss and FFA have no such count
       if (g('af_stopAt')) g('af_stopAt').style.display = (isFfa || bt === 'swiss') ? 'none' : '';
@@ -1922,7 +2014,7 @@ async function drawAdmin(el) {
       g('af_ffinalsize').style.display = g('af_ffinalmode').value === '1' ? '' : 'none';
       syncPm();
     };
-    for (const id of ['af_comp', 'af_size', 'af_form', 'af_bt', 'af_fsize', 'af_fmode', 'af_fcutmode', 'af_ffinalmode', 'af_perRound', 'af_swcuts', 'af_sw2', 'af_pick', 'af_stopOn', 'af_pickMode', 'af_swwin', 'af_swloss', 'af_sw2type', 'af_divisions', 'af_swfinal']) { const e = g(id); if (e) e.onchange = sync; }
+    for (const id of ['af_comp', 'af_size', 'af_form', 'af_bt', 'af_fsize', 'af_fmode', 'af_fcutmode', 'af_ffinalmode', 'af_perRound', 'af_swcuts', 'af_sw2', 'af_pick', 'af_stopOn', 'af_pickMode', 'af_swwin', 'af_swloss', 'af_sw2type', 'af_divisions', 'af_swfinal', 'af_elimOn', 'af_elimType', 'af_elimCut']) { const e = g(id); if (e) e.onchange = sync; }
     sync();
 
     g('af_save').onclick = async () => {
@@ -1967,6 +2059,16 @@ async function drawAdmin(el) {
             body.plan.s2Final = g('af_sw2final').value;
             body.plan.s2Gf = g('af_sw2final').value;
             body.plan.s2Third = (g('af_sw2type').value !== 'double' && g('af_sw2third') && g('af_sw2third').checked) ? 1 : 0;
+          }
+        }
+        if ((g('af_bt').value === 'single' || g('af_bt').value === 'double') && g('af_elimOn')) {
+          // playoffs for the last few (decision 84)
+          const on = g('af_elimOn').checked;
+          body.plan.stage2 = on ? 1 : 0;
+          if (on) {
+            const ty = g('af_elimType').value;
+            Object.assign(body.plan, { s2CutTo: g('af_elimCut').value, s2Type: ty, s2Bo: g('af_elimBo').value, s2LbBo: g('af_elimLbBo').value,
+              s2Final: g('af_elimFinal').value, s2Gf: g('af_elimFinal').value, s2Third: (ty === 'single' && g('af_elimThird').checked) ? 1 : 0 });
           }
         }
       } else {

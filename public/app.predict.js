@@ -81,6 +81,9 @@ function predSeedOf(stage, id) {
 // Names for a stage's rounds: Final / Semi-finals ... for a plain bracket, Upper / Lower for double.
 function predRoundName(stage, p) {
   const ps = stage.positions || [];
+  // a qualifying bracket's rounds are just numbered: its last ones go to the playoffs (decision 84)
+  if (p.b === 'qw') return (ps.some(x => x.b === 'ql') ? 'Upper round ' : 'Round ') + p.r;
+  if (p.b === 'ql') return 'Lower round ' + p.r;
   const dbl = ps.some(x => x.b === 'lb');
   if (p.b === 'gf') return dbl ? 'Grand final' : 'Final';
   if (p.b === '3p') return '3rd place match';
