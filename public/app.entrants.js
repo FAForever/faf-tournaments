@@ -2096,6 +2096,51 @@ function openStartConfig() {
   const divNote = divs ? '<p class="muted small">' + esc(sizes.map((k, i) => divisionNameOf(i + 1) + ' ' + k).join(', ') + ' teams.')
     + ' The lengths below are for the biggest division; a smaller one plays them counted back from the final: its final is the final below, its semi-finals the semi-finals below, and so on.</p>' : '';
 
+  // A qualifying bracket, then playoffs (decision 84): its rounds, then the playoffs' lengths.
+  const ep = (!divs && (T.bracketType === 'single' || T.bracketType === 'double')) ? elimPlanT() : null;
+  if (ep) {
+    if (n <= ep.cut) return toast('The playoffs take the last ' + ep.cut + ', so the qualifying bracket needs more than ' + ep.cut + ' teams (it has ' + n + ')', true);
+    const dbl = T.bracketType === 'double';
+    if (dbl && n < 3) return toast('Double elimination needs at least 3 teams', true);
+    const sh = stageOneShapeT(nextPow2(n), dbl, ep.cut);
+    const p = T.plan || {};
+    const pr = !!T.perRoundBo;
+    const wl = dbl ? p.wbList : p.roundsList;
+    const qwD = r => (pr && Array.isArray(wl) && wl[r - 1] != null) ? wl[r - 1] : (dbl ? (p.wb || 3) : (p.early || 3));
+    const qlD = q => (pr && Array.isArray(p.lbList) && p.lbList[q - 1] != null) ? p.lbList[q - 1] : (p.lb || 3);
+    const row = (lbl, sel) => `<div class="row" style="align-items:center;margin:6px 0"><div style="flex:1">${esc(lbl)}</div><div style="width:110px">${sel}</div></div>`;
+    const wRows = [], lRows = [];
+    for (let r = 1; r <= sh.wbRounds; r++) wRows.push(row('Round ' + r + (r === sh.wbRounds ? ' (its winners go to the playoffs)' : ''), boSelect('bo_qw' + r, qwD(r))));
+    for (let q = 1; q <= sh.lbRounds; q++) lRows.push(row('Round ' + q + (q === sh.lbRounds ? ' (its winners go to the playoffs)' : ''), boSelect('bo_ql' + q, qlD(q))));
+    const poDbl = ep.type === 'double';
+    return modal(`
+      <h3>Bracket setup: qualifying bracket, then playoffs</h3>
+      <p class="muted small">${n} teams. The ${dbl ? 'double' : 'single'} elimination bracket is played until ${ep.cut} are left; those ${ep.cut} then start again at 0 losses in a ${ep.type} elimination playoff bracket, built here when the qualifying bracket is over (the unbeaten seeded first).</p>
+      <label>${dbl ? 'Qualifying bracket, winners side' : 'Qualifying bracket'}</label>${wRows.join('')}
+      ${dbl ? '<label>Qualifying bracket, losers side</label>' + lRows.join('') : ''}
+      <label>Playoffs (${ep.cut} teams, ${ep.type} elimination)</label>
+      ${row(poDbl ? 'Winners bracket rounds' : 'Rounds before the final', boSelect('bo_po', ep.bo))}
+      ${poDbl ? row('Losers bracket rounds', boSelect('bo_polb', ep.lbBo || 3)) : ''}
+      ${row(poDbl ? 'Grand final' : 'Final', boSelect('bo_pofin', ep.fin))}
+      ${(!poDbl && ep.cut >= 4) ? `<label style="display:flex;align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text);margin-top:10px">
+        <input type="checkbox" id="cfgPoThird"${ep.third ? ' checked' : ''}> 3rd place match in the playoffs</label>` : ''}
+      <div class="actions"><button class="btn ghost" id="cfgCancel">Cancel</button><button class="btn primary" id="cfgGo">Generate bracket</button></div>`,
+      root => {
+        root.querySelector('#cfgCancel').onclick = closeModal; if (typeof lockStartDialog === 'function') lockStartDialog(root);
+        root.querySelector('#cfgGo').onclick = () => {
+          const v = id => parseInt(root.querySelector('#' + id).value, 10);
+          const cfg = { stage2: 1, s2CutTo: ep.cut, s2Type: ep.type, s2Bo: v('bo_po'), s2LbBo: poDbl ? v('bo_polb') : 3, s2Final: v('bo_pofin'), s2Gf: v('bo_pofin') };
+          const third = root.querySelector('#cfgPoThird');
+          cfg.s2Third = (third && third.checked) ? 1 : 0;
+          const wb = [];
+          for (let r = 1; r <= sh.wbRounds; r++) wb.push(v('bo_qw' + r));
+          if (dbl) { cfg.wb = wb; cfg.lb = []; for (let q = 1; q <= sh.lbRounds; q++) cfg.lb.push(v('bo_ql' + q)); }
+          else cfg.rounds = wb;
+          start(cfg);
+        };
+      });
+  }
+
   if (T.bracketType === 'single') {
     const rows = [];
     for (let r = 1; r <= R; r++) {

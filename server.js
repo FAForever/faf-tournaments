@@ -25,6 +25,7 @@ const {
   newMatch, routeVal, setSlot, evaluate, finalizeMatch, undoMatch, backfillMatchLinks,
   buildSingle, buildDouble, thirdPlaceMatch, addThirdPlace, removeThirdPlace, thirdPlaceStarted,
   divisionsOn, divisionFinal, divisionChampion, allDivisionsDone,
+  stageOneShape, buildStageOne,
 } = require('./lib/match');
 // Swiss and FFA formats (import the shared match primitives internally).
 const { PRESETS, presetById, presetsFor } = require('./lib/presets');
@@ -63,7 +64,8 @@ require('./lib/match').setHooks({ swissAfterReport: t => {
   logForcedRematches(t, had);
 } });
 require('./lib/swiss').setSwissHooks({ openStagePicks, removedMatches: tidyRemovedMatches });
-require('./lib/match').setHooks({ afterFinalize: (t) => { autoStopIfReached(t); PRED.stampLocks(t, PRED_CTX); } });
+// A qualifying bracket that has played down to its last N builds their playoffs (decision 84).
+require('./lib/match').setHooks({ afterFinalize: (t) => { buildElimPlayoffs(t); autoStopIfReached(t); PRED.stampLocks(t, PRED_CTX); } });
 // A Swiss division without a final is won by the top of its table (decision 77).
 require('./lib/match').setHooks({ divisionChampion: swissDivisionChampion });
 
@@ -1054,7 +1056,8 @@ function buildAfterPicks(t) {
     stageTwoBuild(t, slots);
   } else {
     // start_bracket already validated and stored t.cfg; the picks only change round one.
-    if (t.bracketType === 'double') buildDouble(t, t.cfg, 0, { slots });
+    if (elimStaged(t)) { buildStageOne(t, stageOneCfg(t), t.stage2.cutTo, { slots }); buildElimPlayoffs(t); }
+    else if (t.bracketType === 'double') buildDouble(t, t.cfg, 0, { slots });
     else buildSingle(t, t.cfg, 0, { slots });
     syncPlanFromMatches(t);
     if (t.status !== 'finished') t.status = 'running';
@@ -1302,6 +1305,7 @@ function playoffStatus(t) {
 // started, so by the time this runs a redo can never destroy a played match.
 function settlePlayoffsAfterCorrection(t, sigBefore) {
   if (!sigBefore) return false;
+  if (elimStaged(t)) return settleElimPlayoffs(t, sigBefore);
   const done = swissStageDone(t);
   if (done && playoffSig(t) === sigBefore) return false;
   resetPlayoffs(t);
@@ -1310,6 +1314,206 @@ function settlePlayoffsAfterCorrection(t, sigBefore) {
   tpush(t, 'System', done
     ? 'A Swiss result was corrected and it changed who went through or on what record, so the playoffs have been set up again from the corrected standings.'
     : 'A Swiss result was reopened, so the playoffs have been taken down. They are set up again as soon as the Swiss stage is finished.');
+  return true;
+}
+
+// ---------- match times (decision 83) ----------
+// hybrid's pro league: "players can schedule their game within a week". With t.matchTimes on, the
+// two sides of a match agree its time on the site: one proposes (m.timeProp), the other accepts it
+// (m.time) or proposes another. An organizer can set or move any time (for casting, or when the
+// players cannot agree), and a time an organizer set stays until an organizer moves it. With
+// t.timeApproval an agreed time waits for an organizer's OK (m.time.ok 0). Each round can have a
+// window (t.roundWin[key] = { from, by }, ISO or null): players pick times inside it, organizers
+// anywhere, and a match still unplayed after its round's "by" is late.
+function roundTimeKey(m) { return (m.division ? 'd' + m.division + ':' : '') + m.bracket + ':' + m.round; }
+function roundWindowOf(t, m) { return (t.roundWin || {})[roundTimeKey(m)] || null; }
+// "Sat 2 Jan 2027, 18:00 UTC": chat lines and the log are plain text, so they say it in UTC; the
+// page shows every time in the viewer's own zone.
+function timeText(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  const W = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const M = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const p2 = n => (n < 10 ? '0' : '') + n;
+  return W[d.getUTCDay()] + ' ' + d.getUTCDate() + ' ' + M[d.getUTCMonth()] + ' ' + d.getUTCFullYear() + ', '
+    + p2(d.getUTCHours()) + ':' + p2(d.getUTCMinutes()) + ' UTC';
+}
+// A time as sent by a page: an ISO instant, or null. Whole minutes.
+function cleanWhen(v) {
+  if (v == null || v === '') return null;
+  const ms = Date.parse(String(v));
+  if (isNaN(ms) || ms < Date.UTC(2020, 0, 1) || ms > Date.UTC(2100, 0, 1)) return undefined;
+  return new Date(Math.round(ms / 60000) * 60000).toISOString();
+}
+// The match can still get a time: both sides known, not started.
+function timeOpen(m) {
+  return !!(m && m.status === 'ready' && m.team1 && m.team2 && m.team1 !== 'BYE' && m.team2 !== 'BYE'
+    && !m.pendingReport && !(Array.isArray(m.games) && m.games.length));
+}
+// Why a player may not pick this time for this match, or null.
+function timeWindowRefusal(t, m, iso) {
+  const ms = Date.parse(iso);
+  if (ms < Date.now() + 60000) return 'Pick a time in the future';
+  if (ms > Date.now() + 366 * 86400000) return 'Pick a time within the next year';
+  const w = roundWindowOf(t, m);
+  if (w && w.from && ms < Date.parse(w.from)) return 'This round is played from ' + timeText(w.from) + ' on';
+  if (w && w.by && ms > Date.parse(w.by)) return 'This round has to be played by ' + timeText(w.by);
+  return null;
+}
+// A system line in the match's own chat: the proposals, answers and changes are where the players
+// already talk about them.
+function matchChatLine(t, m, who, text) {
+  const room = 'match:' + m.id;
+  t.chat = t.chat || {};
+  t.chat[room] = t.chat[room] || [];
+  t.chat[room].push({ id: uid(8), at: now(), fafId: null, who: who || 'System', sys: 1, text: String(text).slice(0, 400) });
+  if (t.chat[room].length > CHAT_MAX) t.chat[room] = t.chat[room].slice(-CHAT_MAX);
+}
+// An organizer's reason in a chat line, as a sentence of its own: " A player is ill."
+function noteSentence(note) {
+  const x = String(note || '').trim();
+  if (!x) return '';
+  return ' ' + x.charAt(0).toUpperCase() + x.slice(1) + (/[.!?]$/.test(x) ? '' : '.');
+}
+// The matches whose time waits for an organizer, and those past their round's play-by date.
+function timesWaiting(t) {
+  if (!t.matchTimes) return [];
+  return (t.matches || []).filter(m => m.time && !m.time.ok && m.status !== 'done' && m.status !== 'bye');
+}
+function timesLate(t) {
+  if (!t.matchTimes || t.status !== 'running') return [];
+  const nowMs = Date.now();
+  return (t.matches || []).filter(m => {
+    if (m.status === 'done' || m.status === 'bye' || !m.team1 || !m.team2 || m.team1 === 'BYE' || m.team2 === 'BYE') return false;
+    const w = roundWindowOf(t, m);
+    return !!(w && w.by && Date.parse(w.by) < nowMs);
+  });
+}
+
+// ---------- a qualifying bracket, then playoffs (decision 84) ----------
+// hybrid's pro league: "double/single elim bracket going down to top 4 ... and then a top 4 se/de
+// bracket played on 1 day". Single or double elimination is played down to the last N (a power of
+// two) as a qualifying bracket ('qw' / 'ql' matches, lib/match buildStageOne). Those N then start
+// again at 0 losses in a playoff bracket in the same tournament: t.stage2 with elim: 1 and the usual
+// 'wb' / 'lb' / 'gf' / '3p' matches, seeded from how they stood (the unbeaten first, each group by
+// seed). The Swiss playoffs' own helpers (playoffMatches, playoffsLocked, resetPlayoffs) serve both.
+const ELIM_CUTS = [2, 4, 8, 16, 32];
+function elimStaged(t) {
+  return !!(t && t.competition !== 'ffa' && (t.bracketType === 'single' || t.bracketType === 'double')
+    && t.stage2 && t.stage2.elim && t.stage2.cutTo);
+}
+// Planned (the plan, before the start) or running (t.stage2).
+function elimPlayoffsPlanned(t) {
+  if (!t || t.competition === 'ffa' || (t.bracketType !== 'single' && t.bracketType !== 'double')) return false;
+  if (t.stage2) return !!t.stage2.elim;
+  return !!(t.plan && t.plan.stage2);
+}
+function cleanElimCut(v) { const n = parseInt(v, 10); return ELIM_CUTS.indexOf(n) >= 0 ? n : 4; }
+// The playoff settings of a single / double elimination plan. Written only when they are on, so
+// every other plan stays exactly as it was.
+function cleanElimExtras(src, prev) {
+  const s = src || {}, p = prev || {};
+  const on = s.stage2 !== undefined ? !!s.stage2 : !!p.stage2;
+  if (!on) return {};
+  const boOr = (v, d) => { const x = parseInt(v, 10); return BO_OK.indexOf(x) >= 0 ? x : d; };
+  const pick = (key, dflt, fn) => (s[key] !== undefined ? fn(s[key]) : (p[key] !== undefined ? fn(p[key]) : dflt));
+  const type = pick('s2Type', 'single', v => (v === 'double' ? 'double' : 'single'));
+  const out = {
+    stage2: 1,
+    s2CutTo: pick('s2CutTo', 4, cleanElimCut),
+    s2Type: type,
+    s2Bo: pick('s2Bo', 3, v => boOr(v, 3)),          // every playoff round (the upper bracket in double)
+    s2LbBo: pick('s2LbBo', 3, v => boOr(v, 3)),      // the lower bracket (double)
+    s2Final: pick('s2Final', 5, v => boOr(v, 5)),    // the final (single)
+    s2Gf: pick('s2Gf', 5, v => boOr(v, 5)),          // the grand final (double)
+    s2Hcap: pick('s2Hcap', 0, v => (v ? 1 : 0))
+  };
+  if (type === 'single' && pick('s2Third', 0, v => (v ? 1 : 0))) out.s2Third = 1;
+  return out;
+}
+// Why these settings cannot be played, or null. `n` is the field when it is known.
+function elimPlayoffsProblem(ex, t, n) {
+  if (!ex || !ex.stage2) return null;
+  if (ex.s2Type === 'double' && ex.s2CutTo < 4) return 'Double elimination playoffs need at least 4 teams: let 4 or more through, or make them single elimination';
+  if (t && (parseInt(t.stopAtAlive, 10) || 0)) return 'Choose one: end the tournament early, or playoffs for the last ' + ex.s2CutTo + '. Turn one of them off on the Format panel.';
+  if (t && divisionsOn(t)) return 'Playoffs after the qualifying bracket do not go with divisions: every division plays its own bracket to a champion.';
+  if (n != null && n <= ex.s2CutTo) return 'The playoffs take the last ' + ex.s2CutTo + ', so the qualifying bracket needs more than ' + ex.s2CutTo + ' teams (it has ' + n + ')';
+  return null;
+}
+// The record of the playoffs: the shape the Swiss playoffs use (buildStageTwo), plus elim: 1 and
+// the lower bracket's own length. `c` may carry per-round lists (s2wb / s2lb / s2rounds).
+function buildElimStageTwo(ex, c) {
+  const cc = c || {};
+  const cut = cleanElimCut(ex.s2CutTo);
+  const R = Math.max(1, log2i(cut));
+  const list = (arr, len, dflt, last) => cleanBoList(Array.isArray(arr) && arr.length ? arr
+    : Array.from({ length: len }, (x, i) => (i === len - 1 && last ? last : dflt)), len);
+  if (ex.s2Type === 'double' && cut >= 4) {
+    return {
+      type: 'double', cutTo: cut, elim: 1,
+      wb: list(cc.s2wb, R, ex.s2Bo), lb: list(cc.s2lb, 2 * R - 2, ex.s2LbBo || ex.s2Bo), gf: ex.s2Gf || 5,
+      lbHandicap: ex.s2Hcap ? 1 : 0, built: 0, field: []
+    };
+  }
+  const single = { type: 'single', cutTo: cut, elim: 1, rounds: list(cc.s2rounds, R, ex.s2Bo, ex.s2Final), built: 0, field: [] };
+  if (ex.s2Third && cut >= 4) single.thirdPlace = 1;
+  return single;
+}
+// The lengths the qualifying bracket is built with (and rebuilt with after an opponent pick phase).
+function stageOneCfg(t) {
+  const c = t.cfg || {};
+  return { double: t.bracketType === 'double', wb: c.wb || c.rounds || [], lb: c.lb || [] };
+}
+function stageOneMatches(t) { return (t.matches || []).filter(m => m.bracket === 'qw' || m.bracket === 'ql'); }
+function stageOneDone(t) {
+  const ms = stageOneMatches(t);
+  return ms.length > 0 && ms.every(m => m.status === 'done' || m.status === 'bye');
+}
+function stageOneLosses(t, id) {
+  let n = 0;
+  for (const m of stageOneMatches(t)) if (m.status === 'done' && m.loser === id) n++;
+  return n;
+}
+// Who goes to the playoffs: everyone the qualifying bracket did not knock out, the unbeaten first,
+// each group in seed order.
+function elimPlayoffField(t) {
+  return (t.teams || []).filter(x => !x.eliminated)
+    .map(x => ({ id: x.id, l: stageOneLosses(t, x.id), s: x.seed || 9999 }))
+    .sort((a, b) => a.l - b.l || a.s - b.s).map(x => x.id);
+}
+// What the playoffs are made from: when a corrected result leaves it unchanged, they stay.
+function elimPlayoffSig(t) { return JSON.stringify(elimPlayoffField(t).map(id => id + ':' + stageOneLosses(t, id))); }
+// Build the playoffs once the qualifying bracket is over (the after-finalize hook, every result).
+function buildElimPlayoffs(t) {
+  if (!elimStaged(t)) return false;
+  const s2 = t.stage2;
+  if (s2.built || !stageOneDone(t)) return false;
+  const field = elimPlayoffField(t);
+  if (field.length < 2) return false;
+  field.forEach((id, i) => { const tm = teamById(t, id); if (tm) tm.stage2Seed = i + 1; });
+  const opts = { only: field, seedKey: 'stage2Seed' };
+  if (s2.type === 'double' && field.length >= 3) {
+    buildDouble(t, { wb: s2.wb || [], lb: s2.lb || [], gf: s2.gf || 5, lbHandicap: s2.lbHandicap ? 1 : 0 }, 0, opts);
+  } else {
+    buildSingle(t, { rounds: s2.rounds || [], thirdPlace: s2.thirdPlace ? 1 : 0, thirdBo: s2.thirdBo || 0 }, 0, opts);
+  }
+  s2.built = Date.now();
+  s2.field = field.slice();
+  const nm = id => tTeamName(t, id);
+  const ones = field.filter(id => stageOneLosses(t, id) > 0).length;
+  tpush(t, 'System', 'The qualifying bracket is over. ' + field.length + ' go to the playoffs, seeded '
+    + field.map((id, i) => (i + 1) + ' ' + nm(id)).join(', ')
+    + (ones && ones < field.length ? ' (the unbeaten first)' : '') + '. Everyone starts the playoffs at 0 losses.');
+  return true;
+}
+function settleElimPlayoffs(t, sigBefore) {
+  const done = stageOneDone(t);
+  if (done && t.stage2.built && elimPlayoffSig(t) === sigBefore) return false;
+  resetPlayoffs(t);
+  if (done) buildElimPlayoffs(t);
+  tpush(t, 'System', done
+    ? 'A result of the qualifying bracket was corrected and it changed who went to the playoffs or how they are seeded, so the playoffs have been set up again.'
+    : 'A result of the qualifying bracket was reopened, so the playoffs have been taken down. They are set up again as soon as the qualifying bracket is finished.');
   return true;
 }
 
@@ -1370,9 +1574,12 @@ function eliminationRanking(t) {
   return out;
 }
 function eliminationRankingOf(t, division) {
-  const BR = { wb: 1, lb: 1, gf: 1 };
+  // A qualifying bracket's losses (decision 84) rank below every playoff place.
+  const BR = { wb: 1, lb: 1, gf: 1, qw: 1, ql: 1 };
   const inDiv = m => division == null || (m.division || 0) === division;
-  const stage = m => (m.bracket === 'gf' ? 1000 : 0) + ((m.round || 0) * 10) + (m.bracket === 'lb' ? 1 : 0);
+  const stage = m => (m.bracket === 'qw' || m.bracket === 'ql')
+    ? -100000 + ((m.round || 0) * 10) + (m.bracket === 'ql' ? 1 : 0)
+    : (m.bracket === 'gf' ? 1000 : 0) + ((m.round || 0) * 10) + (m.bracket === 'lb' ? 1 : 0);
   const out = {};
   for (const m of (t.matches || [])) {
     if (!BR[m.bracket] || !inDiv(m)) continue;
@@ -1408,10 +1615,14 @@ function eliminationRankingOf(t, division) {
 // Who is still standing, and which side of a double-elim bracket they are on. A team with no
 // bracket loss is in the winners bracket; one loss puts them in the losers bracket. This is what
 // makes "top 2 of winners = Q1, top 2 of losers = Q2" expressible.
+// With a qualifying bracket (decision 84) the losses that count are the current stage's: its own
+// until the playoffs exist, then the playoffs', where everyone started again at 0.
 function bracketLosses(t, teamId) {
+  const staged = elimStaged(t);
+  const keys = (staged && !t.stage2.built) ? { qw: 1, ql: 1 } : { wb: 1, lb: 1, gf: 1 };
   let n = 0;
   for (const m of (t.matches || [])) {
-    if (m.bracket !== 'wb' && m.bracket !== 'lb' && m.bracket !== 'gf') continue;
+    if (!keys[m.bracket]) continue;
     if (m.status === 'done' && m.loser === teamId) n++;
   }
   return n;
@@ -1419,7 +1630,8 @@ function bracketLosses(t, teamId) {
 function survivorSplit(t) {
   const bySeed = (a, b) => (a.seed || 9999) - (b.seed || 9999);
   const alive = (t.teams || []).filter(x => !x.eliminated);
-  if (t.bracketType !== 'double') return { wb: alive.slice().sort(bySeed).map(x => x.id), lb: [] };
+  const dbl = (elimStaged(t) && t.stage2.built) ? t.stage2.type === 'double' : t.bracketType === 'double';
+  if (!dbl) return { wb: alive.slice().sort(bySeed).map(x => x.id), lb: [] };
   const wb = [], lb = [];
   for (const tm of alive) (bracketLosses(t, tm.id) === 0 ? wb : lb).push(tm);
   return { wb: wb.sort(bySeed).map(x => x.id), lb: lb.sort(bySeed).map(x => x.id) };
@@ -1826,6 +2038,21 @@ function planStartConfig(t) {
   const R = log2i(nextPow2(divs ? largestDivision(t, divs) : n));
   const per = !!t.perRoundBo;
   const at = (list, i, fb) => (per && Array.isArray(list) && list[i] != null) ? list[i] : fb;
+  // a qualifying bracket before playoffs (decision 84): its rounds, all at the early lengths, and the playoffs
+  if ((t.bracketType === 'single' || t.bracketType === 'double') && p.stage2 && !divs) {
+    const ex = cleanElimExtras(p, null);
+    const sh = stageOneShape(nextPow2(n), t.bracketType === 'double', ex.s2CutTo);
+    const c = Object.assign({}, ex);
+    if (t.bracketType === 'single') {
+      c.rounds = [];
+      for (let r = 1; r <= sh.wbRounds; r++) c.rounds.push(at(p.roundsList, r - 1, p.early || 3));
+    } else {
+      c.wb = []; c.lb = [];
+      for (let r = 1; r <= sh.wbRounds; r++) c.wb.push(at(p.wbList, r - 1, p.wb || 3));
+      for (let q = 1; q <= sh.lbRounds; q++) c.lb.push(at(p.lbList, q - 1, p.lb || 3));
+    }
+    return c;
+  }
   if (t.bracketType === 'single') {
     const rounds = [];
     for (let r = 1; r <= R; r++) rounds.push(at(p.roundsList, r - 1, r === R ? (p.final || 5) : r === R - 1 ? (p.semi || 3) : (p.early || 3)));
@@ -2434,12 +2661,15 @@ function syncPlanFromMatches(t) {
     return rs.map(r => firstBo(bracket, r)).filter(v => v != null);
   };
   t.plan = t.plan || {};
+  // with a qualifying bracket (decision 84) the plan's lists are its rounds; the playoffs keep theirs
+  // on t.stage2
+  const staged = elimStaged(t);
   if (t.bracketType === 'single') {
-    t.plan.roundsList = roundsOf('wb');
+    t.plan.roundsList = roundsOf(staged ? 'qw' : 'wb');
   } else if (t.bracketType === 'double') {
-    t.plan.wbList = roundsOf('wb');
-    t.plan.lbList = roundsOf('lb');
-    const gf = ms.find(x => x.bracket === 'gf');
+    t.plan.wbList = roundsOf(staged ? 'qw' : 'wb');
+    t.plan.lbList = roundsOf(staged ? 'ql' : 'lb');
+    const gf = staged ? null : ms.find(x => x.bracket === 'gf');
     if (gf) t.plan.gf = gf.bo;
   }
 }
@@ -2450,11 +2680,22 @@ function matchLabel(t, m) {
   const core = matchLabelCore(t, m);
   return (m.division && divisionsOn(t)) ? divisionName(t, m.division) + ' ' + core : core;
 }
+// A round's name from its key, for the log: "d1:wb:2" -> "Prince WB Round 2" (decision 83).
+function roundKeyText(t, key) {
+  const mm = /^(?:d([1-4]):)?([a-z0-9]+):(\d+)$/.exec(key);
+  if (!mm) return key;
+  return matchLabel(t, { bracket: mm[2], round: +mm[3], index: 0, division: mm[1] ? +mm[1] : 0 }).replace(/ (Match|Lobby) 1$/, '');
+}
 function matchLabelCore(t, m) {
   if (!m) return '';
   // A two-stage tournament is Swiss on top of a real bracket, so its bracket matches are
   // labelled like a bracket, not like a swiss final.
-  const twoStage = !!(t.bracketType === 'swiss' && t.stage2 && t.stage2.cutTo);
+  const twoStage = !!(t.stage2 && t.stage2.cutTo && (t.bracketType === 'swiss' || t.stage2.elim));
+  // the qualifying bracket before playoffs (decision 84)
+  if (m.bracket === 'qw' || m.bracket === 'ql') {
+    const qp = m.bracket === 'ql' ? 'LB ' : (t.bracketType === 'double' ? 'WB ' : '');
+    return 'Qualifying ' + qp + 'Round ' + m.round + ' Match ' + (m.index + 1);
+  }
   if (m.bracket === 'gf') {
     if (twoStage) return t.stage2.type === 'double' ? 'Grand Final' : 'Final';
     return t.bracketType === 'swiss' ? 'Final' : 'Grand Final';
@@ -2655,6 +2896,7 @@ function publicView(t) {
     seeding: t.seeding, ratingType: t.ratingType || 'global', ratingDate: t.ratingDate || null,
     signupMode: t.signupMode || 'open',
     requireDiscord: t.requireDiscord ? 1 : 0,
+    matchTimes: t.matchTimes ? 1 : 0, timeApproval: t.timeApproval ? 1 : 0, roundWin: t.roundWin || null,
     playerReporting: t.playerReporting === undefined ? 1 : (t.playerReporting ? 1 : 0),
     veto: t.veto || { enabled: false, mode: 'upfront' },
     plannedR1: Array.isArray(t.plannedR1) ? t.plannedR1.map(p => p.slice()) : null,
@@ -3520,8 +3762,10 @@ async function handleAPI(req, res, url) {
       if (bracketType === 'single') {
         plan = { early: bo(pb.early, 3), semi: bo(pb.semi, 3), final: bo(pb.final, 5) };
         if (pb.thirdPlace) plan.thirdPlace = 1;
+        Object.assign(plan, cleanElimExtras(pb, null));   // playoffs after a qualifying bracket (decision 84)
       } else if (bracketType === 'double') {
         plan = { wb: bo(pb.wb, 3), wbFinal: bo(pb.wbFinal, 3), lb: bo(pb.lb, 3), lbFinal: bo(pb.lbFinal, 3), gf: bo(pb.gf, 5), lbHandicap: pb.lbHandicap ? 1 : 0 };
+        Object.assign(plan, cleanElimExtras(pb, null));
       } else {
         plan = Object.assign({ bo: (parseInt(pb.bo, 10) === 1) ? 1 : 3, final: pb.final ? 1 : 0, finalBo: bo(pb.finalBo, 5), fast: pb.fast ? 1 : 0 }, cleanSwissExtras(pb, null));
         const planRounds = cleanSwissRounds(pb.rounds);
@@ -3544,6 +3788,11 @@ async function handleAPI(req, res, url) {
     }
     // a Swiss with divisions (decision 77) has no playoffs after it
     if (competition === 'team' && bracketType === 'swiss' && cleanDivisions(b.divisions) >= 2 && plan && plan.stage2) return bad(res, SWISS_DIVS_NO_PLAYOFFS);
+    // nor has a qualifying bracket, which cannot end early either (decision 84)
+    if (competition === 'team' && (bracketType === 'single' || bracketType === 'double') && plan && plan.stage2) {
+      const why = elimPlayoffsProblem(plan, { stopAtAlive: intIn(b.stopAtAlive, 0, 128, 0), divisions: cleanDivisions(b.divisions) }, null);
+      if (why) return bad(res, why);
+    }
     const maxTeams = intIn(b.maxTeams, 0, 128, 0);
     const places = cleanRewardPlaces(b.rewardPlaces);
     if (places.error) return bad(res, places.error);
@@ -3581,6 +3830,9 @@ async function handleAPI(req, res, url) {
       signupMode: (['open', 'invite', 'request'].indexOf(b.signupMode) >= 0) ? b.signupMode : 'open',
       // players must give their Discord name to sign up (decision 82)
       requireDiscord: b.requireDiscord ? 1 : 0,
+      // players agree their own match times; with timeApproval an organizer okays them (decision 83)
+      matchTimes: b.matchTimes ? 1 : 0,
+      timeApproval: (b.matchTimes && b.timeApproval) ? 1 : 0,
       playerReporting: b.playerReporting === undefined ? true : !!b.playerReporting,
       invites: [],
       veto: cleanVeto(b.veto),
@@ -4608,6 +4860,10 @@ async function handleAPI(req, res, url) {
         if (Array.isArray(t.organizerFafIds) && t.organizerFafIds.indexOf(sess.fafId) >= 0) {
           const nReq = (t.players || []).filter(p => p.pending).length;
           if (nReq) out.push({ tId: t.id, tName: t.name, type: 'requests', tab: t.formation === 'draft' ? 'teams' : 'players', text: nReq + ' signup request' + (nReq === 1 ? ' awaits' : 's await') + ' your review' });
+          // match times (decision 83): agreed times waiting for an OK, and matches past their play-by date
+          const nOk = timesWaiting(t).length, nLate = timesLate(t).length;
+          if (nOk) out.push({ tId: t.id, tName: t.name, type: 'times', tab: 'schedule', text: nOk + ' match time' + (nOk === 1 ? ' waits' : 's wait') + ' for your OK' });
+          if (nLate) out.push({ tId: t.id, tName: t.name, type: 'late', tab: 'schedule', text: nLate + ' match' + (nLate === 1 ? ' is' : 'es are') + ' past the play-by date' });
         }
         if (!meP) continue;
         // score submissions awaiting MY team's confirmation
@@ -4618,6 +4874,19 @@ async function handleAPI(req, res, url) {
             if (other === meP.teamId) {
               out.push({ tId: t.id, tName: t.name, type: 'confirm', tab: 'bracket', text: 'Confirm the reported score (' + m.pendingReport.score1 + '\u2013' + m.pendingReport.score2 + ')' });
               break;
+            }
+          }
+        }
+        // match times (decision 83): a time the other side proposed, or a match with none yet
+        if (t.matchTimes && meP.teamId && t.status === 'running') {
+          for (const m of (t.matches || [])) {
+            if (!timeOpen(m) || (m.team1 !== meP.teamId && m.team2 !== meP.teamId)) continue;
+            const opp = tTeamName(t, m.team1 === meP.teamId ? m.team2 : m.team1);
+            if (m.timeProp && m.timeProp.team !== meP.teamId) {
+              out.push({ tId: t.id, tName: t.name, type: 'time', tab: 'schedule', text: opp + ' proposed a time for your match: accept it or propose another' });
+            } else if (!m.time && !m.timeProp) {
+              const w = roundWindowOf(t, m);
+              out.push({ tId: t.id, tName: t.name, type: 'time', tab: 'schedule', text: 'Agree a time for your match vs ' + opp + (w && w.by ? ' (play by ' + timeText(w.by) + ')' : '') });
             }
           }
         }
@@ -5035,6 +5304,20 @@ async function handleAPI(req, res, url) {
           const mySide = capTeam ? factionSideKey(m, capTeam.id) : null;
           const copy = Object.assign({}, m);
           copy.fveto = factionViewFor(m, mySide);
+          return copy;
+        });
+      }
+      // Match times (decision 83): a proposal is the business of the two sides and the organizers,
+      // and so is an agreed time still waiting for an organizer's OK. Everyone else sees a time once
+      // it stands.
+      if (Array.isArray(view.matches) && t.matchTimes && !organizer) {
+        const myT = memberTeamId || (capTeam && capTeam.id) || null;
+        view.matches = view.matches.map(m => {
+          if (!m || (!m.timeProp && !(m.time && !m.time.ok))) return m;
+          if (myT && (m.team1 === myT || m.team2 === myT)) return m;
+          const copy = Object.assign({}, m);
+          delete copy.timeProp;
+          if (copy.time && !copy.time.ok) delete copy.time;
           return copy;
         });
       }
@@ -6696,10 +6979,12 @@ async function handleAPI(req, res, url) {
       if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
       const on = !!b.on;
       if (t.competition === 'ffa') return bad(res, 'An FFA tournament has no semi-finals');
-      if (t.bracketType === 'double') return bad(res, 'In double elimination the losers bracket already decides 3rd place');
-      if (t.bracketType !== 'single' && t.bracketType !== 'swiss') return bad(res, 'This tournament has no semi-finals');
+      // playoffs after a qualifying bracket (decision 84) are handled like a Swiss stage's
+      const elimPo = elimPlayoffsPlanned(t);
+      if (t.bracketType === 'double' && !elimPo) return bad(res, 'In double elimination the losers bracket already decides 3rd place');
+      if (t.bracketType !== 'single' && t.bracketType !== 'swiss' && !elimPo) return bad(res, 'This tournament has no semi-finals');
       if (t.status === 'finished') return bad(res, 'This tournament has already finished');
-      const swiss = t.bracketType === 'swiss';
+      const swiss = t.bracketType === 'swiss' || elimPo;
       if (t.divisions > 1) return bad(res, 'A 3rd place match is not available with divisions');
       const preStart = ['signup', 'draft', 'drafted'].indexOf(t.status) >= 0;
       const s2 = swiss ? stageTwoCfg(t) : null;
@@ -7270,6 +7555,16 @@ async function handleAPI(req, res, url) {
         const pbIn = b.plan || {};
         const s2After = pbIn.stage2 !== undefined ? !!pbIn.stage2 : !!(t.plan && t.plan.stage2);
         if (compAfter === 'team' && newBt === 'swiss' && divsAfter >= 2 && s2After) return bad(res, SWISS_DIVS_NO_PLAYOFFS);
+        // a qualifying bracket before playoffs (decision 84): not with an early end, nor with divisions
+        if (compAfter === 'team' && (newBt === 'single' || newBt === 'double')) {
+          const opIn = (t.plan && t.plan.s2CutTo !== undefined && t.plan.bo === undefined) ? t.plan : {};
+          const exAfter = cleanElimExtras(pbIn, opIn);
+          if (exAfter.stage2) {
+            const stopAfter = b.stopAtAlive !== undefined ? intIn(b.stopAtAlive, 0, 128, 0) : (parseInt(t.stopAtAlive, 10) || 0);
+            const why = elimPlayoffsProblem(exAfter, { stopAtAlive: stopAfter, divisions: divsAfter }, null);
+            if (why) return bad(res, why);
+          }
+        }
       }
 
       const competition = b.competition !== undefined ? (b.competition === 'ffa' ? 'ffa' : 'team') : t.competition;
@@ -7323,11 +7618,15 @@ async function handleAPI(req, res, url) {
         if (b.stopAtAlive !== undefined) t.stopAtAlive = intIn(b.stopAtAlive, 0, 128, t.stopAtAlive || 0);
         const pb = b.plan || {};
         const op = (t.plan && typeof t.plan === 'object') ? t.plan : {};
+        // playoffs after a qualifying bracket (decision 84): kept when not sent, like the rest of the plan
+        const opElim = (op.s2CutTo !== undefined && op.bo === undefined) ? op : {};
         if (t.bracketType === 'single') {
           t.plan = { early: bo(pb.early, op.early || 3), semi: bo(pb.semi, op.semi || 3), final: bo(pb.final, op.final || 5) };
           if (pb.thirdPlace !== undefined ? pb.thirdPlace : op.thirdPlace) t.plan.thirdPlace = 1;
+          Object.assign(t.plan, cleanElimExtras(pb, opElim));
         } else if (t.bracketType === 'double') {
           t.plan = { wb: bo(pb.wb, op.wb || 3), wbFinal: bo(pb.wbFinal, op.wbFinal || 3), lb: bo(pb.lb, op.lb || 3), lbFinal: bo(pb.lbFinal, op.lbFinal || 3), gf: bo(pb.gf, op.gf || 5), lbHandicap: pb.lbHandicap !== undefined ? (pb.lbHandicap ? 1 : 0) : (op.lbHandicap ? 1 : 0) };
+          Object.assign(t.plan, cleanElimExtras(pb, opElim));
         } else {
           t.plan = Object.assign({ bo: pb.bo !== undefined ? ((parseInt(pb.bo, 10) === 1) ? 1 : 3) : (op.bo || 3), final: pb.final !== undefined ? (pb.final ? 1 : 0) : (op.final !== undefined ? op.final : 1), finalBo: bo(pb.finalBo, op.finalBo || 5), fast: pb.fast !== undefined ? (pb.fast ? 1 : 0) : (op.fast ? 1 : 0) }, cleanSwissExtras(pb, op));
           // the planned number of rounds (decision 61): kept when not sent, removed by "automatic"
@@ -7638,7 +7937,7 @@ async function handleAPI(req, res, url) {
           if (prob) return bad(res, prob.replace(' before publishing', ''));
         }
       }
-      const touched = ['description', 'rewards', 'prizeCurrency', 'prizeAmount', 'sponsors', 'streams', 'minRating', 'maxRating', 'maxTeamRating', 'ratingCap', 'lobbyOptions', 'mods', 'signupMode', 'requireDiscord', 'playerReporting', 'checkInDeadline', 'veto'].filter(k => b[k] !== undefined);
+      const touched = ['description', 'rewards', 'prizeCurrency', 'prizeAmount', 'sponsors', 'streams', 'minRating', 'maxRating', 'maxTeamRating', 'ratingCap', 'lobbyOptions', 'mods', 'signupMode', 'requireDiscord', 'matchTimes', 'timeApproval', 'playerReporting', 'checkInDeadline', 'veto'].filter(k => b[k] !== undefined);
       if (nextSched && (nextSched.dayTimesMode !== (t.dayTimesMode || null) || JSON.stringify(nextSched.dayTimes || null) !== JSON.stringify(t.dayTimes || null))) {
         touched.push(nextSched.dayTimesMode === 'perday' ? 'start time per day'
           : (nextSched.dayTimesMode === 'same' ? 'same start time every day' : 'start times per day (unanswered)'));
@@ -7682,6 +7981,12 @@ async function handleAPI(req, res, url) {
       if (b.mods !== undefined) t.mods = cleanName(b.mods, 500);
       if (b.signupMode !== undefined && ['open', 'invite', 'request'].indexOf(b.signupMode) >= 0) t.signupMode = b.signupMode;
       if (b.requireDiscord !== undefined) t.requireDiscord = b.requireDiscord ? 1 : 0;
+      if (b.matchTimes !== undefined) t.matchTimes = b.matchTimes ? 1 : 0;
+      if (b.timeApproval !== undefined) {
+        t.timeApproval = b.timeApproval ? 1 : 0;
+        // without the approval, the times that waited for it simply stand (decision 83)
+        if (!t.timeApproval) for (const m of (t.matches || [])) if (m.time && !m.time.ok) m.time.ok = 1;
+      }
       if (b.playerReporting !== undefined) t.playerReporting = !!b.playerReporting;
       if (b.name !== undefined) { const nm = cleanName(b.name, 60); if (nm) t.name = nm; }
       if (nextSched) { t.dayTimesMode = nextSched.dayTimesMode; t.dayTimes = nextSched.dayTimes; }
@@ -8030,7 +8335,7 @@ async function handleAPI(req, res, url) {
       if (!canManageMaps(t, req, b)) return json(res, 403, { error: 'Map access is limited to this tournament\u2019s own organizers' });
       const bracket = String(b.bracket || '');
       const round = parseInt(b.round, 10);
-      if (['wb', 'lb', 'gf', 'sw', 'ffa', '3p', 'dc'].indexOf(bracket) < 0 || !(round >= 1 && round <= 30)) return bad(res, 'Bad round');
+      if (['wb', 'lb', 'gf', 'sw', 'ffa', '3p', 'dc', 'qw', 'ql'].indexOf(bracket) < 0 || !(round >= 1 && round <= 30)) return bad(res, 'Bad round');
       // maps are now map-DB IDs; keep only ids that exist in the database
       let ids = Array.isArray(b.maps) ? b.maps.filter(id => mapById(t, id)) : [];
       ids = ids.slice(0, 9);
@@ -8370,9 +8675,40 @@ async function handleAPI(req, res, url) {
         tlog(t, req, b.admin, 'started the bracket (' + n + ' teams)' + (fmtLocked ? ' with the format as proposed' : ''));
         const c = fmtLocked ? planStartConfig(t) : (b.config || {});
 
+        // A qualifying bracket before playoffs (decision 84): the start config says so, else the plan.
+        const elimEx = (t.competition !== 'ffa' && (t.bracketType === 'single' || t.bracketType === 'double'))
+          ? cleanElimExtras(c, t.plan || {}) : {};
+        if (elimEx.stage2) {
+          const why = elimPlayoffsProblem(elimEx, t, n);
+          if (why) return bad(res, why);
+          if (t.bracketType === 'double' && n < 3) return bad(res, 'Double elimination needs at least 3 teams');
+        }
+
         if (t.competition === 'ffa') {
           ffaCreateRound(t, 1, t.teams.map(x => x.id));
           t.status = 'running';
+        } else if (elimEx.stage2) {
+          const sh = stageOneShape(nextPow2(n), t.bracketType === 'double', elimEx.s2CutTo);
+          t.cfg = t.bracketType === 'single'
+            ? { rounds: cleanBoList(c.rounds, sh.wbRounds) }
+            : { wb: cleanBoList(c.wb, sh.wbRounds), lb: cleanBoList(c.lb, sh.lbRounds) };
+          t.stage2 = buildElimStageTwo(elimEx, c);
+          if (t.pickOpponents) {
+            // the seeds choose their round one opponent in the qualifying bracket (buildAfterPicks)
+            const field = t.teams.slice().sort((x, y) => x.seed - y.seed).map(x => x.id);
+            if (!PICKS.fullBracket(field.length)) return bad(res, PICK_FIELD_MSG(field.length));
+            PICKS.startPickPhase(t, field, { perPickMs: pickClockMs(t) });
+            t.pickFor = 'main';
+            tlog(t, req, b.admin, 'opened the opponent pick phase (' + Math.floor(field.length / 2) + ' seeds to pick)');
+            tpush(t, 'System', 'Seeds 1-' + Math.floor(field.length / 2) + ' now choose their round one opponent, in seed order.');
+            saveDB();
+            return json(res, 200, { ok: true, picking: 1 });
+          }
+          buildStageOne(t, stageOneCfg(t), t.stage2.cutTo);
+          if (t.status !== 'finished') t.status = 'running';
+          tpush(t, 'System', 'The qualifying bracket is drawn. It is played until ' + t.stage2.cutTo + ' are left; those '
+            + t.stage2.cutTo + ' then start again at 0 losses in a ' + (t.stage2.type === 'double' ? 'double' : 'single') + ' elimination playoff bracket.');
+          buildElimPlayoffs(t);   // only when byes alone already decided it (a tiny field)
         } else if (t.bracketType === 'single') {
           const divs = divisionsOn(t) ? t.divisions : 0;
           if (divs) { const err = divisionStartCheck(t, divs, 2); if (err) return bad(res, err); }
@@ -8633,6 +8969,7 @@ async function handleAPI(req, res, url) {
         if (t.competition === 'ffa' || t.bracketType === 'swiss') {
           return bad(res, 'Stopping at a survivor count only applies to single or double elimination.');
         }
+        if (elimPlayoffsPlanned(t)) return bad(res, 'This tournament has playoffs after its qualifying bracket, so it does not end early. Turn the playoffs off on the Format panel first.');
         if (n < 2) return bad(res, 'Stopping at 1 survivor is just playing the tournament out - set 2 or more, or clear it.');
         const field = (t.teams || []).length;
         if (field && n >= field) {
@@ -8667,6 +9004,126 @@ async function handleAPI(req, res, url) {
     // Set the Bo on ONE match. The per-round control below is the bulk tool; this is the escape
     // hatch for the single series a TD needs to lengthen or shorten on the day - a stream
     // overrun, a deciding match that deserves more games, a Swiss pairing that has to be quick.
+    // ---- match times (decision 83) ----
+    if (sub === 'match_time_propose' || sub === 'match_time_accept' || sub === 'match_time_cancel') {
+      if (!t.matchTimes) return bad(res, 'Players do not schedule their own match times in this tournament');
+      const m = matchById(t, String(b.matchId || ''));
+      if (!m) return bad(res, 'Unknown match');
+      const sess = currentSession(req);
+      if (!sess || !sess.fafId) return json(res, 401, { error: 'Log in with FAF first' });
+      const mine = ownTeamIds(t, req)[0] || null;
+      if (!mine || (mine !== m.team1 && mine !== m.team2)) return json(res, 403, { error: 'Only the two sides of this match can agree its time' });
+      if (!timeOpen(m)) return bad(res, m.status === 'done' ? 'This match has been played' : 'This match cannot be scheduled now: both sides have to be known and it must not have started');
+      const who = sess.fafName || ('FAF ' + sess.fafId);
+      const other = mine === m.team1 ? m.team2 : m.team1;
+      if (sub === 'match_time_cancel') {
+        if (!m.timeProp) return bad(res, 'No time is proposed');
+        const own = m.timeProp.team === mine;
+        matchChatLine(t, m, who, who + (own ? ' withdrew the proposed time (' : ' declined the proposed time (') + timeText(m.timeProp.at) + ').');
+        delete m.timeProp;
+        saveDB();
+        return json(res, 200, { ok: true });
+      }
+      if (m.time && m.time.by === 'org') return bad(res, 'An organizer set the time of this match. Ask them in the match chat if it has to move.');
+      if (sub === 'match_time_accept') {
+        const pr = m.timeProp;
+        if (!pr) return bad(res, 'No time is proposed');
+        if (pr.team === mine) return bad(res, 'Your own proposal: the other side accepts it');
+        const why = timeWindowRefusal(t, m, pr.at);
+        if (why) return bad(res, why + '. Propose another time.');
+        m.time = { at: pr.at, by: 'teams', who: [pr.who, who].join(' / '), ok: t.timeApproval ? 0 : 1, set: now() };
+        delete m.timeProp;
+        matchChatLine(t, m, who, who + ' accepted ' + timeText(m.time.at) + '.' + (m.time.ok ? '' : ' It now waits for an organizer\u2019s OK.'));
+        tlog(t, req, null, 'agreed the time of ' + matchLabel(t, m) + ' (' + tTeamName(t, m.team1) + ' vs ' + tTeamName(t, m.team2) + '): ' + timeText(m.time.at) + (m.time.ok ? '' : ', waiting for an organizer'));
+        saveDB();
+        return json(res, 200, { ok: true, time: m.time });
+      }
+      // propose (or answer a proposal with another time)
+      const at = cleanWhen(b.at);
+      if (!at) return bad(res, 'Pick a date and a time');
+      const why = timeWindowRefusal(t, m, at);
+      if (why) return bad(res, why);
+      if (m.time && m.time.at === at) return bad(res, 'That is already the time of this match');
+      // the other side proposed exactly this time: that is an agreement
+      if (m.timeProp && m.timeProp.team === other && m.timeProp.at === at) {
+        m.time = { at, by: 'teams', who: [m.timeProp.who, who].join(' / '), ok: t.timeApproval ? 0 : 1, set: now() };
+        delete m.timeProp;
+        matchChatLine(t, m, who, who + ' accepted ' + timeText(at) + '.' + (m.time.ok ? '' : ' It now waits for an organizer\u2019s OK.'));
+        tlog(t, req, null, 'agreed the time of ' + matchLabel(t, m) + ' (' + tTeamName(t, m.team1) + ' vs ' + tTeamName(t, m.team2) + '): ' + timeText(at) + (m.time.ok ? '' : ', waiting for an organizer'));
+        saveDB();
+        return json(res, 200, { ok: true, time: m.time });
+      }
+      m.timeProp = { at, team: mine, who, made: now() };
+      matchChatLine(t, m, who, who + ' (' + tTeamName(t, mine) + ') proposes ' + timeText(at) + (m.time ? ' instead of ' + timeText(m.time.at) : '')
+        + '. ' + tTeamName(t, other) + ' can accept it on the match, or propose another time.');
+      saveDB();
+      return json(res, 200, { ok: true, proposed: m.timeProp });
+    }
+
+    if (sub === 'match_time_set' || sub === 'match_time_approve') {
+      if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
+      if (!t.matchTimes) return bad(res, 'Match times are off in this tournament: turn them on under Admin, Format');
+      const m = matchById(t, String(b.matchId || ''));
+      if (!m) return bad(res, 'Unknown match');
+      if (m.status === 'done' || m.status === 'bye') return bad(res, 'This match has been played');
+      const orgName = actorOf(req, b.admin).name || 'Organizer';
+      const vs = matchLabel(t, m) + (m.team1 && m.team2 ? ' (' + tTeamName(t, m.team1) + ' vs ' + tTeamName(t, m.team2) + ')' : '');
+      if (sub === 'match_time_approve') {
+        if (!m.time) return bad(res, 'This match has no time to approve');
+        if (m.time.ok) return json(res, 200, { ok: true, time: m.time });
+        m.time.ok = 1;
+        m.time.okBy = orgName;
+        matchChatLine(t, m, orgName, orgName + ' approved ' + timeText(m.time.at) + '.');
+        tlog(t, req, b.admin, 'approved the time of ' + vs + ': ' + timeText(m.time.at));
+        saveDB();
+        return json(res, 200, { ok: true, time: m.time });
+      }
+      const at = cleanWhen(b.at);
+      if (at === undefined) return bad(res, 'Pick a date and a time');
+      const note = cleanName(b.note, 200);
+      if (!at) {
+        // clearing: the players agree a new one (or the organizer sets one later)
+        if (!m.time && !m.timeProp) return json(res, 200, { ok: true });
+        const was = m.time ? m.time.at : null;
+        delete m.time; delete m.timeProp;
+        matchChatLine(t, m, orgName, orgName + (was ? ' cleared the time (' + timeText(was) + ')' : ' cleared the proposed time') + '.' + noteSentence(note) + ' Agree a new one on the match.');
+        tlog(t, req, b.admin, 'cleared the time of ' + vs + (note ? ': ' + note : ''));
+        saveDB();
+        return json(res, 200, { ok: true, time: null });
+      }
+      const prev = m.time ? m.time.at : null;
+      m.time = { at, by: 'org', who: orgName, ok: 1, set: now() };
+      delete m.timeProp;
+      matchChatLine(t, m, orgName, orgName + ' set the time: ' + timeText(at) + (prev && prev !== at ? ' (was ' + timeText(prev) + ')' : '') + '.' + noteSentence(note));
+      tlog(t, req, b.admin, 'set the time of ' + vs + ' to ' + timeText(at) + (note ? ': ' + note : ''));
+      saveDB();
+      return json(res, 200, { ok: true, time: m.time });
+    }
+
+    // A round's window (decision 83): players pick times inside it; a match unplayed after its "by"
+    // is late. key = [d<division>:]<bracket>:<round>, as the page names a round.
+    if (sub === 'round_window') {
+      if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
+      const key = String(b.key || '');
+      if (!/^(d[1-4]:)?(wb|lb|gf|3p|sw|dc|qw|ql):\d{1,2}$/.test(key)) return bad(res, 'Unknown round');
+      const from = cleanWhen(b.from), by = cleanWhen(b.by);
+      if (from === undefined || by === undefined) return bad(res, 'Pick a date and a time');
+      if (from && by && Date.parse(from) >= Date.parse(by)) return bad(res, 'The round has to start before its play-by date');
+      t.roundWin = t.roundWin || {};
+      const had = t.roundWin[key] ? JSON.stringify(t.roundWin[key]) : null;
+      if (!from && !by) delete t.roundWin[key];
+      else t.roundWin[key] = { from: from || null, by: by || null };
+      if (!Object.keys(t.roundWin).length) t.roundWin = null;
+      const now2 = t.roundWin && t.roundWin[key] ? JSON.stringify(t.roundWin[key]) : null;
+      if (had !== now2) {
+        tlog(t, req, b.admin, (from || by)
+          ? 'set the dates of ' + roundKeyText(t, key) + ': ' + (from ? 'from ' + timeText(from) : '') + (from && by ? ', ' : '') + (by ? 'play by ' + timeText(by) : '')
+          : 'cleared the dates of ' + roundKeyText(t, key));
+      }
+      saveDB();
+      return json(res, 200, { ok: true, window: (t.roundWin && t.roundWin[key]) || null });
+    }
+
     if (sub === 'set_match_bo') {
       if (!canOrganize(t, req, b)) return json(res, 403, { error: 'Organizer rights required' });
       const boVal = parseInt(b.bo, 10);
@@ -9271,6 +9728,12 @@ async function handleAPI(req, res, url) {
           }
           m.status = 'ready'; m.winner = null; m.loser = null;
         } else {
+          // The last matches of a qualifying bracket feed its playoffs (decision 84): corrected only
+          // while no playoff match has started, and the playoffs then follow the corrected result.
+          if (elimStaged(t) && (m.bracket === 'qw' || m.bracket === 'ql') && t.stage2.built) {
+            if (playoffsLocked(t)) return bad(res, 'The playoffs have already started, so results of the qualifying bracket can no longer be corrected');
+            playoffsFrom = elimPlayoffSig(t);
+          }
           const err = undoMatch(t, m);
           if (err) return bad(res, err);
         }

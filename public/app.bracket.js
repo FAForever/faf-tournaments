@@ -171,6 +171,17 @@ function pickPoolForRound(bracket, round) {
 // the right number of games (e.g. 1 for a Bo1 round, not a hardcoded 5).
 function projectedBoFor(bracket, round) {
   const plan = T.plan || {};
+  // a qualifying bracket and its playoffs (decision 84)
+  const ep = elimPlanT();
+  if (ep) {
+    if (bracket === 'qw') return T.bracketType === 'double' ? (plan.wb || 3) : (plan.early || 3);
+    if (bracket === 'ql') return plan.lb || 3;
+    if (bracket === 'gf') return ep.fin;
+    if (bracket === 'lb') return ep.lbBo || 3;
+    if (bracket === '3p') return ep.bo;
+    const R = Math.max(1, Math.round(Math.log2(ep.cut)));
+    return (ep.type === 'single' && round >= R) ? ep.fin : ep.bo;
+  }
   if (bracket === 'gf') return plan.gf || 5;
   if (bracket === 'dc') return (T.cfg && T.cfg.bo) || plan.bo || 1;
   const n = projectedTeamCount();
@@ -186,6 +197,10 @@ function projectedBoFor(bracket, round) {
   return plan.bo || 1;
 }
 
+function mapsTitleOf(bracket, round) {
+  return bracket === 'gf' ? 'Grand final' : bracket === '3p' ? '3rd place match' : bracket === 'dc' ? 'Deciders for the final'
+    : (bracket === 'qw' || bracket === 'ql' || elimPlanT()) ? roundKeyLabel(bracket, round) : bracket.toUpperCase() + ' round ' + round;
+}
 function editMaps(bracket, round, bo) {
   const existing = mapsFor(bracket, round);
   const roundMatches = T.matches.filter(m => m.bracket === bracket && m.round === round);
@@ -195,7 +210,7 @@ function editMaps(bracket, round, bo) {
   const count = Math.max(maxBo, existing.length, 1);
   const db = (T.mapDb || []);
   if (db.length === 0) {
-    modal(`<h3>Maps \u2014 ${esc(bracket === 'gf' ? 'Grand final' : bracket === '3p' ? '3rd place match' : bracket === 'dc' ? 'Deciders for the final' : bracket.toUpperCase() + ' round ' + round)}</h3>
+    modal(`<h3>Maps \u2014 ${esc(mapsTitleOf(bracket, round))}</h3>
       <p class="muted small">No maps in the database yet. Add maps on the <strong>Maps</strong> tab first, then assign them here.</p>
       <div class="actions"><button class="btn ghost" id="mCancel">Close</button></div>`, root => {
       root.querySelector('#mCancel').onclick = closeModal;
@@ -208,7 +223,7 @@ function editMaps(bracket, round, bo) {
     selects.push(`<label style="display:block;margin-bottom:7px">Game ${i + 1} <select class="mapSel" style="width:100%">${opt(existing[i] || '')}</select></label>`);
   }
   modal(`
-    <h3>Maps \u2014 ${esc(bracket === 'gf' ? 'Grand final' : bracket === '3p' ? '3rd place match' : bracket === 'dc' ? 'Deciders for the final' : bracket.toUpperCase() + ' round ' + round)}</h3>
+    <h3>Maps \u2014 ${esc(mapsTitleOf(bracket, round))}</h3>
     <p class="muted small">Pick a map from the database for each game of the series (Bo${maxBo}). ${T.veto && T.veto.enabled ? 'Note: if map vetoes are enabled, captains pick the maps per match — this round pool is a fallback.' : 'Everyone in this round plays these maps.'}</p>
     ${selects.join('')}
     <div class="actions">
@@ -252,7 +267,9 @@ function mLabel(m) {
     return 'DECIDER' + (m.round > 1 ? ' ' + m.round : '') + (several ? ' M' + (m.index + 1) : '');
   }
   if (m.bracket === 'ffa') return 'R' + m.round + ' LOBBY ' + (m.index + 1);
-  const p = m.bracket === 'lb' ? 'LB ' : (T.bracketType === 'double' ? 'WB ' : '');
+  // the qualifying bracket before playoffs (decision 84)
+  if (m.bracket === 'qw' || m.bracket === 'ql') return 'Q ' + (m.bracket === 'ql' ? 'LB ' : (T.bracketType === 'double' ? 'WB ' : '')) + 'R' + m.round + ' M' + (m.index + 1);
+  const p = m.bracket === 'lb' ? 'LB ' : (bracketIsDoubleT() ? 'WB ' : '');
   return p + 'R' + m.round + ' M' + (m.index + 1);
 }
 
@@ -411,6 +428,13 @@ function matchBox(m) {
   box.dataset.mid = m.id;
   box.innerHTML = `<div class="botag">${mLabel(m)} · BO${m.bo}${m.hcap ? ' · UB starts 1-0' : ''}${(!masked && m.forfeit) ? ' · <span class="ff-mark">FORFEIT</span>' : ''}${(!masked && m.status === 'live') ? ' · <span class="livechip">LIVE</span>' : ''}</div>` +
     row(m.team1, m.score1, 1) + row(m.team2, m.score2, 2) +
+    // its time, when the players agree their own (decision 83)
+    (() => {
+      const tv = matchTimeView(m);
+      if (!tv) return '';
+      const can = canTouchTime(m);
+      return '<div class="mtime ' + tv.cls + '"' + (can ? ' data-mtimego role="button" tabindex="0"' : '') + ' title="' + esc(tv.title + (can ? '. Click to change it.' : '')) + '">\u{1F552} ' + esc(tv.txt) + '</div>';
+    })() +
     // chat first, then the veto link, on one row to keep the box compact
     (() => {
       const chat = (m.team1 && m.team2 && matchChatAllowed(m))
@@ -432,6 +456,8 @@ function matchBox(m) {
       ? `<div class="bfoot">${prTag}${(canReport || canCorrect) ? `<button class="btn ${canReport ? 'amber' : 'ghost'} small">${prMine ? 'Confirm score' : canReport ? (viewerIsOrganizer() ? 'Report score' : 'Submit score') : 'Correct'}</button>` : ''}</div>` : '');
   const btn = box.querySelector('.bfoot button:not([data-reveal])');
   if (btn) btn.onclick = () => reportScore(m.id);
+  const tgo = box.querySelector('[data-mtimego]');
+  if (tgo) tgo.onclick = (e) => { e.stopPropagation(); openMatchTime(m); };
   const revBtn = box.querySelector('[data-reveal]');
   if (revBtn) revBtn.onclick = () => {
     if (revealedMatches.has(m.id)) revealedMatches.delete(m.id); else revealedMatches.add(m.id);
@@ -864,6 +890,15 @@ function projectedTeamCount() {
 
 // The round keys this bracket will have. Uses real matches once generated, otherwise
 // projects them from the expected team count so pools can be assigned during signups.
+// The rounds of the playoffs after a qualifying bracket (decision 84), before they exist.
+function elimPlayoffKeysT(ep) {
+  const R = Math.max(1, Math.round(Math.log2(ep.cut)));
+  const keys = [];
+  for (let i = 1; i <= R; i++) keys.push('wb:' + i);
+  if (ep.type === 'double') { for (let q = 1; q <= 2 * R - 2; q++) keys.push('lb:' + q); keys.push('gf:1'); }
+  else if (ep.third && ep.cut >= 4) keys.push('3p:' + R);
+  return keys;
+}
 function projectedRoundKeys() {
   // real bracket wins
   const real = [], seen = {};
@@ -872,6 +907,9 @@ function projectedRoundKeys() {
     const k = m.bracket + ':' + m.round;
     if (!seen[k]) { seen[k] = 1; real.push(k); }
   }
+  // the playoffs of a qualifying bracket can have their pools before they are built (decision 84)
+  const epR = elimPlanT();
+  if (real.length && epR && !epR.built) for (const k of elimPlayoffKeysT(epR)) if (!seen[k]) { seen[k] = 1; real.push(k); }
   if (real.length) return { keys: real, projected: false, teams: T.teams.length };
 
   const n = projectedTeamCount();
@@ -887,6 +925,13 @@ function projectedRoundKeys() {
     for (let i = 1; i <= r; i++) keys.push('sw:' + i);
     if (!T.plan || T.plan.final !== 0) keys.push('gf:1');
     if (swissKnown) return { keys, projected: true, teams: n, known: true };
+  } else if (elimPlanT() && n > elimPlanT().cut) {
+    // a qualifying bracket, then its playoffs (decision 84)
+    const ep = elimPlanT();
+    const sh = stageOneShapeT(nextPow2(n), T.bracketType === 'double', ep.cut);
+    for (let i = 1; i <= sh.wbRounds; i++) keys.push('qw:' + i);
+    for (let i = 1; i <= sh.lbRounds; i++) keys.push('ql:' + i);
+    for (const k of elimPlayoffKeysT(ep)) keys.push(k);
   } else {
     const R = log2i(nextPow2(n));
     for (let i = 1; i <= R; i++) keys.push('wb:' + i);
@@ -904,6 +949,18 @@ function projectedRoundKeys() {
 // division it is that division's own round (its final is "Final" however many rounds it has).
 function roundKeyLabel(bracket, round, division) {
   round = parseInt(round, 10);
+  // a qualifying bracket and its playoffs (decision 84)
+  if (bracket === 'qw') return 'Qualifying ' + (T.bracketType === 'double' ? 'winners ' : '') + 'round ' + round;
+  if (bracket === 'ql') return 'Qualifying losers round ' + round;
+  const ep = elimPlanT();
+  if (ep && isPlayoffKey(bracket)) {
+    if (bracket === 'gf') return 'Playoffs grand final';
+    if (bracket === '3p') return 'Playoffs 3rd place match';
+    const R = Math.max(1, Math.round(Math.log2(ep.cut)));
+    if (bracket === 'lb') return round === 2 * R - 2 ? 'Playoffs losers final' : 'Playoffs losers round ' + round;
+    if (ep.type === 'double') return round === R ? 'Playoffs winners final' : 'Playoffs winners round ' + round;
+    return round === R ? 'Playoffs final' : round === R - 1 ? 'Playoffs semifinals' : 'Playoffs round ' + round;
+  }
   if (bracket === 'gf') return 'Grand final';
   if (bracket === '3p') return '3rd place match';
   if (bracket === 'dc') return 'Deciders for the final';
@@ -1163,16 +1220,18 @@ function assignPool(pool) {
 function vetoStageKey(m) {
   if (divisionsOnT() && m.division) return 'd' + m.division;
   if (T.bracketType === 'swiss') return m.bracket === 'sw' ? 'swiss' : 'playoffs';
+  if (elimStagedT()) return (m.bracket === 'qw' || m.bracket === 'ql') ? 'qual' : 'playoffs';
   return 'all';
 }
 function vetoStageLabel(key) {
   if (key === 'swiss') return 'Swiss stage';
+  if (key === 'qual') return 'Qualifying bracket';
   if (key === 'playoffs') return T.stage2 ? 'Playoffs' : 'Final';
   if (key.charAt(0) === 'd') return divisionNameOf(parseInt(key.slice(1), 10) || 1);
   return 'All matches';
 }
 function vetoStageOrder(key) {
-  if (key === 'swiss') return 0;
+  if (key === 'swiss' || key === 'qual') return 0;
   if (key === 'playoffs') return 1;
   return key.charAt(0) === 'd' ? (parseInt(key.slice(1), 10) || 0) : 0;
 }
@@ -1811,6 +1870,9 @@ function bracketColumns(el, bracket, title, gfMatch, division) {
     head.className = 'bcol-title';
     head.textContent = colLabel(bracket, r, rounds);
     col.appendChild(head);
+    // the round's dates, when the players agree their own times (decision 83)
+    const whenH = roundWhenHTML((division ? 'd' + division + ':' : '') + bracket + ':' + r, 1);
+    if (whenH) col.insertAdjacentHTML('beforeend', whenH);
     // Per-round Bo control (organizers only), when at least one match in the round hasn't started
     if (viewToken()) {
       const roundMs = ms.filter(x => x.round === r);
@@ -1859,6 +1921,8 @@ function bracketColumns(el, bracket, title, gfMatch, division) {
     head.className = 'bcol-title';
     head.textContent = 'GRAND FINAL';
     col.appendChild(head);
+    const whenG = roundWhenHTML((division ? 'd' + division + ':' : '') + 'gf:1', 1);
+    if (whenG) col.insertAdjacentHTML('beforeend', whenG);
     // The same Bo line as every round: a select while the length can change, else the length
     // (decision 70). The grand final used to drop the line once it was under way or played, which put
     // its map pool and its match a line higher than every other column's.
@@ -2041,6 +2105,9 @@ function drawBracket(el, division) {
 
   if (T.competition === 'ffa') return drawFfaRounds(el);
 
+  // a qualifying bracket, then playoffs (decision 84)
+  if (elimStagedT()) return drawElimStaged(el);
+
   if (T.bracketType === 'swiss') {
     // King / Prince (decision 77): this tab is one division's Swiss
     if (one) return drawSwissDivision(el, one);
@@ -2112,6 +2179,80 @@ function drawBracket(el, division) {
   bracketColumns(el, 'wb', '', null, one);
   alignBracketSections(el);
   for (const f of connectorRedraws) f();
+}
+
+// A qualifying bracket and its playoffs (decision 84). Once the playoffs exist they sit on top, the
+// live action, with the qualifying bracket under them as history; before that the qualifying bracket
+// comes first and a box under it says what the playoffs will be (and takes their map pools).
+function drawElimStaged(el) {
+  const ep = elimPlanT();
+  const built = stageTwoLive();
+  if (built) {
+    const hdr = document.createElement('div');
+    hdr.className = 'division-header';
+    const field = (T.stage2.field || []).map((id, i) => (i + 1) + ' ' + teamName(id)).join(', ');
+    hdr.innerHTML = '<h2 style="margin:0 0 10px">Playoffs <span class="h2-strong">' + esc(String(ep.cut)) + '-team ' + ep.type + ' elimination</span></h2>'
+      + '<p class="muted small" style="margin:0 0 12px">The last ' + esc(String(ep.cut)) + ' of the qualifying bracket, starting again at 0 losses, seeded '
+      + esc(field) + '.</p>' + (ep.type === 'double' ? '' : thirdPlaceToolsHTML());
+    el.appendChild(hdr);
+    wireThirdPlaceTools(hdr);
+    if (ep.type === 'double') {
+      const gf = T.matches.find(m => m.bracket === 'gf');
+      bracketColumns(el, 'wb', 'Winners bracket', gf, 0);
+      bracketColumns(el, 'lb', 'Losers bracket', null, 0);
+    } else {
+      bracketColumns(el, 'wb', '');
+    }
+  }
+  const qh = document.createElement('div');
+  qh.className = 'division-header';
+  qh.innerHTML = '<h2 style="margin:' + (built ? '22px' : '0') + ' 0 10px">Qualifying <span class="h2-strong">bracket</span></h2>'
+    + '<p class="muted small" style="margin:0 0 12px">' + esc(elimQualNote(ep)) + '</p>';
+  el.appendChild(qh);
+  if (T.bracketType === 'double') {
+    bracketColumns(el, 'qw', 'Winners side', null, 0);
+    bracketColumns(el, 'ql', 'Losers side', null, 0);
+  } else {
+    bracketColumns(el, 'qw', '', null, 0);
+  }
+  if (!built) el.appendChild(elimPlayoffPreview(ep));
+  alignBracketSections(el);
+  for (const f of connectorRedraws) f();
+}
+// What the qualifying bracket decides, in a sentence.
+function elimQualNote(ep) {
+  const n = ep.cut;
+  return T.bracketType === 'double'
+    ? 'Double elimination, played until ' + n + ' are left: the ' + (n / 2) + ' still unbeaten after winners round '
+      + stageOneShapeT(nextPow2(Math.max(2, (T.teams || []).length)), true, n).wbRounds + ' and the ' + (n / 2) + ' left on one loss. They go to the playoffs, the unbeaten seeded first.'
+    : 'Single elimination, played until ' + n + ' are left. They go to the playoffs, seeded as they started.';
+}
+// The playoffs before they exist: what they will be, each round's length, and its map pool.
+function elimPlayoffPreview(ep) {
+  const sec = document.createElement('div');
+  sec.className = 'panel section';
+  sec.id = 'elimPoPreview';
+  const lengths = ep.type === 'double'
+    ? 'Winners bracket Bo' + ep.bo + ', losers bracket Bo' + ep.lbBo + ', grand final Bo' + ep.fin + '.'
+    : 'Rounds Bo' + ep.bo + ', final Bo' + ep.fin + (ep.third ? ', and a 3rd place match' : '') + '.';
+  sec.innerHTML = '<h2>Playoffs <span class="h2-strong">' + esc(String(ep.cut)) + '-team ' + ep.type + ' elimination</span></h2>'
+    + '<p class="muted small" style="margin:0 0 10px">Built here as soon as the qualifying bracket is over: the last ' + esc(String(ep.cut))
+    + ' start again at 0 losses. ' + esc(lengths) + '</p>';
+  const row = document.createElement('div');
+  row.className = 'swiss-map-prep';
+  for (const k of elimPlayoffKeysT(ep)) {
+    const b = k.split(':')[0], r = parseInt(k.split(':')[1], 10);
+    const col = document.createElement('div');
+    col.className = 'bcol';
+    const h = document.createElement('div');
+    h.className = 'bcol-title';
+    h.textContent = roundKeyLabel(b, r).replace(/^Playoffs /, '').toUpperCase() + ' \u00b7 BO' + projectedBoFor(b, r);
+    col.appendChild(h);
+    mapsLine(b, r, col, projectedBoFor(b, r));
+    row.appendChild(col);
+  }
+  sec.appendChild(row);
+  return sec;
 }
 
 // One division of a Swiss (decision 77): its own overview, rounds and final, drawn by the same code
@@ -2304,6 +2445,11 @@ function drawBracketPreview(el, division) {
 
   const plan = T.plan || {};
   const perRound = !!T.perRoundBo;
+  // A qualifying bracket before playoffs (decision 84): only its rounds here, no finals, and the
+  // playoffs in a box of their own under it.
+  const epv = (!one && elimPlanT() && n > elimPlanT().cut) ? elimPlanT() : null;
+  const shv = epv ? stageOneShapeT(bracketSize, T.bracketType === 'double', epv.cut) : null;
+  const RW = shv ? shv.wbRounds : R;
   // A smaller division plays the per-round lengths of the largest one counted back from the final.
   const offW = one ? divisionRoundOffset(one) : 0;
   const listBo = (list, i, fallback, isLb) => {
@@ -2312,10 +2458,10 @@ function drawBracketPreview(el, division) {
   };
   const boForRound = r => {
     if (T.bracketType === 'double') {
-      const fb = r === R ? (plan.wbFinal || 3) : (plan.wb || 3);
+      const fb = (r === R && !epv) ? (plan.wbFinal || 3) : (plan.wb || 3);
       return listBo(plan.wbList, r - 1, fb);
     }
-    const fb = r === R ? (plan.final || 5) : r === R - 1 ? (plan.semi || 3) : (plan.early || 3);
+    const fb = epv ? (plan.early || 3) : r === R ? (plan.final || 5) : r === R - 1 ? (plan.semi || 3) : (plan.early || 3);
     return listBo(plan.roundsList, r - 1, fb);
   };
   const canEditBo = viewerIsOrganizer() && perRound && !one;
@@ -2347,14 +2493,15 @@ function drawBracketPreview(el, division) {
   };
 
   // WINNERS/MAIN bracket preview
-  const { sec, wrap, inner } = buildPreviewSection(T.bracketType === 'double' ? 'Winners bracket' : '', 'wb');
+  const { sec, wrap, inner } = buildPreviewSection(epv ? (T.bracketType === 'double' ? 'Qualifying bracket: winners side' : 'Qualifying bracket')
+    : (T.bracketType === 'double' ? 'Winners bracket' : ''), 'wb');
   let roundSlots = [];
   for (let i = 0; i < bracketSize; i += 2) roundSlots.push([order[i], order[i + 1]]);
 
   const isDouble = T.bracketType === 'double';
   const VB = virtualBracket(bracketSize, isDouble);
   const idFor = (r, i) => 'pw_' + r + '_' + i;
-  const wbTag = (r, i) => (isDouble ? 'WB ' : '') + 'R' + r + ' M' + (i + 1);
+  const wbTag = (r, i) => (epv ? 'Q ' : '') + (isDouble ? 'WB ' : '') + 'R' + r + ' M' + (i + 1);
   // feeder text for a given destination match+slot, from the real topology
   const feederText = (destId, slot, seedFallback) => {
     const f = VB.fd[destId + ':' + slot];
@@ -2416,15 +2563,16 @@ function drawBracketPreview(el, division) {
     return fl.exists ? fl.label : { txt: 'TBD', tbd: true };
   };
 
-  for (let r = 1; r <= R; r++) {
+  for (let r = 1; r <= RW; r++) {
     const col = document.createElement('div');
     col.className = 'bcol';
     const h = document.createElement('div');
     h.className = 'bcol-title';
-    h.textContent = colLabel('wb', r, R);
+    h.textContent = epv ? colLabel('qw', r) : colLabel('wb', r, R);
     col.appendChild(h);
     if (canEditBo) col.appendChild(previewBoSelect(T.bracketType === 'double' ? 'wb' : 'rounds', r - 1, boForRound(r)));
-    mapsLine('wb', poolRoundOf('wb', r, one), col, boForRound(r));
+    if (epv) mapsLine('qw', r, col, boForRound(r));
+    else mapsLine('wb', poolRoundOf('wb', r, one), col, boForRound(r));
     const mc = document.createElement('div');
     mc.className = 'bcol-matches';
     if (r === 1) {
@@ -2445,7 +2593,7 @@ function drawBracketPreview(el, division) {
       }
     }
     // the 3rd place match, under the final, when one is planned (it needs four real players)
-    if (!isDouble && r === R && R >= 2 && n >= 4 && thirdPlaceOn(T) && !((T.divisions || 0) > 1) && mc.children.length) {
+    if (!epv && !isDouble && r === R && R >= 2 && n >= 4 && thirdPlaceOn(T) && !((T.divisions || 0) > 1) && mc.children.length) {
       const blk = document.createElement('div');
       blk.className = 'bthird';
       blk.innerHTML = '<div class="bcol-title">3RD PLACE</div>';
@@ -2456,8 +2604,8 @@ function drawBracketPreview(el, division) {
     col.appendChild(mc);
     if (mc.children.length) inner.appendChild(col); else col.remove();
   }
-  // grand final placeholder for double
-  if (T.bracketType === 'double') {
+  // grand final placeholder for double (a qualifying bracket has none: its last rounds go to the playoffs)
+  if (T.bracketType === 'double' && !epv) {
     const col = document.createElement('div');
     col.className = 'bcol';
     const h = document.createElement('div');
@@ -2479,30 +2627,31 @@ function drawBracketPreview(el, division) {
   sec.appendChild(wrap);
   el.appendChild(sec);
   // connectors: WB round r box i -> round r+1 box floor(i/2); WB final -> GF
-  drawPreviewConnectors(inner, (rr, ii) => idFor(rr, ii), R, 'pw_gf');
+  drawPreviewConnectors(inner, (rr, ii) => idFor(rr, ii), RW, epv ? null : 'pw_gf');
 
   // LOSERS bracket preview (structure only, all TBD)
   if (T.bracketType === 'double' && R >= 1) {
-    const lbRounds = 2 * R - 2;
+    const lbRounds = epv ? shv.lbRounds : 2 * R - 2;
     if (lbRounds >= 1) {
-      const { sec: lsec, wrap: lwrap, inner: linner } = buildPreviewSection('Losers bracket', 'lb');
+      const { sec: lsec, wrap: lwrap, inner: linner } = buildPreviewSection(epv ? 'Qualifying bracket: losers side' : 'Losers bracket', 'lb');
       const lbCounts = [];
       const lbCountAt = q => {
         const k = (q % 2 === 1) ? (q + 3) / 2 : (q + 2) / 2;
         return bracketSize / Math.pow(2, k);
       };
-      const lbTag = (q, i) => 'LB R' + q + ' M' + (i + 1);
+      const lbTag = (q, i) => (epv ? 'Q ' : '') + 'LB R' + q + ' M' + (i + 1);
       for (let q = 1; q <= lbRounds; q++) {
         const col = document.createElement('div');
         col.className = 'bcol';
         const h = document.createElement('div');
         h.className = 'bcol-title';
-        h.textContent = colLabel('lb', q, lbRounds);
+        h.textContent = epv ? colLabel('ql', q) : colLabel('lb', q, lbRounds);
         col.appendChild(h);
-        const lbFb = q === lbRounds ? (plan.lbFinal || 3) : (plan.lb || 3);
+        const lbFb = (q === lbRounds && !epv) ? (plan.lbFinal || 3) : (plan.lb || 3);
         const lbBo = listBo(plan.lbList, q - 1, lbFb, true);
         if (canEditBo) col.appendChild(previewBoSelect('lb', q - 1, lbBo));
-        mapsLine('lb', poolRoundOf('lb', q, one), col, lbBo);
+        if (epv) mapsLine('ql', q, col, lbBo);
+        else mapsLine('lb', poolRoundOf('lb', q, one), col, lbBo);
         const mc = document.createElement('div');
         mc.className = 'bcol-matches';
         const count = lbCountAt(q);
@@ -2525,6 +2674,7 @@ function drawBracketPreview(el, division) {
       drawPreviewConnectorsLB(linner, lbCounts);
     }
   }
+  if (epv) el.appendChild(elimPlayoffPreview(epv));
 
   alignBracketSections(el);
   // redraw connectors after alignment settles widths
@@ -3459,6 +3609,8 @@ function drawSwissRounds(el) {
       + (r === rounds && cuts.on ? `<p class="muted small" style="margin:2px 0 0">${esc(swissCutLabel(T))}${cuts.decidingBo ? ' \u00b7 Bo' + cuts.decidingBo + ' when a win qualifies or a loss eliminates' : ''}</p>` : '')
       + (latest ? (swissRematchNoteHTML(dHere) || (edit && edit.r === r ? '<p class="muted small" style="margin:6px 0 0"><button class="btn ghost small" data-rcopen="' + dHere + ':' + r + '">Change matchups</button></p>' : '')) : '');
     if (latest) wireRoundEditor(sec);
+    const whenS = roundWhenHTML((dHere ? 'd' + dHere + ':' : '') + 'sw:' + r);
+    if (whenS) sec.insertAdjacentHTML('beforeend', whenS);
     mapsLine('sw', r, sec);
     const q = document.createElement('div');
     q.className = 'queue';
@@ -3628,12 +3780,13 @@ function drawMatchesTab(el) {
       <td class="mt-teamcell">${nameFor(m.team2, 2)}</td>
       <td class="mt-fixed"><span class="mt-state ${st.cls}">${esc(st.txt)}</span></td>
       <td class="mt-fixed">${result}</td>
+      ${matchTimesOn() ? (() => { const tv = matchTimeView(m); return '<td class="mt-fixed small mt-when ' + (tv ? tv.cls : '') + '">' + (tv ? esc(tv.txt) : '') + '</td>'; })() : ''}
       <td class="mt-actions mt-fixed">${myFactionTurn(m) ? '<button class="btn amber small" data-fvgo="' + esc(m.id) + '" title="You still owe faction choices on this match">\u26A1 Faction veto</button>' : ''}${revealBtn}<button class="btn ghost small" data-mdet="${m.id}">Details</button></td>
     </tr>`;
   };
 
   const table = (list) => `<table class="mt-table"><thead><tr>
-      <th>Round</th><th>Team 1</th><th>Team 2</th><th>Status</th><th>Result</th><th></th>
+      <th>Round</th><th>Team 1</th><th>Team 2</th><th>Status</th><th>Result</th>${matchTimesOn() ? '<th>Time</th>' : ''}<th></th>
     </tr></thead><tbody>${list.map(row).join('')}</tbody></table>`;
 
   const section = (title, list, empty) => list.length
@@ -3730,6 +3883,13 @@ function showMatchDetails(m) {
       ${teamCol(m.team2, m.score2)}
     </div>
     ${replayBlock}
+    ${(() => {
+      // its time, when the players agree their own (decision 83)
+      const tv = matchTimeView(m);
+      if (!tv) return '';
+      return '<div class="md-time"><span class="muted small">Time</span> <span class="mtime-inline ' + tv.cls + '">' + esc(tv.txt) + '</span>'
+        + (canTouchTime(m) ? ' <button class="btn ghost small" id="mdTime">' + (myMatchSide(m) && m.timeProp && m.timeProp.team !== myMatchSide(m) ? 'Answer' : 'Change') + '</button>' : '') + '</div>';
+    })()}
     <div id="mdVeto"></div>
     <div class="md-foot">
       ${chatOk ? '<a href="#" id="mdChat" class="veto-mini-link">\u{1F4AC} Match chat' + unreadDot('match:' + m.id) + '</a>' : ''}
@@ -3765,6 +3925,8 @@ function showMatchDetails(m) {
     };
     const rep = root.querySelector('#mdReport');
     if (rep) rep.onclick = () => { closeModal(); reportScore(m.id); };
+    const mdT = root.querySelector('#mdTime');
+    if (mdT) mdT.onclick = () => { closeModal(); openMatchTime(m); };
     root.querySelector('#mdClose').onclick = closeModal;
   }, { wide: true });
 }
@@ -4015,4 +4177,201 @@ function wireFactionVeto(root) {
       root.querySelectorAll('.fveto-col').forEach(c => { if (c._fvPaint) c._fvPaint(); });
     });
   }
+}
+
+// ---------- match times (decision 83) ----------
+// One dialog for everything about a match's time: what it is, and what the viewer may do about it.
+// The two sides propose, accept, decline or withdraw; an organizer sets, moves, clears or approves.
+function openMatchTime(m) {
+  const org = viewerIsOrganizer();
+  const side = myMatchSide(m);
+  const open = timeOpenM(m);
+  const opp = side ? (side === m.team1 ? m.team2 : m.team1) : null;
+  const w = roundWindowOfM(m);
+  const tm = m.time, pr = m.timeProp;
+  const tz = tzAbbrev();
+  const lines = [];
+  if (tm) lines.push('<div class="mt-now ' + (tm.ok ? 'set' : 'wait') + '"><strong>' + esc(fmtMatchTime(tm.at)) + '</strong> <span class="muted small">'
+    + esc(tm.by === 'org' ? 'set by ' + tm.who : 'agreed by ' + tm.who) + (tm.ok ? '' : ', waiting for an organizer\u2019s OK') + '</span></div>');
+  if (pr) lines.push('<div class="mt-now prop">' + esc(pr.who) + ' (' + esc(teamName(pr.team)) + ') proposes <strong>' + esc(fmtMatchTime(pr.at)) + '</strong>'
+    + (tm ? ' <span class="muted small">instead</span>' : '') + '</div>');
+  if (!tm && !pr) lines.push('<div class="mt-now none muted">No time yet.</div>');
+  const winTxt = roundWindowText(w);
+  const fixed = tm && tm.by === 'org';
+  const playerCan = side && open && !fixed;
+  const theirs = pr && side && pr.team !== side;
+  const mineP = pr && side && pr.team === side;
+  const minV = isoToZonedInput(new Date(Date.now() + 5 * 60000).toISOString());
+  const field = (id, val) => '<input type="datetime-local" id="' + id + '" value="' + esc(val || '') + '" min="' + esc(minV) + '" style="max-width:240px">';
+  let playerHTML = '';
+  if (side && fixed) playerHTML = '<p class="muted small">An organizer set this time. Ask them in the match chat if it has to move.</p>';
+  else if (side && !open) playerHTML = '<p class="muted small">' + (m.status === 'waiting' ? 'Both sides have to be known before a time can be agreed.' : 'This match has started, so its time no longer changes.') + '</p>';
+  else if (playerCan) {
+    playerHTML = (theirs ? '<div class="row" style="gap:8px;flex-wrap:wrap;margin:8px 0"><button class="btn primary small" id="mtAccept">Accept ' + esc(fmtMatchTime(pr.at)) + '</button><button class="btn ghost small" id="mtDecline">Decline</button></div>' : '')
+      + (mineP ? '<div class="row" style="gap:8px;flex-wrap:wrap;margin:8px 0"><span class="muted small">Waiting for ' + esc(teamName(opp)) + ' to answer.</span><button class="btn ghost small" id="mtWithdraw">Withdraw it</button></div>' : '')
+      + '<label>' + (pr || tm ? 'Propose another time' : 'Propose a time') + ' <span class="muted small">(your time, ' + esc(tz) + ')</span></label>'
+      + '<div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">' + field('mtAt', pr && mineP ? isoToZonedInput(pr.at) : '') + '<button class="btn amber small" id="mtPropose">Propose</button></div>'
+      + '<p class="muted small" style="margin:6px 0 0">' + esc(teamName(opp)) + ' accepts it or proposes another' + (T.timeApproval ? '; once agreed, an organizer okays it' : '') + '. It is said in the match chat too.</p>';
+  }
+  let orgHTML = '';
+  if (org && m.status !== 'done' && m.status !== 'bye') {
+    orgHTML = '<div class="mt-org"><label>Organizer <span class="muted small">(your time, ' + esc(tz) + ')</span></label>'
+      + ((tm && !tm.ok) ? '<div class="row" style="gap:8px;margin:6px 0"><button class="btn primary small" id="mtApprove">Approve ' + esc(fmtMatchTime(tm.at)) + '</button></div>' : '')
+      + '<div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">' + field('mtSetAt', tm ? isoToZonedInput(tm.at) : (pr ? isoToZonedInput(pr.at) : '')) + '<button class="btn amber small" id="mtSet">Set the time</button></div>'
+      + ((tm || pr) ? '<div class="row" style="gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px"><input type="text" id="mtNote" maxlength="200" placeholder="Why (optional, said in the match chat)" style="flex:1;min-width:180px"><button class="btn ghost small" id="mtClear">Clear the time</button></div>' : '')
+      + '<p class="muted small" style="margin:6px 0 0">A time you set stays until an organizer moves it: the players cannot change it.</p></div>';
+  }
+  modal(`<h3>Time: ${esc(mLabelFull(m))}</h3>
+    <p class="muted small" style="margin:0 0 8px">${esc(teamName(m.team1) || 'TBD')} vs ${esc(teamName(m.team2) || 'TBD')} \u00b7 Bo${m.bo}. Times are shown in your time zone (${esc(tz)}).</p>
+    ${lines.join('')}
+    ${winTxt ? '<p class="small" style="margin:8px 0 0">' + esc(winTxt) + '.</p>' : ''}
+    ${playerHTML}${orgHTML}
+    <div class="actions">${matchChatAllowed(m) && m.team1 && m.team2 ? '<a href="#" id="mtChat" class="veto-mini-link" style="margin-right:auto">\u{1F4AC} Match chat</a>' : ''}<button class="btn ghost" id="mtClose">Close</button></div>`, root => {
+    const call = async (path, body, done) => {
+      try { await api('/api/t/' + T.id + '/' + path, Object.assign({ matchId: m.id, admin: adminToken() }, body || {})); toast(done); closeModal(); await refresh(); }
+      catch (e) { toast(e.message, true); }
+    };
+    const val = id => { const e = root.querySelector('#' + id); return e ? zonedInputToISO(e.value) : ''; };
+    const on = (id, f) => { const e = root.querySelector('#' + id); if (e) e.onclick = f; };
+    on('mtAccept', () => call('match_time_accept', {}, 'Time agreed'));
+    on('mtDecline', () => call('match_time_cancel', {}, 'Declined'));
+    on('mtWithdraw', () => call('match_time_cancel', {}, 'Withdrawn'));
+    on('mtPropose', () => { const at = val('mtAt'); if (!at) return toast('Pick a date and a time', true); call('match_time_propose', { at }, 'Time proposed'); });
+    on('mtApprove', () => call('match_time_approve', {}, 'Time approved'));
+    on('mtSet', () => { const at = val('mtSetAt'); if (!at) return toast('Pick a date and a time', true); call('match_time_set', { at }, 'Time set'); });
+    on('mtClear', () => call('match_time_set', { at: null, note: (root.querySelector('#mtNote') || {}).value || '' }, 'Time cleared'));
+    on('mtChat', e => { e.preventDefault(); closeModal(); openMatchChat(m); });
+    root.querySelector('#mtClose').onclick = closeModal;
+  });
+}
+// The Schedule tab's badge: a time the other side proposed to you, plus (organizers) times to okay.
+function scheduleBadgeCount() {
+  if (!matchTimesOn() || T.status !== 'running') return 0;
+  const side = (T.viewer && (T.viewer.memberTeamId || T.viewer.teamId)) || null;
+  let n = 0;
+  for (const m of (T.matches || [])) {
+    if (side && timeOpenM(m) && (m.team1 === side || m.team2 === side) && m.timeProp && m.timeProp.team !== side) n++;
+    if (viewerIsOrganizer() && m.time && !m.time.ok && m.status !== 'done') n++;
+  }
+  return n;
+}
+// Can the viewer do anything with this match's time (so a click on it opens the dialog)?
+function canTouchTime(m) {
+  if (!matchTimesOn() || !m || m.status === 'done' || m.status === 'bye') return false;
+  return viewerIsOrganizer() || !!myMatchSide(m);
+}
+// A round's window under its title, for the bracket columns and the Swiss rounds.
+function roundWhenHTML(key, always) {
+  if (!matchTimesOn()) return '';
+  const txt = roundWindowText(roundWindowOfKey(key));
+  if (txt) return '<div class="bcol-when" title="The dates of this round">' + esc(txt) + '</div>';
+  // A bracket column without dates keeps an empty line while other rounds have dates, so the matches
+  // of every column stay level (decision 70).
+  return (always && T && T.roundWin && Object.keys(T.roundWin).length) ? '<div class="bcol-when"></div>' : '';
+}
+
+// The Schedule tab: every match's time, in the viewer's zone. Yours first, then what waits for an
+// organizer, what is coming up (by day), what still needs a time, and what is late. Organizers set
+// each round's dates at the bottom.
+function drawSchedule(el) {
+  const org = viewerIsOrganizer();
+  const all = (T.matches || []).filter(m => m.bracket !== 'ffa' && !isPhantomMatch(m));
+  const tz = tzAbbrev();
+  const known = m => m.team1 && m.team2 && m.team1 !== 'BYE' && m.team2 !== 'BYE';
+  const notDone = all.filter(m => m.status !== 'done' && m.status !== 'bye');
+  const at = m => (m.time ? Date.parse(m.time.at) : Infinity);
+  const row = m => {
+    const tv = matchTimeView(m) || { cls: 'none', txt: '' };
+    const mine = myMatchSide(m);
+    const btn = canTouchTime(m) ? '<button class="btn ' + ((m.timeProp && mine && m.timeProp.team !== mine) || (org && m.time && !m.time.ok) ? 'amber' : 'ghost') + ' small" data-mtime="' + esc(m.id) + '">'
+      + ((m.timeProp && mine && m.timeProp.team !== mine) ? 'Answer' : (org && m.time && !m.time.ok) ? 'Approve' : 'Time') + '</button>' : '';
+    return '<div class="sch-row' + (mine ? ' mine' : '') + '" data-schrow="' + esc(m.id) + '">'
+      + '<span class="sch-when ' + tv.cls + '" title="' + esc(tv.title || '') + '">' + esc(tv.txt || '-') + '</span>'
+      + '<span class="sch-round mono small muted">' + esc(mLabelFull(m)) + '</span>'
+      + '<span class="sch-teams">' + esc(teamName(m.team1) || 'TBD') + ' <span class="qvs">VS</span> ' + esc(teamName(m.team2) || 'TBD') + '</span>'
+      + '<span class="sch-act">' + btn + '</span></div>';
+  };
+  const block = (title, list, note) => list.length
+    ? '<div class="panel section"><h2>' + title + ' <span class="h2-strong">(' + list.length + ')</span></h2>' + (note ? '<p class="muted small" style="margin:0 0 8px">' + esc(note) + '</p>' : '') + list.map(row).join('') + '</div>' : '';
+  let html = '<div class="panel section"><h2>Schedule</h2><p class="muted small" style="margin:0">'
+    + 'The two sides of a match agree its time here: one proposes, the other accepts or proposes another. '
+    + (T.timeApproval ? 'An organizer then okays it. ' : '') + 'Organizers can set or move any time. Every time is in your time zone (' + esc(tz) + ').</p></div>';
+  const mineList = notDone.filter(m => myMatchSide(m) && known(m)).sort((a, b) => at(a) - at(b) || matchChrono(a) - matchChrono(b));
+  html += block('Your <span class="h2-strong">matches</span>', mineList);
+  if (org) html += block('Waiting for your <span class="h2-strong">OK</span>', notDone.filter(m => m.time && !m.time.ok));
+  // coming up, by day in the viewer's zone
+  const upcoming = notDone.filter(m => m.time && m.time.ok).sort((a, b) => at(a) - at(b));
+  if (upcoming.length) {
+    html += '<div class="panel section"><h2>Coming <span class="h2-strong">up</span></h2>';
+    let day = null;
+    for (const m of upcoming) {
+      const d = fmtMatchTime(m.time.at).split(',')[0];
+      if (d !== day) { html += '<div class="sch-day">' + esc(d) + '</div>'; day = d; }
+      html += row(m);
+    }
+    html += '</div>';
+  }
+  const lateIds = new Set(notDone.filter(m => known(m) && (() => { const w = roundWindowOfM(m); return w && w.by && Date.parse(w.by) < Date.now(); })()).map(m => m.id));
+  html += block('Needs a <span class="h2-strong">time</span>', sortByPlay(notDone.filter(m => known(m) && !(m.time && m.time.ok) && !lateIds.has(m.id))),
+    'Both sides are known and no time stands yet.');
+  html += block('Past the <span class="h2-strong">play-by date</span>', sortByPlay(notDone.filter(m => lateIds.has(m.id))),
+    'Not played by the date their round had to be played by. ' + (org ? 'You decide: move the time, or report a result or a forfeit.' : 'The organizers decide what happens.'));
+  if (org) html += scheduleRoundsHTML();
+  el.innerHTML = html;
+  el.querySelectorAll('[data-mtime]').forEach(b => b.onclick = () => {
+    const m = T.matches.find(x => x.id === b.dataset.mtime);
+    if (m) openMatchTime(m);
+  });
+  wireScheduleRounds(el);
+}
+// The rounds of this tournament, for their dates: those with matches, then (a qualifying bracket's)
+// playoffs that are not built yet. Each with "from" and "by" in the viewer's zone.
+function scheduleRoundKeys() {
+  const seen = {}, out = [];
+  for (const m of sortByPlay((T.matches || []).filter(x => x.bracket !== 'ffa'))) {
+    const k = roundTimeKeyOf(m);
+    if (!seen[k]) { seen[k] = 1; out.push({ key: k, m }); }
+  }
+  const ep = typeof elimPlanT === 'function' ? elimPlanT() : null;
+  if (ep && !ep.built) for (const k of elimPlayoffKeysT(ep)) if (!seen[k]) { seen[k] = 1; out.push({ key: k, m: { bracket: k.split(':')[0], round: parseInt(k.split(':')[1], 10) } }); }
+  // planned Swiss rounds not drawn yet
+  if (T.bracketType === 'swiss' && T.status === 'running' && !divisionsOnT()) {
+    const planned = swissPlannedRounds(T);
+    for (let r = 1; r <= planned; r++) { const k = 'sw:' + r; if (!seen[k]) { seen[k] = 1; out.push({ key: k, m: { bracket: 'sw', round: r } }); } }
+  }
+  return out;
+}
+function scheduleRoundLabel(x) {
+  const m = x.m;
+  const div = (m.division && divisionsOnT()) ? divisionNameOf(m.division) + ' ' : '';
+  return div + roundKeyLabel(m.bracket, m.round, m.division);
+}
+function scheduleRoundsHTML() {
+  const keys = scheduleRoundKeys();
+  if (!keys.length) return '';
+  return '<div class="panel section" id="schRounds"><h2>Round <span class="h2-strong">dates</span></h2>'
+    + '<p class="muted small" style="margin:0 0 8px">Players pick times inside a round\u2019s dates; a match still unplayed after its play-by date is marked late. Your time zone (' + esc(tzAbbrev()) + '). Leave a field empty for no limit.</p>'
+    + keys.map(x => {
+      const w = roundWindowOfKey(x.key) || {};
+      return '<div class="sch-rnd" data-rkey="' + esc(x.key) + '"><span class="sch-rname">' + esc(scheduleRoundLabel(x)) + '</span>'
+        + '<label class="sch-f"><span class="muted small">From</span><input type="datetime-local" data-rfrom value="' + esc(w.from ? isoToZonedInput(w.from) : '') + '"></label>'
+        + '<label class="sch-f"><span class="muted small">Play by</span><input type="datetime-local" data-rby value="' + esc(w.by ? isoToZonedInput(w.by) : '') + '"></label>'
+        + '<button class="btn ghost small" data-rsave>Save</button></div>';
+    }).join('') + '</div>';
+}
+function wireScheduleRounds(el) {
+  el.querySelectorAll('[data-rkey]').forEach(rowEl => {
+    const btn = rowEl.querySelector('[data-rsave]');
+    if (!btn) return;
+    btn.onclick = async () => {
+      const f = rowEl.querySelector('[data-rfrom]').value, b2 = rowEl.querySelector('[data-rby]').value;
+      const from = f ? zonedInputToISO(f) : null, by = b2 ? zonedInputToISO(b2) : null;
+      if ((f && !from) || (b2 && !by)) return toast('Pick a date and a time', true);
+      try {
+        await api('/api/t/' + T.id + '/round_window', { key: rowEl.dataset.rkey, from, by, admin: adminToken() });
+        toast((from || by) ? 'Dates saved' : 'Dates cleared');
+        await refresh();
+      } catch (e) { toast(e.message, true); }
+    };
+  });
 }

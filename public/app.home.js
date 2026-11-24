@@ -600,6 +600,28 @@ async function renderHost() {
           </div>
         </div>
 
+        <div id="elimPoOpts">
+          <label style="display:flex;align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text);margin-top:14px">
+            <input type="checkbox" id="pElimPo"> Playoffs for the last few: play the bracket down to them, then they start again in a new bracket
+          </label>
+          <div id="elimPoBox" style="display:none;padding:8px 0 0 22px">
+            <p class="muted small" style="margin:0 0 8px">One tournament, two stages. The bracket above is played as a qualifying bracket until this many are left; they then start again at 0 losses in a playoff bracket on the same page, the unbeaten seeded first. For a league: the qualifying rounds over the weeks, the playoffs on one day.</p>
+            <div class="row" style="gap:10px;flex-wrap:wrap">
+              <div style="flex:1;min-width:120px"><div class="muted small">Go to the playoffs</div><select id="pElimCut"><option value="2">The last 2</option><option value="4" selected>The last 4</option><option value="8">The last 8</option><option value="16">The last 16</option></select></div>
+              <div style="flex:1;min-width:160px"><div class="muted small">Playoff bracket</div><select id="pElimType"><option value="single">Single elimination</option><option value="double" selected>Double elimination</option></select></div>
+            </div>
+            <div class="row" style="gap:10px;margin-top:8px;flex-wrap:wrap">
+              <div style="flex:1;min-width:100px"><div class="muted small" id="pElimBoLbl">Upper bracket</div><select id="pElimBo"><option value="1">Bo1</option><option value="3" selected>Bo3</option><option value="5">Bo5</option><option value="7">Bo7</option></select></div>
+              <div style="flex:1;min-width:100px" id="pElimLbWrap"><div class="muted small">Lower bracket</div><select id="pElimLbBo"><option value="1">Bo1</option><option value="3" selected>Bo3</option><option value="5">Bo5</option><option value="7">Bo7</option></select></div>
+              <div style="flex:1;min-width:100px"><div class="muted small" id="pElimFinLbl">Grand final</div><select id="pElimFinal"><option value="1">Bo1</option><option value="3">Bo3</option><option value="5" selected>Bo5</option><option value="7">Bo7</option></select></div>
+            </div>
+            <label id="pElimThirdWrap" style="display:none;align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text);margin-top:8px">
+              <input type="checkbox" id="pElimThird"> 3rd place match: the two beaten semi-finalists play for 3rd
+            </label>
+            <p class="muted small" id="pElimWhy" style="margin:8px 0 0"></p>
+          </div>
+        </div>
+
         <div id="stopAtOpts">
           <label style="display:flex;align-items:center;gap:9px;cursor:pointer;text-transform:none;font-family:var(--body);font-size:13px;color:var(--text);margin-top:14px">
             <input type="checkbox" id="pStopOn"> End the tournament early, once a set number are left
@@ -718,6 +740,8 @@ async function renderHost() {
 
         <label style="display:block;margin-top:10px"><input type="checkbox" id="cRequireDiscord"> Players must give their Discord username to sign up <span class="muted small">(saved to their account; only organizers and fellow players see it)</span></label>
         <label style="display:block;margin-top:10px"><input type="checkbox" id="cPlayerReporting" checked> Allow players to submit scores <span class="muted small">(must provide replay IDs and be confirmed by the opponent; organizers can always report)</span></label>
+        <label style="display:block;margin-top:10px"><input type="checkbox" id="cMatchTimes"> Players agree their own match times <span class="muted small">(a league: matches played over days or weeks; organizers can always set a time)</span></label>
+        <label id="cTimeOkWrap" style="display:none;margin:6px 0 0 22px"><input type="checkbox" id="cTimeApproval"> An agreed time needs an organizer\u2019s OK</label>
         <label style="display:flex;align-items:center;gap:8px;margin-top:16px;cursor:pointer">
           <input type="checkbox" id="cVeto" style="width:auto"> Enable map vetoes (captains ban/pick maps before matches)
         </label>
@@ -906,6 +930,39 @@ async function renderHost() {
       + (swiss ? ' With a Swiss every division plays its own rounds, table and final, on its own tab.' + (st2 && st2.checked ? ' Turn off the playoffs after the Swiss above: they do not go with divisions.' : '') : '');
   };
 
+  // Playoffs after an elimination bracket (decision 84): single or double elimination only, and not
+  // together with ending early or with divisions.
+  const syncElimPo = () => {
+    const wrap = document.getElementById('elimPoOpts');
+    if (!wrap) return;
+    const elim = comp.value === 'team' && (cBracket.value === 'single' || cBracket.value === 'double');
+    wrap.style.display = elim ? '' : 'none';
+    const ck = document.getElementById('pElimPo');
+    const on = elim && ck.checked;
+    document.getElementById('elimPoBox').style.display = on ? '' : 'none';
+    const dbl = document.getElementById('pElimType').value === 'double';
+    document.getElementById('pElimLbWrap').style.display = dbl ? '' : 'none';
+    document.getElementById('pElimBoLbl').textContent = dbl ? 'Upper bracket' : 'Playoff rounds';
+    document.getElementById('pElimFinLbl').textContent = dbl ? 'Grand final' : 'Final';
+    document.getElementById('pElimThirdWrap').style.display = (!dbl && parseInt(document.getElementById('pElimCut').value, 10) >= 4) ? 'flex' : 'none';
+    const stop = document.getElementById('pStopOn');
+    if (stop) { if (on && stop.checked) { stop.checked = false; const b = document.getElementById('stopAtBox'); if (b) b.style.display = 'none'; } stop.disabled = on; }
+    const divs = document.getElementById('cDivisions');
+    if (divs) { if (on && divs.value !== '0') { divs.value = '0'; syncDivOpts(); } divs.disabled = on; }
+    const why = document.getElementById('pElimWhy');
+    if (why) why.textContent = on ? 'Ending early and divisions do not go with this, so they are off while it is on.'
+      + (dbl && document.getElementById('pElimCut').value === '2' ? ' Double elimination playoffs need at least 4: choose the last 4 or more, or single elimination.' : '') : '';
+    // the qualifying bracket has no finals of its own: only its round lengths count
+    for (const id of ['pSemi', 'pFinal', 'pWbFinal', 'pLbFinal', 'pGf']) { const e = document.getElementById(id); if (e) e.parentElement.style.display = on ? 'none' : ''; }
+    const hc = document.getElementById('pHcap');
+    if (hc) hc.parentElement.style.display = on ? 'none' : 'flex';
+    const th = document.getElementById('pThird');
+    if (th && th.parentElement) th.parentElement.style.display = on ? 'none' : 'flex';
+  };
+  ['pElimPo', 'pElimType', 'pElimCut'].forEach(id => { const e = document.getElementById(id); if (e) e.addEventListener('change', syncElimPo); });
+  // match times (decision 83): the OK only means something when the players agree their own
+  { const mt = document.getElementById('cMatchTimes'); if (mt) mt.addEventListener('change', () => { document.getElementById('cTimeOkWrap').style.display = mt.checked ? 'block' : 'none'; }); }
+
   const syncVis = () => {
     const isFfa = comp.value === 'ffa';
     document.getElementById('teamOpts').style.display = isFfa ? 'none' : '';
@@ -922,6 +979,7 @@ async function renderHost() {
     document.getElementById('cFfaCutTo').style.display = cutMode.value === '1' ? '' : 'none';
     document.getElementById('cFfaFinalSize').style.display = finalMode.value === '1' ? '' : 'none';
     syncDivOpts();
+    syncElimPo();
     syncPerMatch();
   };
   ['cDivisions', 'cDivName1', 'cDivName2', 'cDivName3', 'cDivName4', 'pSwStage2'].forEach(id => {
@@ -1100,6 +1158,8 @@ async function renderHost() {
     }
     setv('cRatingType', t.ratingType || 'none'); setv('cRatingDate', t.ratingDate ? new Date(t.ratingDate).toISOString().slice(0, 10) : '');
     setv('cSignupMode', t.signupMode || 'open'); setc('cPlayerReporting', t.playerReporting !== 0); setc('cRequireDiscord', !!t.requireDiscord);
+    setc('cMatchTimes', !!t.matchTimes); setc('cTimeApproval', !!t.timeApproval);
+    { const w = document.getElementById('cTimeOkWrap'); if (w) w.style.display = t.matchTimes ? 'block' : 'none'; }
     setv('cMinRating', t.minRating != null ? t.minRating : ''); setv('cMaxRating', t.maxRating != null ? t.maxRating : '');
     setv('cMaxTeamRating', t.maxTeamRating != null ? t.maxTeamRating : ''); setv('cRatingCap', t.ratingCap != null ? t.ratingCap : '');
     setv('cMaxTeams', t.maxTeams || ''); setv('cMinTeams', t.minTeams || '');
@@ -1118,6 +1178,12 @@ async function renderHost() {
     const pl = t.plan || {};
     if (t.bracketType === 'single') { setv('pEarly', pl.early); setv('pSemi', pl.semi); setv('pFinal', pl.final); setc('pThird', pl.thirdPlace); }
     else if (t.bracketType === 'double') { setv('pWb', pl.wb); setv('pWbFinal', pl.wbFinal); setv('pLb', pl.lb); setv('pLbFinal', pl.lbFinal); setv('pGf', pl.gf); setc('pHcap', pl.lbHandicap); }
+    if (t.bracketType === 'single' || t.bracketType === 'double') {
+      // playoffs for the last few (decision 84)
+      setc('pElimPo', pl.stage2); setv('pElimCut', pl.s2CutTo || 4); setv('pElimType', pl.s2Type || 'double');
+      setv('pElimBo', pl.s2Bo || 3); setv('pElimLbBo', pl.s2LbBo || 3);
+      setv('pElimFinal', (pl.s2Type === 'single' ? pl.s2Final : pl.s2Gf) || 5); setc('pElimThird', pl.s2Third);
+    }
     else if (t.bracketType === 'swiss') {
       setv('pSwBo', pl.bo); setc('pSwFinal', pl.final); setv('pSwFinalBo', pl.finalBo); setc('pSwFast', pl.fast);
       setv('pSwRounds', pl.rounds || 0);
@@ -1211,6 +1277,12 @@ async function renderHost() {
         plan.s2Third = (plan.s2Type !== 'double' && ck('pSwS2Third')) ? 1 : 0;
       }
     }
+    if ((bt === 'single' || bt === 'double') && (document.getElementById('pElimPo') || {}).checked) {
+      // playoffs for the last few (decision 84)
+      const ty = document.getElementById('pElimType').value;
+      Object.assign(plan, { stage2: 1, s2CutTo: pv('pElimCut'), s2Type: ty, s2Bo: pv('pElimBo'), s2LbBo: pv('pElimLbBo'),
+        s2Final: pv('pElimFinal'), s2Gf: pv('pElimFinal'), s2Third: (ty === 'single' && (document.getElementById('pElimThird') || {}).checked) ? 1 : 0 });
+    }
     try {
       const stopOn = (document.getElementById('pStopOn') || {}).checked ? 1 : 0;
       const pickOn = (document.getElementById('pPickPhase') || {}).checked ? 1 : 0;
@@ -1249,6 +1321,8 @@ async function renderHost() {
         ratingDate: document.getElementById('cRatingDate').value || null,
         signupMode: document.getElementById('cSignupMode').value,
         requireDiscord: document.getElementById('cRequireDiscord').checked ? 1 : 0,
+        matchTimes: document.getElementById('cMatchTimes').checked ? 1 : 0,
+        timeApproval: (document.getElementById('cMatchTimes').checked && document.getElementById('cTimeApproval').checked) ? 1 : 0,
         playerReporting: document.getElementById('cPlayerReporting').checked ? 1 : 0,
         admin: siteAdmin() || undefined,
         rewards: document.getElementById('cRewards').value,
@@ -1321,6 +1395,8 @@ function formHasFocus() {
 const _textEdited = new WeakSet();
 document.addEventListener('input', e => { const f = e.target; if (f && f.tagName === 'TEXTAREA') _textEdited.add(f); }, true);
 function adminHasUnsavedText() {
+  // a round's dates typed on the Schedule tab and not saved yet (decision 83)
+  if (currentTab === 'schedule') return Array.from(app.querySelectorAll('[data-rfrom],[data-rby]')).some(f => f.value !== f.defaultValue);
   if (currentTab !== 'admin') return false;
   return Array.from(app.querySelectorAll('textarea')).some(f => _textEdited.has(f) && f.value !== f.defaultValue);
 }
@@ -1576,6 +1652,16 @@ function myTurnInfo() {
       };
     }
   }
+  // 4. match times (decision 83): the other side proposed a time; an organizer has times to okay
+  if (matchTimesOn() && T.status === 'running' && T.matches) {
+    const side = me.memberTeamId || me.teamId || null;
+    const asked = side ? T.matches.find(m => timeOpenM(m) && (m.team1 === side || m.team2 === side) && m.timeProp && m.timeProp.team !== side) : null;
+    if (asked) return { text: teamName(asked.timeProp.team) + ' proposed ' + fmtMatchTime(asked.timeProp.at) + ' for your match. Accept it or propose another time.', tab: 'schedule', cta: 'Answer' };
+    if (viewerIsOrganizer() && T.timeApproval) {
+      const n = T.matches.filter(m => m.time && !m.time.ok && m.status !== 'done').length;
+      if (n) return { text: n + ' match time' + (n === 1 ? ' waits' : 's wait') + ' for your OK.', tab: 'schedule', cta: 'Review times' };
+    }
+  }
   return null;
 }
 
@@ -1648,6 +1734,8 @@ function drawTournament() {
   // Matches: a flat, observer/streamer-friendly list of every match. Only useful once the
   // bracket exists, so it appears alongside it.
   if ((T.matches || []).length) tabs.push('matches');
+  // Schedule: the match times, when the players agree their own (decision 83)
+  if ((T.matches || []).length && matchTimesOn()) tabs.push('schedule');
   // Stats: a public wrap-up, only once the tournament is over.
   if (T.status === 'finished') tabs.push('stats');
   if (vetoActive) tabs.push('vetoes');
@@ -1674,6 +1762,7 @@ function drawTournament() {
       return pending > 0 ? 'Vetoes (' + pending + ')' : 'Vetoes';
     }
     if (tb === 'predictions') return 'Predictions';
+    if (tb === 'schedule') return 'Schedule';
     return tb;
   };
 
@@ -1708,6 +1797,11 @@ function drawTournament() {
           if (tb === 'vetoes' && typeof myVetoStepCount === 'function') {
             const owed = myVetoStepCount();
             if (owed > 0) badge = owed;
+          }
+          // a time the other side proposed to you, or (organizers) agreed times waiting for an OK (decision 83)
+          if (tb === 'schedule' && typeof scheduleBadgeCount === 'function') {
+            const n = scheduleBadgeCount();
+            if (n > 0) badge = n;
           }
           // an open prediction stage this viewer has not filled in yet
           if (tb === 'predictions' && tb !== currentTab && typeof predictBadgeCount === 'function') {
@@ -1791,6 +1885,7 @@ function drawTournament() {
   else if (currentTab === 'teams') drawTeams(body);
   else if (isBracketTab(currentTab)) drawBracket(body, divisionsOnT() ? tabDivision(currentTab) : 0);
   else if (currentTab === 'matches') drawMatchesTab(body);
+  else if (currentTab === 'schedule') drawSchedule(body);
   else if (currentTab === 'stats') drawStats(body);
   else if (currentTab === 'vetoes') drawVetoes(body);
   else if (currentTab === 'predictions') drawPredictions(body);
@@ -2296,12 +2391,17 @@ function fillQueue(el, matches, withReport) {
       if (m.score1 != null) inner += `<span class="qscore">${m.score1} — ${m.score2}</span>`;
       if (m.status === 'live') inner += `<span class="livechip">LIVE</span>`;
     }
+    // its time, when the players agree their own (decision 83)
+    const qtv = matchTimeView(m);
+    if (qtv) inner += `<span class="qtime ${qtv.cls}" title="${esc(qtv.title)}">\u{1F552} ${esc(qtv.txt)}</span>`;
     const maps = mapsFor(m.bracket, poolRoundOf(m.bracket, m.round, m.division));
     if (maps.length) inner += `<span class="qmaps mono small muted" title="Maps">${esc(maps.map((mp, i) => 'G' + (i + 1) + ': ' + mapName(mp)).join(' · '))}</span>`;
     const showBtn = !T.imported && withReport && (m.status === 'done' ? viewerIsAdmin() : canReportMatch(m));
     if (showBtn) inner += `<button class="btn amber small" data-m="${m.id}">Report</button>`;
     div.innerHTML = inner;
     if (showBtn) div.querySelector('[data-m]').onclick = () => reportScore(m.id);
+    const qt = div.querySelector('.qtime');
+    if (qt && canTouchTime(m)) { qt.classList.add('clickable'); qt.title += '. Click to change it.'; qt.onclick = () => openMatchTime(m); }
     el.appendChild(div);
   }
 }

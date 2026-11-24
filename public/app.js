@@ -250,7 +250,7 @@ function myToken() { return adminToken() || capToken(); }
 // `?streamer=<token>` share link; it is a FAF-account role now, so there is nothing to carry.
 function viewToken() { return myToken(); }
 
-const VALID_TABS = ['overview', 'news', 'chat', 'players', 'teams', 'teams2', 'teams3', 'teams4', 'bracket', 'bracket2', 'bracket3', 'bracket4', 'matches', 'stats', 'maps', 'vetoes', 'standings', 'predictions', 'admin', 'log'];
+const VALID_TABS = ['overview', 'news', 'chat', 'players', 'teams', 'teams2', 'teams3', 'teams4', 'bracket', 'bracket2', 'bracket3', 'bracket4', 'matches', 'schedule', 'stats', 'maps', 'vetoes', 'standings', 'predictions', 'admin', 'log'];
 let pendingOrganizerClaim = null; // { id, token } — set when an ?admin= link is opened
 function captureTokensFromURL() {
   const id = tourneyId();
@@ -461,6 +461,9 @@ function roundLabel(m) {
   return (m && m.division && divisionsOnT()) ? divisionNameOf(m.division).toUpperCase() + ' \u00b7 ' + core : core;
 }
 function roundLabelCore(m) {
+  // the qualifying bracket before playoffs (decision 84)
+  if (m.bracket === 'qw') return 'QUALIFYING ' + (T.bracketType === 'double' ? 'WB ' : '') + 'ROUND ' + m.round;
+  if (m.bracket === 'ql') return 'QUALIFYING LB ROUND ' + m.round;
   if (m.bracket === 'gf') return T.bracketType === 'swiss' ? 'FINAL' : 'GRAND FINAL';
   if (m.bracket === '3p') return '3RD PLACE MATCH';
   if (m.bracket === 'sw') return 'ROUND ' + m.round;
@@ -475,8 +478,8 @@ function roundLabelCore(m) {
   const R = (m.division && divisionsOnT())
     ? (T.matches || []).filter(x => x.bracket === 'wb' && (x.division || 0) === m.division).reduce((a, x) => Math.max(a, x.round || 0), 0) || 1
     : (T.rounds || 1);
-  const prefix = T.bracketType === 'double' ? 'WINNERS BRACKET ' : '';
-  if (m.round === R) return prefix + (T.bracketType === 'double' ? 'FINAL' : 'FINAL');
+  const prefix = bracketIsDoubleT() ? 'WINNERS BRACKET ' : '';
+  if (m.round === R) return prefix + 'FINAL';
   if (m.round === R - 1) return prefix + 'SEMIS';
   if (m.round === R - 2) return prefix + 'QUARTERS';
   return prefix + 'ROUND ' + m.round;
@@ -484,8 +487,11 @@ function roundLabelCore(m) {
 
 function colLabel(bracket, r, totalRounds) {
   const R = totalRounds || T.rounds || 1;
+  // the qualifying bracket's rounds are just numbered: its last one goes to the playoffs (decision 84)
+  if (bracket === 'qw') return 'ROUND ' + r;
+  if (bracket === 'ql') return 'LB ROUND ' + r;
   if (bracket === 'wb') {
-    if (T.bracketType === 'double') {
+    if (bracketIsDoubleT()) {
       // double elim: winners bracket rounds are just numbered; last is the WB final
       return r === R ? 'WB FINAL' : 'ROUND ' + r;
     }
@@ -795,6 +801,80 @@ function fmtWeekdayDateTime(v) {
   try { wd = new Intl.DateTimeFormat('en-GB', { weekday: 'short', timeZone: tz }).format(d) + ' '; } catch (e) {}
   return wd + fmtDateTime(v);
 }
+// ---- match times (decision 83) ----
+// The two sides of a match agree its time (m.timeProp, then m.time); an organizer can set any time,
+// and each round can have a window (T.roundWin[key] = { from, by }). Every time is shown, and typed,
+// in the viewer's own time zone (the Display settings one, else the browser's).
+function matchTimesOn() { return !!(T && T.matchTimes); }
+function roundTimeKeyOf(m) { return (m.division ? 'd' + m.division + ':' : '') + m.bracket + ':' + m.round; }
+function roundWindowOfKey(key) { return ((T && T.roundWin) || {})[key] || null; }
+function roundWindowOfM(m) { return roundWindowOfKey(roundTimeKeyOf(m)); }
+// The viewer's side in this match, or null.
+function myMatchSide(m) {
+  const id = (T.viewer && (T.viewer.memberTeamId || T.viewer.teamId)) || null;
+  return (id && m && (id === m.team1 || id === m.team2)) ? id : null;
+}
+// Can this match still get a time: both sides known, not started (the server's timeOpen).
+function timeOpenM(m) {
+  return !!(m && m.status === 'ready' && m.team1 && m.team2 && m.team1 !== 'BYE' && m.team2 !== 'BYE'
+    && !m.pendingReport && !(Array.isArray(m.games) && m.games.length));
+}
+// "Sat 2 Jan, 19:00 CET" in the viewer's zone and clock (a year only when it is not this one).
+function fmtMatchTime(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const tz = resolvedTZ();
+  try {
+    const sameYear = new Intl.DateTimeFormat('en-GB', { year: 'numeric', timeZone: tz }).format(d) === new Intl.DateTimeFormat('en-GB', { year: 'numeric', timeZone: tz }).format(new Date());
+    const day = new Intl.DateTimeFormat('en-GB', Object.assign({ weekday: 'short', day: 'numeric', month: 'short', timeZone: tz }, sameYear ? {} : { year: 'numeric' })).format(d);
+    return day + ', ' + fmtTimePart(d, tz) + ' ' + tzAbbrev(d);
+  } catch (e) { return fmtDateTime(iso); }
+}
+// The wall clock of an instant in the viewer's zone, as a datetime-local value ("2027-01-02T19:00").
+function isoToZonedInput(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  try {
+    const parts = {};
+    for (const x of new Intl.DateTimeFormat('en-GB', { timeZone: resolvedTZ(), year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(d)) parts[x.type] = x.value;
+    return parts.year + '-' + parts.month + '-' + parts.day + 'T' + (parts.hour === '24' ? '00' : parts.hour) + ':' + parts.minute;
+  } catch (e) { return ''; }
+}
+// The reverse: a datetime-local value read in the viewer's zone, as an ISO instant ('' if bad).
+function zonedInputToISO(v) {
+  const mt = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(String(v || ''));
+  if (!mt) return '';
+  const want = Date.UTC(+mt[1], +mt[2] - 1, +mt[3], +mt[4], +mt[5]);
+  // the zone's offset at that moment, found by reading our guess back in the zone (twice for DST)
+  let guess = want;
+  for (let i = 0; i < 2; i++) {
+    const back = isoToZonedInput(new Date(guess).toISOString());
+    const bm = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(back);
+    if (!bm) return '';
+    const seen = Date.UTC(+bm[1], +bm[2] - 1, +bm[3], +bm[4], +bm[5]);
+    guess += want - seen;
+  }
+  return new Date(guess).toISOString();
+}
+// What this match's time looks like to the viewer, or null: { cls, txt, title }.
+function matchTimeView(m) {
+  if (!matchTimesOn() || !m || m.status === 'done' || m.status === 'bye') return null;
+  const tm = m.time;
+  if (tm && tm.ok) return { cls: 'set', txt: fmtMatchTime(tm.at), title: tm.by === 'org' ? 'Set by an organizer' : 'Agreed by both sides' };
+  if (tm) return { cls: 'wait', txt: fmtMatchTime(tm.at) + ' (waits for an organizer)', title: 'Agreed by both sides, waiting for an organizer\u2019s OK' };
+  if (m.timeProp) return { cls: 'prop', txt: 'Proposed: ' + fmtMatchTime(m.timeProp.at), title: m.timeProp.who + ' proposed this time' };
+  const w = roundWindowOfM(m);
+  if (w && w.by) return { cls: Date.parse(w.by) < Date.now() ? 'late' : 'none', txt: (Date.parse(w.by) < Date.now() ? 'Late: play by ' : 'Play by ') + fmtMatchTime(w.by), title: 'No time agreed yet' };
+  if (timeOpenM(m)) return { cls: 'none', txt: 'No time yet', title: 'The two sides agree a time on the Schedule tab' };
+  return null;
+}
+// A round's window, as a line: "Play by Sun 10 Jan, 23:59 CET", "Played from ... to ...".
+function roundWindowText(w) {
+  if (!w || (!w.from && !w.by)) return '';
+  if (w.from && w.by) return 'Played ' + fmtMatchTime(w.from) + ' to ' + fmtMatchTime(w.by);
+  return w.by ? 'Play by ' + fmtMatchTime(w.by) : 'Played from ' + fmtMatchTime(w.from);
+}
+
 // "Sat 12 Sep" for a 'YYYY-MM-DD' (the date as stored, no time zone shift)
 function dayLabelShort(ymd) {
   const p = String(ymd).split('-');
@@ -1162,7 +1242,9 @@ function matchChrono(m) {
   if (!m) return 0;
   const b = m.bracket, r = m.round || 0;
   if (b === 'sw' || b === 'ffa') return r;
-  const base = (T && T.bracketType === 'swiss') ? 10000 : 0;
+  // a Swiss, or a qualifying bracket (decision 84), is played before its playoffs
+  const base = (T && (T.bracketType === 'swiss' || elimStagedT())) ? 10000 : 0;
+  if (b === 'qw' || b === 'ql') { const at = x => (x <= 1 ? 0.5 : 2 * x - 2); return b === 'ql' ? r + 0.1 : at(r); }
   if (b === 'gf') return base + 9999;
   if (b === 'dc') return base + 9000 + r;   // deciders for a Swiss final: after the rounds, before the final
   const off = m.division ? divisionRoundOffset(m.division) : 0;
@@ -1192,8 +1274,10 @@ function typeLine(t) {
     return 'FFA ' + md + ' (' + sz + ', ' + t.ffaCfg.perMatch + ' per lobby)' + (t.maxTeams ? ' · max ' + t.maxTeams : '');
   }
   const bt = { single: 'single elim', double: 'double elim', swiss: 'swiss' }[t.bracketType];
+  const ep = elimPlanT(t);
   const swissTail = (t.bracketType === 'swiss' && stageTwoOn(t))
-    ? ' \u2192 ' + (t.stage2.type === 'double' ? 'double' : 'single') + '-elim playoffs' : '';
+    ? ' \u2192 ' + (t.stage2.type === 'double' ? 'double' : 'single') + '-elim playoffs'
+    : ep ? ' \u2192 top ' + ep.cut + ' ' + ep.type + '-elim playoffs' : '';
   const form = t.teamSize === 1 ? '1v1' : t.teamSize + 'v' + t.teamSize + ' · ' + (t.formation === 'draft' ? 'captains draft' : t.formation === 'open' ? 'open teams' : 'premade');
   // A tournament created from a named preset says so: it is the format's identity, and only a
   // global tournament director can have made it.
@@ -1294,6 +1378,50 @@ function swissStageTwoPlanned(t) {
 }
 function stageTwoLive(t) { const s = stageTwoCfgOf(t); return !!(s && s.built); }
 
+// ---- a qualifying bracket, then playoffs (decision 84) ----
+// Single or double elimination played down to the last N ('qw' / 'ql' matches), then those N start
+// again in a playoff bracket on the same page (T.stage2 with elim, the usual 'wb' / 'lb' / 'gf').
+function elimStagedT(t) {
+  const tt = (t || T) || {};
+  const s = tt.stage2;
+  return !!(s && s.elim && s.cutTo && (tt.bracketType === 'single' || tt.bracketType === 'double'));
+}
+// What the playoffs are, running or planned: { cut, type, bo, lbBo, fin, third } or null.
+function elimPlanT(t) {
+  const tt = (t || T) || {};
+  if (tt.competition === 'ffa' || (tt.bracketType !== 'single' && tt.bracketType !== 'double')) return null;
+  const s = tt.stage2;
+  if (s && s.elim) {
+    const dbl = s.type === 'double';
+    return { cut: s.cutTo, type: dbl ? 'double' : 'single',
+      bo: dbl ? ((s.wb || [])[0] || 3) : ((s.rounds || [])[0] || 3), lbBo: dbl ? ((s.lb || [])[0] || 3) : 0,
+      fin: dbl ? (s.gf || 5) : ((s.rounds || [])[(s.rounds || []).length - 1] || 5), third: !!(s.thirdPlace || thirdPlaceMatchOf(tt)), built: !!s.built };
+  }
+  if (s) return null;
+  const p = tt.plan || {};
+  if (!p.stage2 || divisionsOnT(tt)) return null;
+  const cut = [2, 4, 8, 16, 32].indexOf(parseInt(p.s2CutTo, 10)) >= 0 ? parseInt(p.s2CutTo, 10) : 4;
+  const dbl = p.s2Type === 'double' && cut >= 4;
+  return { cut, type: dbl ? 'double' : 'single', bo: p.s2Bo || 3, lbBo: dbl ? (p.s2LbBo || 3) : 0,
+    fin: dbl ? (p.s2Gf || 5) : (p.s2Final || 5), third: !dbl && !!p.s2Third, built: false };
+}
+// The qualifying bracket's shape for a field of n: its winners-side and losers-side rounds.
+function stageOneShapeT(n, isDouble, cut) {
+  const lg = x => { let r = 0; while ((1 << r) < x) r++; return r; };
+  const R = lg(Math.max(2, n)), c = lg(cut);
+  if (!isDouble) return { wbRounds: Math.max(0, R - c), lbRounds: 0 };
+  const rW = R - c + 1;
+  return { wbRounds: Math.max(0, rW), lbRounds: Math.max(0, 2 * rW - 2) };
+}
+// Is this bracket key one of the playoffs' (and not the qualifying bracket's)?
+function isPlayoffKey(b) { return b === 'wb' || b === 'lb' || b === 'gf' || b === '3p'; }
+// Is the playoff bracket double elimination (or the bracket itself, without playoffs)?
+function bracketIsDoubleT(t) {
+  const tt = (t || T) || {};
+  const ep = elimPlanT(tt);
+  return ep ? ep.type === 'double' : tt.bracketType === 'double';
+}
+
 // ---- the 3rd place match (single elimination, or single-elimination playoffs) ----
 function thirdPlaceMatchOf(t) {
   return ((t || T).matches || []).find(m => m.bracket === '3p' && !(m.division || 0)) || null;
@@ -1312,6 +1440,9 @@ function thirdPlaceTouched(m) {
 function thirdPlaceEligible(t) {
   t = t || T;
   if (!t || t.competition === 'ffa' || t.imported) return false;
+  // playoffs after a qualifying bracket (decision 84): like a Swiss stage's playoffs
+  const ep = elimPlanT(t);
+  if (ep) return ep.type === 'single' && (ep.built ? ((t.stage2 && t.stage2.field) || []).length : ep.cut) >= 4;
   if (t.bracketType === 'single') return !((t.divisions || 0) > 1) && (t.teams || []).length >= 4;
   if (t.bracketType !== 'swiss') return false;
   const s2 = stageTwoCfgOf(t);
@@ -1323,6 +1454,8 @@ function thirdPlaceOn(t) {
   t = t || T;
   if (thirdPlaceMatchOf(t)) return true;
   if (t.bracketType === 'swiss') { const s2 = stageTwoCfgOf(t); return !!(s2 ? s2.thirdPlace : (t.plan && t.plan.s2Third)); }
+  const ep = elimPlanT(t);
+  if (ep) return ep.third;
   return !!((t.cfg && t.cfg.thirdPlace) || (!t.cfg && t.plan && t.plan.thirdPlace));
 }
 // The tab the bracket lives on. A Swiss is a list of rounds - until its playoffs exist, and then
@@ -1482,6 +1615,17 @@ function planSummary(t) {
     return parts.join(' · ');
   };
   const third = thirdPlaceOn(t) ? ' \u00b7 3rd place match' : '';
+  // a qualifying bracket, then playoffs (decision 84)
+  const ep = elimPlanT(t);
+  if (ep) {
+    const q = t.bracketType === 'double'
+      ? 'Qualifying bracket: winners side Bo' + (p.wb || 3) + ', losers side Bo' + (p.lb || 3)
+      : 'Qualifying bracket Bo' + (p.early || 3);
+    const po = ep.type === 'double'
+      ? 'upper Bo' + ep.bo + ', lower Bo' + ep.lbBo + ', grand final Bo' + ep.fin
+      : 'Bo' + ep.bo + ' rounds, final Bo' + ep.fin + (ep.third ? ', 3rd place match' : '');
+    return q + ' until ' + ep.cut + ' are left \u00b7 then those ' + ep.cut + ' start again in a ' + ep.type + '-elimination playoff: ' + po;
+  }
   if (t.perRoundBo) {
     if (t.bracketType === 'single' && Array.isArray(p.roundsList) && p.roundsList.length) {
       return compactRounds(p.roundsList, 'R') + third;
